@@ -1,0 +1,276 @@
+version: "3.9"
+
+services:
+
+  #################################################
+  # PostgreSQL
+  #################################################
+
+  postgres:
+    image: postgres:17-alpine
+    container_name: aqe_postgres
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    ports:
+      - "5432:5432"
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql
+
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Redis
+  #################################################
+
+  redis:
+    image: redis:7-alpine
+    container_name: aqe_redis
+    restart: unless-stopped
+
+    ports:
+      - "6379:6379"
+
+    command: redis-server /usr/local/etc/redis/redis.conf
+
+    volumes:
+      - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Backend
+  #################################################
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: aqe_backend
+    restart: unless-stopped
+
+    env_file:
+      - .env
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+    volumes:
+      - ./backend:/app
+
+    expose:
+      - "8000"
+
+    command: >
+      sh -c "
+      alembic upgrade head &&
+      uvicorn app.main:app
+      --host 0.0.0.0
+      --port 8000
+      --reload
+      "
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Frontend
+  #################################################
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+
+    container_name: aqe_frontend
+    restart: unless-stopped
+
+    depends_on:
+      - backend
+
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+
+    expose:
+      - "5173"
+
+    environment:
+      CHOKIDAR_USEPOLLING: "true"
+
+    command: npm run dev -- --host
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Celery Worker
+  #################################################
+
+  celery_worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: aqe_worker
+
+    env_file:
+      - .env
+
+    depends_on:
+      - redis
+      - postgres
+
+    command: celery -A app.core.celery worker --loglevel=info
+
+    volumes:
+      - ./backend:/app
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Celery Beat
+  #################################################
+
+  celery_beat:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+
+    container_name: aqe_beat
+
+    env_file:
+      - .env
+
+    depends_on:
+      - redis
+
+    command: celery -A app.core.celery beat --loglevel=info
+
+    volumes:
+      - ./backend:/app
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Flower
+  #################################################
+
+  flower:
+    image: mher/flower
+    container_name: aqe_flower
+
+    command: >
+      celery
+      --broker=redis://redis:6379/0
+      flower
+
+    ports:
+      - "5555:5555"
+
+    depends_on:
+      - redis
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # pgAdmin
+  #################################################
+
+  pgadmin:
+    image: dpage/pgadmin4
+
+    container_name: aqe_pgadmin
+
+    restart: unless-stopped
+
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@aqe.com
+      PGADMIN_DEFAULT_PASSWORD: admin
+
+    ports:
+      - "5050:80"
+
+    depends_on:
+      - postgres
+
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+
+    networks:
+      - aqe_network
+
+  #################################################
+  # Nginx
+  #################################################
+
+  nginx:
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+
+    container_name: aqe_nginx
+
+    restart: unless-stopped
+
+    depends_on:
+      - frontend
+      - backend
+
+    ports:
+      - "80:80"
+
+    networks:
+      - aqe_network
+
+#################################################
+# Volumes
+#################################################
+
+volumes:
+
+  postgres_data:
+
+  redis_data:
+
+  pgadmin_data:
+
+#################################################
+# Network
+#################################################
+
+networks:
+
+  aqe_network:
+    driver: bridge
