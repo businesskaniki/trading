@@ -13,9 +13,9 @@ from sqlalchemy.orm import relationship
 from app.core.constants import OrderSide
 from app.core.constants import OrderStatus
 from app.core.constants import OrderType
-from app.database.models.base import Base
-from app.database.models.base import TimestampMixin
-from app.database.models.base import UUIDMixin
+from app.database.base import Base
+from app.database.base import TimestampMixin
+from app.database.base import UUIDMixin
 
 
 class Order(UUIDMixin, TimestampMixin, Base):

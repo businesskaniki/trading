@@ -10,7 +10,10 @@ from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 
 from app.database.base import Base
-from app.database.models.base import TimestampMixin, UUIDMixin
+from app.database.base import Base
+from app.database.base import TimestampMixin
+from app.database.base import UUIDMixin
+
 
 from app.core.constants import AssetClass
 

@@ -14,9 +14,10 @@ from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 
 from app.core.constants import RiskLevel
-from app.database.models.base import Base
-from app.database.models.base import TimestampMixin
-from app.database.models.base import UUIDMixin
+from app.database.base import Base
+from app.database.base import TimestampMixin
+from app.database.base import UUIDMixin
+
 
 
 class RiskSnapshot(UUIDMixin, TimestampMixin, Base):

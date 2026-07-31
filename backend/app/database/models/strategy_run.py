@@ -15,9 +15,10 @@ from sqlalchemy.orm import relationship
 
 from app.core.constants import StrategyRunStatus
 from app.core.constants import StrategyRunType
-from app.database.models.base import Base
-from app.database.models.base import TimestampMixin
-from app.database.models.base import UUIDMixin
+from app.database.base import Base
+from app.database.base import TimestampMixin
+from app.database.base import UUIDMixin
+
 
 
 class StrategyRun(UUIDMixin, TimestampMixin, Base):

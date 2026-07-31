@@ -12,9 +12,10 @@ from sqlalchemy.orm import relationship
 
 from app.core.constants import AccountStatus
 from app.core.constants import BrokerType
-from app.database.models.base import Base
-from app.database.models.base import TimestampMixin
-from app.database.models.base import UUIDMixin
+from app.database.base import Base
+from app.database.base import TimestampMixin
+from app.database.base import UUIDMixin
+
 
 
 class TradingAccount(UUIDMixin, TimestampMixin, Base):

@@ -33,7 +33,7 @@ target_metadata = Base.metadata
 
 def run_migrations_offline():
     context.configure(
-        url=Settings.DATABASE_URL,
+        url=settings.DATABASE_URL,
         target_metadata=target_metadata,
         literal_binds=True,
         compare_type=True,
