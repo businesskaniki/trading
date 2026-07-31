@@ -3,11 +3,13 @@ from decimal import Decimal
 
 from sqlalchemy import DateTime
 from sqlalchemy import Enum
+from sqlalchemy import ForeignKey
 from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import JSON
 from sqlalchemy import Numeric
 from sqlalchemy import String
+from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
@@ -43,6 +45,16 @@ class StrategyRun(UUIDMixin, TimestampMixin, Base):
     # ==========================================================
     # Strategy Information
     # ==========================================================
+
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id"),
+        nullable=False,
+    )
+
+    user = relationship(
+        "User",
+        back_populates="strategy_runs",
+    )
 
     strategy_name: Mapped[str] = mapped_column(
         String(100),
