@@ -181,14 +181,15 @@ class TradingAccountRepository:
     ) -> list[TradingAccount]:
 
         result = await self.db.execute(
-            select(TradingAccount)
-            .where(
-                TradingAccount.user_id == user_id,
-                TradingAccount.active.is_(True),
-            )
-            .order_by(
-                TradingAccount.account_name
-            )
+        select(TradingAccount)
+        .where(
+            TradingAccount.user_id == user_id,
+            TradingAccount.active.is_(True),
+        )
+        .order_by(
+            TradingAccount.account_name
+        )
+        )
 
         return list(result.scalars().all())
 
