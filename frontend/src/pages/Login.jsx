@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useDispatch, useSelector } from 'react-redux'
 import { login } from '../features/auth/authSlice'
+import { Paper, TextInput, PasswordInput, Button, Title, Text, Stack, Alert } from '@mantine/core'
 
 export default function Login() {
   const [email, setEmail] = useState('')
@@ -25,23 +26,27 @@ export default function Login() {
   }
 
   return (
-    <div style={{ maxWidth: 420 }}>
-      <h2>Login</h2>
-      <form onSubmit={handleSubmit}>
-        <label>
-          Email
-          <input value={email} onChange={(e) => setEmail(e.target.value)} />
-        </label>
-        <br />
-        <label>
-          Password
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-        </label>
-        <br />
-        <button type="submit">Login</button>
-        {auth.status === 'loading' && <div>Logging in...</div>}
-        {auth.error && <div style={{ color: 'red' }}>{JSON.stringify(auth.error)}</div>}
-      </form>
-    </div>
+    <Paper radius="md" p="lg" withBorder style={{ maxWidth: 480 }}>
+      <Stack spacing="md">
+        <Title order={2}>Sign in</Title>
+        <Text color="dimmed" size="sm">
+          Sign in to your account to access your trading dashboard
+        </Text>
+
+        {auth.error && (
+          <Alert title="Login failed" color="red">
+            {typeof auth.error === 'string' ? auth.error : JSON.stringify(auth.error)}
+          </Alert>
+        )}
+
+        <form onSubmit={handleSubmit}>
+          <Stack>
+            <TextInput label="Email" value={email} onChange={(e) => setEmail(e.target.value)} required />
+            <PasswordInput label="Password" value={password} onChange={(e) => setPassword(e.target.value)} required />
+            <Button type="submit" loading={auth.status === 'loading'}>Login</Button>
+          </Stack>
+        </form>
+      </Stack>
+    </Paper>
   )
 }
