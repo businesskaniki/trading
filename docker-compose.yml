@@ -151,7 +151,7 @@ services:
       redis:
         condition: service_healthy
 
-    command: celery -A app.core.celery worker --loglevel=info
+    command: python -m celery -A app.core.celery worker --loglevel=info
 
     volumes:
       - ./backend:/app
@@ -179,7 +179,7 @@ services:
       redis:
         condition: service_healthy
 
-    command: celery -A app.core.celery beat --loglevel=info
+    command: python -m celery -A app.core.celery beat --loglevel=info
 
     volumes:
       - ./backend:/app

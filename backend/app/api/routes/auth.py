@@ -1,76 +1,252 @@
-from datetime import timedelta
-
 from fastapi import APIRouter, Depends, HTTPException, status
-from fastapi.security import OAuth2PasswordRequestForm
 
 from app.api.dependencies import get_user_service
 from app.core.security import (
     create_access_token,
     create_refresh_token,
-    verify_token,
     oauth2_scheme,
+    verify_token,
 )
-from app.schemas.user import UserCreate
+from app.schemas.auth import (
+    LoginRequest,
+    RefreshTokenRequest,
+    TokenResponse,
+    MessageResponse,
+)
+from app.schemas.email_verification import (
+    VerifyEmailRequest,
+    ResendOTPRequest,
+)
+from app.schemas.user import UserCreate, UserResponse
+from app.schemas.password_reset import (
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
+)
 
-router = APIRouter(prefix="/auth", tags=["auth"])
+router = APIRouter(
+    prefix="/auth",
+    tags=["Authentication"],
+)
 
 
-@router.post("/register", status_code=status.HTTP_201_CREATED)
-async def register_user(payload: UserCreate, service=Depends(get_user_service)):
+# ==========================================================
+# Register
+# ==========================================================
+
+
+@router.post(
+    "/register",
+    response_model=MessageResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+async def register_user(
+    payload: UserCreate,
+    service=Depends(get_user_service),
+):
     try:
-        user = await service.create_user(payload)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        await service.create_user(payload)
 
-    access_token = create_access_token(subject=str(user.id))
-    refresh_token = create_refresh_token(subject=str(user.id))
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-    }
+        return MessageResponse(
+            message="Registration successful. Please check your email for the verification code."
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+# ==========================================================
+# Verify Email
+# ==========================================================
+
+
+@router.post(
+    "/verify-email",
+    response_model=MessageResponse,
+)
+async def verify_email(
+    payload: VerifyEmailRequest,
+    service=Depends(get_user_service),
+):
+    try:
+        await service.verify_email(
+            email=payload.email,
+            otp=payload.otp,
+        )
+
+        return MessageResponse(message="Email verified successfully.")
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+# ==========================================================
+# Resend OTP
+# ==========================================================
+
+
+@router.post(
+    "/resend-otp",
+    response_model=MessageResponse,
+)
+async def resend_otp(
+    payload: ResendOTPRequest,
+    service=Depends(get_user_service),
+):
+    try:
+        await service.resend_verification_code(
+            payload.email,
+        )
+
+        return MessageResponse(message="Verification code sent successfully.")
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+# ==========================================================
+# Login
+# ==========================================================
 
 
 @router.post("/login")
 async def login(
-    form_data: OAuth2PasswordRequestForm = Depends(),
+    payload: LoginRequest,
     service=Depends(get_user_service),
 ):
-    user = await service.authenticate(form_data.username, form_data.password)
+    try:
+        user = await service.authenticate(
+            payload.email,
+            payload.password,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
     if not user:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid credentials",
-            headers={"WWW-Authenticate": "Bearer"},
+            detail="Invalid email or password.",
         )
 
-    access_token = create_access_token(subject=str(user.id))
-    refresh_token = create_refresh_token(subject=str(user.id))
+    access_token = create_access_token(
+        subject=str(user.id),
+    )
+
+    refresh_token = create_refresh_token(
+        subject=str(user.id),
+    )
+
     return {
         "access_token": access_token,
         "refresh_token": refresh_token,
         "token_type": "bearer",
+        "user": UserResponse.model_validate(user),
     }
 
 
-@router.post("/refresh")
+# ==========================================================
+# Refresh Token
+# ==========================================================
+
+
+@router.post(
+    "/refresh",
+    response_model=TokenResponse,
+)
 async def refresh_token(
-    token: str,
+    payload: RefreshTokenRequest,
     service=Depends(get_user_service),
 ):
     try:
-        payload = verify_token(token, expected_type="refresh")
+        token_data = verify_token(
+            payload.refresh_token,
+            expected_type="refresh",
+        )
+
+        user = await service.get_user(token_data["sub"])
+
     except ValueError as exc:
-        raise HTTPException(status_code=401, detail=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail=str(exc),
+        )
 
-    user = await service.get_user(payload["sub"])
-    access_token = create_access_token(subject=str(user.id))
-    return {
-        "access_token": access_token,
-        "token_type": "bearer",
-    }
+    return TokenResponse(
+        access_token=create_access_token(
+            subject=str(user.id),
+        ),
+        token_type="bearer",
+    )
 
 
-@router.post("/logout")
-async def logout(token: str = Depends(oauth2_scheme)):
-    return {"message": "logout successful"}
+# ==========================================================
+# Logout
+# ==========================================================
+
+
+@router.post(
+    "/logout",
+    response_model=MessageResponse,
+)
+async def logout(
+    token: str = Depends(oauth2_scheme),
+):
+    return MessageResponse(message="Logout successful.")
+
+
+@router.post(
+    "/forgot-password",
+    response_model=MessageResponse,
+)
+async def forgot_password(
+    payload: ForgotPasswordRequest,
+    service=Depends(get_user_service),
+):
+    try:
+        await service.forgot_password(
+            payload.email,
+        )
+
+        return MessageResponse(message="Password reset code sent successfully.")
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )
+
+
+@router.post(
+    "/reset-password",
+    response_model=MessageResponse,
+)
+async def reset_password(
+    payload: ResetPasswordRequest,
+    service=Depends(get_user_service),
+):
+    try:
+        await service.reset_password(
+            email=payload.email,
+            otp=payload.otp,
+            new_password=payload.new_password,
+        )
+
+        return MessageResponse(message="Password reset successfully.")
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        )

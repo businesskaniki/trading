@@ -56,5 +56,25 @@ class User(UUIDMixin, TimestampMixin, Base):
         lazy="selectin",
     )
 
+    email_verifications = relationship(
+        "EmailVerification",
+        back_populates="user",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    email_verified: Mapped[bool] = mapped_column(
+        Boolean,
+        default=False,
+        nullable=False,
+    )
+
+    password_reset = relationship(
+        "PasswordReset",
+        back_populates="user",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
     def __repr__(self) -> str:
         return f"<User(email={self.email}, active={self.is_active})>"
