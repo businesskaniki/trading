@@ -35,6 +35,9 @@ from app.services.symbol_service import SymbolService
 from app.services.trade_service import TradeService
 from app.services.trading_account_service import TradingAccountService
 from app.services.risk_snapshot_service import RiskSnapshotService
+from app.broker.factory import get_broker_adapter
+from app.broker.broker_manager import BrokerManager
+from app.services.execution_service import ExecutionService
 
 
 # ==========================================================
@@ -187,4 +190,31 @@ def get_risk_snapshot_service(
 ):
     return RiskSnapshotService(
         RiskSnapshotRepository(db),
+    )
+
+# ==========================================================
+# Broker
+# ==========================================================
+
+def get_broker_manager() -> BrokerManager:
+    """
+    Return the broker manager used by the trading engine.
+
+    Currently configured to use MetaTrader 5.
+    """
+
+    adapter = get_broker_adapter("mt5")
+
+    return BrokerManager(adapter)
+
+# ==========================================================
+# Execution Service
+# ==========================================================
+
+def get_execution_service(
+    broker: BrokerManager = Depends(get_broker_manager),
+) -> ExecutionService:
+
+    return ExecutionService(
+        broker=broker
     )

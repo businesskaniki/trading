@@ -10,6 +10,8 @@ from app.api.routes import (
     symbols,
     trading_accounts,
     trades,
+    broker,
+    execution,
 )
 
 api_router = APIRouter()
@@ -23,3 +25,5 @@ api_router.include_router(trades.router)
 api_router.include_router(strategy_runs.router)
 api_router.include_router(performance.router)
 api_router.include_router(risk_snapshots.router)
+api_router.include_router(broker.router)
+api_router.include_router(execution.router)

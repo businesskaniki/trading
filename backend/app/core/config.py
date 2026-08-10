@@ -53,7 +53,8 @@ class Settings(BaseSettings):
     SMTP_FROM_EMAIL: str
 
     SMTP_USE_TLS: bool = True
-
+    MT5_BRIDGE_URL: str = "http://host.docker.internal:9000"
+    
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,
