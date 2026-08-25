@@ -2,26 +2,27 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from app.core.constants import OrderSide
-from app.core.constants import OrderStatus
-from app.core.constants import OrderType
+from app.core.constants import (
+    OrderSide,
+    OrderStatus,
+    OrderType,
+)
 
 
 # ==========================================================
-# Base Schema
+# BASE SCHEMA
 # ==========================================================
 
 class OrderBase(BaseModel):
     """
-    Shared Order fields.
+    Shared fields used by Order schemas.
     """
 
     strategy: str = Field(
         ...,
+        min_length=1,
         max_length=100,
     )
 
@@ -38,40 +39,93 @@ class OrderBase(BaseModel):
 
     side: OrderSide
 
-    volume: Decimal
+    volume: Decimal = Field(
+        ...,
+        gt=0,
+    )
 
-    requested_price: Decimal
+    requested_price: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
-    executed_price: Decimal | None = None
+    stop_loss: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
-    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
-    take_profit: Decimal | None = None
+    # ======================================================
+    # ORDER VALIDATION
+    # ======================================================
+
+    @model_validator(mode="after")
+    def validate_order(self):
+        """
+        Validate fields according to order type.
+        """
+
+        # --------------------------------------------------
+        # MARKET
+        # --------------------------------------------------
+
+        if self.order_type == OrderType.MARKET:
+
+            # A market order does not require a requested
+            # price. The execution layer obtains the
+            # appropriate market price from the broker.
+
+            return self
+
+        # --------------------------------------------------
+        # LIMIT / STOP
+        # --------------------------------------------------
+
+        if self.order_type in {
+            OrderType.LIMIT,
+            OrderType.STOP,
+        }:
+
+            if self.requested_price is None:
+                raise ValueError(
+                    "requested_price is required for "
+                    "LIMIT and STOP orders."
+                )
+
+        return self
 
 
 # ==========================================================
-# Create Schema
+# CREATE
 # ==========================================================
 
 class OrderCreate(OrderBase):
     """
-    Payload used when creating an order.
+    Payload used when creating a new AQE order.
+
+    Broker-generated fields such as ticket, execution price,
+    status, and timestamps are intentionally excluded.
     """
 
     pass
 
 
 # ==========================================================
-# Update Schema
+# UPDATE
 # ==========================================================
 
 class OrderUpdate(BaseModel):
     """
-    Payload used when updating an order.
+    Payload used when updating an existing order.
     """
 
     strategy: str | None = Field(
         default=None,
+        min_length=1,
         max_length=100,
     )
 
@@ -84,33 +138,45 @@ class OrderUpdate(BaseModel):
 
     side: OrderSide | None = None
 
-    volume: Decimal | None = None
+    volume: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
-    requested_price: Decimal | None = None
+    requested_price: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
-    executed_price: Decimal | None = None
+    stop_loss: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
-    stop_loss: Decimal | None = None
-
-    take_profit: Decimal | None = None
-
-    status: OrderStatus | None = None
+    take_profit: Decimal | None = Field(
+        default=None,
+        gt=0,
+    )
 
 
 # ==========================================================
-# Response Schema
+# RESPONSE
 # ==========================================================
 
 class OrderResponse(OrderBase):
     """
-    Returned to API clients.
+    Order representation returned by the API.
     """
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True
+    )
 
     id: UUID
 
     ticket: int | None
+
+    executed_price: Decimal | None
 
     status: OrderStatus
 

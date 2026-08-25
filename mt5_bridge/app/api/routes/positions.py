@@ -2,7 +2,13 @@ from typing import List
 
 from fastapi import APIRouter, HTTPException
 
-from app.schemas.position import PositionResponse
+from app.schemas.position import (
+    PositionResponse,
+    PositionCloseResponse,
+    PositionModifyRequest,
+    PositionModifyResponse,
+)
+
 from app.services.position_service import PositionService
 
 
@@ -42,6 +48,7 @@ def get_position(ticket: int):
 
 @router.post(
     "/{ticket}/close",
+    response_model=PositionCloseResponse,
 )
 def close_position(ticket: int):
 
@@ -55,7 +62,52 @@ def close_position(ticket: int):
                 detail="Position not found",
             )
 
-        return result
+        return {
+            "ticket": ticket,
+            "retcode": result["retcode"],
+            "comment": result["comment"],
+            "order": result["order"],
+            "deal": result["deal"],
+        }
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+@router.patch(
+    "/{ticket}",
+)
+def modify_position(
+    ticket: int,
+    request: PositionModifyRequest,
+):
+
+    try:
+
+        result = service.modify_position(
+            ticket=ticket,
+            sl=request.sl,
+            tp=request.tp,
+        )
+
+        if result is None:
+
+            raise HTTPException(
+                status_code=404,
+                detail="Position not found",
+            )
+
+        return {
+            "ticket": ticket,
+            "retcode": result["retcode"],
+            "comment": result["comment"],
+        }
 
     except HTTPException:
         raise

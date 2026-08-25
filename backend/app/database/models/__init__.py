@@ -9,3 +9,4 @@ from .trading_account import TradingAccount
 from .user import User
 from .email_verification import EmailVerification
 from .password_reset import PasswordReset
+from app.risk.models import RiskProfile

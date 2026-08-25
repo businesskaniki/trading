@@ -14,10 +14,9 @@ import {
   Checkbox,
 } from "@mantine/core";
 
-import { IconAlertCircle } from "@tabler/icons-react";
+import { IconAlertCircle, IconCircleCheck } from "@tabler/icons-react";
 
 import { loginUser } from "../../redux/auth/authThunks";
-import { clearError } from "../../redux/auth/authSlice";
 
 import "../../css/login.css";
 
@@ -25,7 +24,7 @@ const Login = () => {
   const dispatch = useDispatch();
   const navigate = useNavigate();
 
-  const { loading, error, isAuthenticated } = useSelector(
+  const { loading, error, success, isAuthenticated } = useSelector(
     (state) => state.auth,
   );
 
@@ -35,15 +34,23 @@ const Login = () => {
     remember: false,
   });
 
-  useEffect(() => {
-    if (isAuthenticated) {
-      navigate("/dashboard");
-    }
+  // ==========================================================
+  // Handle authentication success
+  // ==========================================================
 
-    return () => {
-      dispatch(clearError());
-    };
-  }, [isAuthenticated, navigate, dispatch]);
+  useEffect(() => {
+    if (isAuthenticated && success) {
+      navigate("/dashboard", { replace: true });
+    }
+  }, [isAuthenticated, success, navigate]);
+
+  // ==========================================================
+  // Clear messages when leaving page
+  // ==========================================================
+
+  // ==========================================================
+  // Handle input
+  // ==========================================================
 
   const handleChange = (e) => {
     const { name, value, type, checked } = e.target;
@@ -54,6 +61,10 @@ const Login = () => {
     }));
   };
 
+  // ==========================================================
+  // Login
+  // ==========================================================
+
   const handleSubmit = (e) => {
     e.preventDefault();
 
@@ -63,6 +74,7 @@ const Login = () => {
         password: formData.password,
       }),
     );
+    console.log(error);
   };
 
   return (
@@ -76,9 +88,35 @@ const Login = () => {
           Sign in to your account
         </Text>
 
+        {/* ==================================================
+            ERROR
+        ================================================== */}
+
         {error && (
-          <Alert color="red" icon={<IconAlertCircle size={18} />} mb="md">
-            {typeof error === "string" ? error : JSON.stringify(error)}
+          <Alert
+            color="red"
+            icon={<IconAlertCircle size={18} />}
+            title="Login failed"
+            mb="md"
+          >
+            {typeof error === "string"
+              ? error
+              : error?.detail || error?.message || "Unable to login."}
+          </Alert>
+        )}
+
+        {/* ==================================================
+            SUCCESS
+        ================================================== */}
+
+        {success && (
+          <Alert
+            color="green"
+            icon={<IconCircleCheck size={18} />}
+            title="Success"
+            mb="md"
+          >
+            {success}
           </Alert>
         )}
 
@@ -88,6 +126,7 @@ const Login = () => {
               label="Email"
               placeholder="you@example.com"
               name="email"
+              type="email"
               value={formData.email}
               onChange={handleChange}
               required
@@ -115,8 +154,14 @@ const Login = () => {
               </Link>
             </div>
 
-            <Button type="submit" loading={loading} fullWidth mt="md">
-              Login
+            <Button
+              type="submit"
+              loading={loading}
+              disabled={loading}
+              fullWidth
+              mt="md"
+            >
+              {loading ? "Signing in..." : "Login"}
             </Button>
           </Stack>
         </form>

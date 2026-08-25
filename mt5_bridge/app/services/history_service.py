@@ -8,41 +8,118 @@ class HistoryService:
     def __init__(self):
         self.broker = HistoryBroker()
 
-    def orders(
+    # ==========================================================
+    # ORDER HISTORY
+    # ==========================================================
+
+    def history_orders(
         self,
-        date_from: datetime,
-        date_to: datetime,
+        start: datetime,
+        end: datetime,
     ):
 
         orders = self.broker.orders(
-            date_from,
-            date_to,
+            start,
+            end,
         )
 
         if orders is None:
             return []
 
         return [
-            order._asdict()
+            {
+                "ticket": order.ticket,
+                "symbol": order.symbol,
+                "volume": order.volume_initial,
+                "price_open": order.price_open,
+                "price_current": order.price_current,
+                "sl": order.sl,
+                "tp": order.tp,
+                "state": order.state,
+                "comment": order.comment,
+                "time_setup": order.time_setup,
+            }
             for order in orders
         ]
 
-    def deals(
+    # ==========================================================
+    # DEAL HISTORY
+    # ==========================================================
+
+    def history_deals(
         self,
-        date_from: datetime,
-        date_to: datetime,
+        start: datetime,
+        end: datetime,
     ):
 
         deals = self.broker.deals(
-            date_from,
-            date_to,
+            start,
+            end,
         )
 
         if deals is None:
             return []
 
         return [
-            deal._asdict()
+            {
+                "ticket": deal.ticket,
+                "order": deal.order,
+                "position_id": getattr(
+                    deal,
+                    "position_id",
+                    None,
+                ),
+                "symbol": deal.symbol,
+                "volume": deal.volume,
+                "price": deal.price,
+                "profit": deal.profit,
+                "commission": deal.commission,
+                "swap": deal.swap,
+                "comment": deal.comment,
+                "time": deal.time,
+                "entry": getattr(
+                    deal,
+                    "entry",
+                    None,
+                ),
+            }
             for deal in deals
         ]
-    
+
+    def deals_by_position(
+        self,
+        position_id: int,
+    ):
+
+        deals = self.broker.deals_by_position(
+            position_id
+        )
+
+        if deals is None:
+            return []
+
+        return [
+            {
+                "ticket": deal.ticket,
+                "order": deal.order,
+                "position_id": getattr(
+                    deal,
+                    "position_id",
+                    None,
+                ),
+                "symbol": deal.symbol,
+                "volume": deal.volume,
+                "price": deal.price,
+                "profit": deal.profit,
+                "commission": deal.commission,
+                "swap": deal.swap,
+                "comment": deal.comment,
+                "time": deal.time,
+                "entry": getattr(
+                    deal,
+                    "entry",
+                    None,
+                ),
+            }
+            for deal in deals
+        ]

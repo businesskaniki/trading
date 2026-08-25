@@ -18,10 +18,7 @@ class PositionService:
             for position in positions
         ]
 
-    def get_position(
-        self,
-        ticket: int,
-    ):
+    def get_position(self, ticket: int):
 
         positions = self.broker.position(ticket)
 
@@ -30,10 +27,7 @@ class PositionService:
 
         return positions[0]._asdict()
 
-    def by_symbol(
-        self,
-        symbol: str,
-    ):
+    def by_symbol(self, symbol: str):
 
         positions = self.broker.by_symbol(symbol)
 
@@ -45,9 +39,21 @@ class PositionService:
             for position in positions
         ]
 
-    def close_position(
-        self,
-        ticket: int,
-    ):
+    def close_position(self, ticket: int):
 
         return self.broker.close(ticket)
+
+    def modify_position(
+        self,
+        ticket: int,
+        sl: float | None = None,
+        tp: float | None = None,
+    ):
+
+        return self.broker.modify(
+            ticket=ticket,
+            sl=sl,
+            tp=tp,
+        )
+
+    

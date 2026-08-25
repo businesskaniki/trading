@@ -1,37 +1,37 @@
 .login-page {
-    min-height: 100vh;
-    width: 100%;
-    display: flex;
-    justify-content: center;
-    align-items: center;
-    background: #0f172a;
-    padding: 2rem;
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  background: #0f172a;
+  padding: 2rem;
 }
 
 .login-card {
-    width: 100%;
-    max-width: 430px;
-    background: white;
-    border-radius: 12px;
-    padding: 2rem;
+  width: 100%;
+  max-width: 430px;
+  background: white;
+  border-radius: 12px;
+  padding: 2rem;
 }
 
-.login-options{
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
-    margin-top:-6px;
+.login-options {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: -6px;
 }
 
-.forgot-password-link{
-    font-size:14px;
-    text-decoration:none;
-    color:#2563EB;
-    font-weight:600;
-    transition:.2s;
+.forgot-password-link {
+  font-size: 14px;
+  text-decoration: none;
+  color: #2563eb;
+  font-weight: 600;
+  transition: 0.2s;
 }
 
-.forgot-password-link:hover{
-    color:#1D4ED8;
-    text-decoration:underline;
+.forgot-password-link:hover {
+  color: #1d4ed8;
+  text-decoration: underline;
 }

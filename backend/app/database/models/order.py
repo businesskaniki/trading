@@ -1,26 +1,19 @@
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import Enum
-from sqlalchemy import ForeignKey
-from sqlalchemy import Index
-from sqlalchemy import Numeric
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped
-from sqlalchemy.orm import mapped_column
-from sqlalchemy.orm import relationship
+from sqlalchemy import Enum, ForeignKey, Index, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.constants import OrderSide
-from app.core.constants import OrderStatus
-from app.core.constants import OrderType
-from app.database.base import Base
-from app.database.base import TimestampMixin
-from app.database.base import UUIDMixin
+from app.core.constants import OrderSide, OrderStatus, OrderType
+from app.database.base import Base, TimestampMixin, UUIDMixin
 
 
 class Order(UUIDMixin, TimestampMixin, Base):
     """
-    Represents an order submitted to a broker.
+    Represents an order submitted through AQE.
+
+    The Order model stores the persistent AQE representation
+    of an order and its broker execution information.
     """
 
     __tablename__ = "orders"
@@ -29,16 +22,22 @@ class Order(UUIDMixin, TimestampMixin, Base):
         Index("ix_orders_ticket", "ticket"),
         Index("ix_orders_status", "status"),
         Index("ix_orders_strategy", "strategy"),
+        Index("ix_orders_account_id", "account_id"),
+        Index("ix_orders_symbol_id", "symbol_id"),
     )
 
-    # ------------------------------------------------------------------
-    # Broker Information
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # BROKER INFORMATION
+    # ==========================================================
 
     ticket: Mapped[int | None] = mapped_column(
-        unique=True,
         nullable=True,
+        unique=True,
     )
+
+    # ==========================================================
+    # ORDER OWNERSHIP / SOURCE
+    # ==========================================================
 
     strategy: Mapped[str] = mapped_column(
         String(100),
@@ -50,9 +49,9 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=True,
     )
 
-    # ------------------------------------------------------------------
-    # Relationships
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # ACCOUNT / SYMBOL
+    # ==========================================================
 
     account_id: Mapped[UUID] = mapped_column(
         ForeignKey("trading_accounts.id"),
@@ -80,17 +79,23 @@ class Order(UUIDMixin, TimestampMixin, Base):
         uselist=False,
     )
 
-    # ------------------------------------------------------------------
-    # Order Details
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # ORDER DETAILS
+    # ==========================================================
 
     order_type: Mapped[OrderType] = mapped_column(
-        Enum(OrderType, name="order_type_enum"),
+        Enum(
+            OrderType,
+            name="order_type_enum",
+        ),
         nullable=False,
     )
 
     side: Mapped[OrderSide] = mapped_column(
-        Enum(OrderSide, name="order_side_enum"),
+        Enum(
+            OrderSide,
+            name="order_side_enum",
+        ),
         nullable=False,
     )
 
@@ -99,15 +104,33 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    requested_price: Mapped[Decimal] = mapped_column(
+    # ----------------------------------------------------------
+    # Requested price
+    # ----------------------------------------------------------
+    #
+    # MARKET orders do not necessarily have a requested price.
+    #
+    # LIMIT / STOP orders require one.
+    #
+    # ----------------------------------------------------------
+
+    requested_price: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8),
-        nullable=False,
+        nullable=True,
     )
+
+    # ----------------------------------------------------------
+    # Actual broker execution price
+    # ----------------------------------------------------------
 
     executed_price: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8),
         nullable=True,
     )
+
+    # ----------------------------------------------------------
+    # Risk parameters
+    # ----------------------------------------------------------
 
     stop_loss: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8),
@@ -119,25 +142,30 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=True,
     )
 
-    # ------------------------------------------------------------------
-    # Status
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # STATUS
+    # ==========================================================
 
     status: Mapped[OrderStatus] = mapped_column(
-        Enum(OrderStatus, name="order_status_enum"),
+        Enum(
+            OrderStatus,
+            name="order_status_enum",
+        ),
         default=OrderStatus.CREATED,
         nullable=False,
     )
 
-    # ------------------------------------------------------------------
-    # Representation
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # REPRESENTATION
+    # ==========================================================
 
     def __repr__(self) -> str:
         return (
             f"<Order("
+            f"id={self.id}, "
             f"ticket={self.ticket}, "
             f"symbol={self.symbol_id}, "
             f"side={self.side}, "
+            f"volume={self.volume}, "
             f"status={self.status})>"
         )

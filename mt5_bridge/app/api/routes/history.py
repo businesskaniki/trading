@@ -4,16 +4,18 @@ from typing import List
 from fastapi import APIRouter
 
 from app.schemas.history import (
-    DealResponse,
     HistoryOrderResponse,
+    DealResponse,
 )
 
 from app.services.history_service import HistoryService
+
 
 router = APIRouter(
     prefix="/history",
     tags=["History"],
 )
+
 
 service = HistoryService()
 
@@ -27,7 +29,7 @@ def history_orders(
     end: datetime,
 ):
 
-    return service.orders(
+    return service.history_orders(
         start,
         end,
     )
@@ -42,7 +44,18 @@ def history_deals(
     end: datetime,
 ):
 
-    return service.deals(
+    return service.history_deals(
         start,
         end,
+    )
+
+@router.get(
+    "/deals/position/{position_id}",
+    response_model=List[DealResponse],
+)
+def deals_by_position(
+    position_id: int,
+):
+    return service.deals_by_position(
+        position_id
     )

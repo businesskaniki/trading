@@ -8,7 +8,10 @@ from app.core.security import (
     verify_token,
 )
 
-# Repositories
+# ==========================================================
+# REPOSITORIES
+# ==========================================================
+
 from app.repositories.user_repository import UserRepository
 from app.repositories.email_verification_repository import (
     EmailVerificationRepository,
@@ -19,45 +22,76 @@ from app.repositories.position_repository import PositionRepository
 from app.repositories.strategy_run_repository import StrategyRunRepository
 from app.repositories.symbol_repository import SymbolRepository
 from app.repositories.trade_repository import TradeRepository
-from app.repositories.trading_account_repository import TradingAccountRepository
+from app.repositories.trading_account_repository import (
+    TradingAccountRepository,
+)
 from app.repositories.snapshot_repository import RiskSnapshotRepository
-from app.repositories.password_reset_repository import PasswordResetRepository
+from app.repositories.password_reset_repository import (
+    PasswordResetRepository,
+)
 
+from app.repositories.analytics_repository import (
+    AnalyticsRepository,
+)
+from app.services.analytics_service import (
+    AnalyticsService,
+)
 
-# Services
+from app.repositories.analytics_repository import AnalyticsRepository
+from app.services.analytics_service import AnalyticsService
+# ==========================================================
+# SERVICES
+# ==========================================================
+
 from app.services.user_service import UserService
 from app.services.email_service import EmailService
 from app.services.order_service import OrderService
+from app.services.order_execution_service import OrderExecutionService
 from app.services.performance_service import PerformanceService
 from app.services.position_service import PositionService
+from app.services.position_sync_service import PositionSyncService
 from app.services.strategy_run_service import StrategyRunService
 from app.services.symbol_service import SymbolService
 from app.services.trade_service import TradeService
 from app.services.trading_account_service import TradingAccountService
 from app.services.risk_snapshot_service import RiskSnapshotService
-from app.broker.factory import get_broker_adapter
-from app.broker.broker_manager import BrokerManager
 from app.services.execution_service import ExecutionService
 
+# ==========================================================
+# BROKER
+# ==========================================================
+
+from app.broker.factory import get_broker_adapter
+from app.broker.broker_manager import BrokerManager
+
+from app.risk.repository import RiskProfileRepository
+from app.risk.service import RiskService
 
 # ==========================================================
-# Database
+# DATABASE
 # ==========================================================
 
 def get_db_session(
     db: AsyncSession = Depends(get_db),
 ) -> AsyncSession:
+    """
+    Return the current database session.
+    """
     return db
 
 
 # ==========================================================
-# Authentication
+# AUTHENTICATION
 # ==========================================================
 
 async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ):
+    """
+    Validate the access token and return the current user.
+    """
+
     try:
         payload = verify_token(
             token,
@@ -68,23 +102,29 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail=str(exc),
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
+        ) from exc
 
-    user = await UserRepository(db).get_by_id(payload["sub"])
+    user = await UserRepository(db).get_by_id(
+        payload["sub"]
+    )
 
     if not user or not user.is_active:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid user",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers={
+                "WWW-Authenticate": "Bearer"
+            },
         )
 
     return user
 
 
 # ==========================================================
-# User Service
+# USER SERVICE
 # ==========================================================
 
 def get_user_service(
@@ -92,73 +132,127 @@ def get_user_service(
 ):
     return UserService(
         repository=UserRepository(db),
-        email_verification_repository=EmailVerificationRepository(db),
-        password_reset_repository=PasswordResetRepository(db),
+        email_verification_repository=EmailVerificationRepository(
+            db
+        ),
+        password_reset_repository=PasswordResetRepository(
+            db
+        ),
         email_service=EmailService(),
     )
 
+
 # ==========================================================
-# Symbol Service
+# SYMBOL REPOSITORY
+# ==========================================================
+
+def get_symbol_repository(
+    db: AsyncSession = Depends(get_db),
+) -> SymbolRepository:
+    return SymbolRepository(db)
+
+
+# ==========================================================
+# SYMBOL SERVICE
 # ==========================================================
 
 def get_symbol_service(
-    db: AsyncSession = Depends(get_db),
+    symbol_repository: SymbolRepository = Depends(
+        get_symbol_repository
+    ),
 ):
     return SymbolService(
-        SymbolRepository(db),
+        symbol_repository,
     )
 
 
 # ==========================================================
-# Trading Account Service
+# TRADING ACCOUNT REPOSITORY
+# ==========================================================
+
+def get_trading_account_repository(
+    db: AsyncSession = Depends(get_db),
+) -> TradingAccountRepository:
+    return TradingAccountRepository(db)
+
+
+# ==========================================================
+# TRADING ACCOUNT SERVICE
 # ==========================================================
 
 def get_trading_account_service(
-    db: AsyncSession = Depends(get_db),
+    repository: TradingAccountRepository = Depends(
+        get_trading_account_repository
+    ),
 ):
     return TradingAccountService(
-        TradingAccountRepository(db),
+        repository,
     )
 
 
 # ==========================================================
-# Order Service
+# ORDER REPOSITORY
+# ==========================================================
+
+def get_order_repository(
+    db: AsyncSession = Depends(get_db),
+) -> OrderRepository:
+    return OrderRepository(db)
+
+
+# ==========================================================
+# ORDER SERVICE
 # ==========================================================
 
 def get_order_service(
-    db: AsyncSession = Depends(get_db),
+    order_repository: OrderRepository = Depends(
+        get_order_repository
+    ),
 ):
     return OrderService(
-        OrderRepository(db),
+        order_repository,
     )
 
 
 # ==========================================================
-# Position Service
+# POSITION REPOSITORY
+# ==========================================================
+
+def get_position_repository(
+    db: AsyncSession = Depends(get_db),
+) -> PositionRepository:
+    return PositionRepository(db)
+
+
+# ==========================================================
+# POSITION SERVICE
 # ==========================================================
 
 def get_position_service(
-    db: AsyncSession = Depends(get_db),
+    position_repository: PositionRepository = Depends(
+        get_position_repository
+    ),
 ):
     return PositionService(
-        PositionRepository(db),
+        position_repository,
     )
 
 
 # ==========================================================
-# Trade Service
+# TRADE SERVICE
 # ==========================================================
 
 def get_trade_service(
     db: AsyncSession = Depends(get_db),
 ):
     return TradeService(
-        TradeRepository(db),
+        repository=TradeRepository(db),
+        position_repository=PositionRepository(db),
     )
 
 
 # ==========================================================
-# Strategy Run Service
+# STRATEGY RUN SERVICE
 # ==========================================================
 
 def get_strategy_run_service(
@@ -170,19 +264,20 @@ def get_strategy_run_service(
 
 
 # ==========================================================
-# Performance Service
+# PERFORMANCE SERVICE
 # ==========================================================
 
 def get_performance_service(
     db: AsyncSession = Depends(get_db),
 ):
     return PerformanceService(
-        PerformanceRepository(db),
+        repository=PerformanceRepository(db),
+        trade_repository=TradeRepository(db),
     )
 
 
 # ==========================================================
-# Risk Snapshot Service
+# RISK SNAPSHOT SERVICE
 # ==========================================================
 
 def get_risk_snapshot_service(
@@ -192,29 +287,105 @@ def get_risk_snapshot_service(
         RiskSnapshotRepository(db),
     )
 
+
 # ==========================================================
-# Broker
+# BROKER MANAGER
 # ==========================================================
 
 def get_broker_manager() -> BrokerManager:
     """
     Return the broker manager used by the trading engine.
 
-    Currently configured to use MetaTrader 5.
+    Currently configured for MetaTrader 5.
     """
 
     adapter = get_broker_adapter("mt5")
 
-    return BrokerManager(adapter)
+    return BrokerManager(
+        adapter
+    )
+
 
 # ==========================================================
-# Execution Service
+# EXECUTION SERVICE
 # ==========================================================
 
 def get_execution_service(
-    broker: BrokerManager = Depends(get_broker_manager),
+    broker: BrokerManager = Depends(
+        get_broker_manager
+    ),
 ) -> ExecutionService:
 
     return ExecutionService(
         broker=broker
+    )
+
+
+# ==========================================================
+# ORDER EXECUTION SERVICE
+# ==========================================================
+
+def get_order_execution_service(
+    order_repository: OrderRepository = Depends(
+        get_order_repository
+    ),
+    execution_service: ExecutionService = Depends(
+        get_execution_service
+    ),
+) -> OrderExecutionService:
+
+    return OrderExecutionService(
+        order_repository=order_repository,
+        execution_service=execution_service,
+    )
+
+
+# ==========================================================
+# POSITION SYNC SERVICE
+# ==========================================================
+
+def get_position_sync_service(
+    position_repository: PositionRepository = Depends(
+        get_position_repository
+    ),
+    position_service: PositionService = Depends(
+        get_position_service
+    ),
+    order_repository: OrderRepository = Depends(
+        get_order_repository
+    ),
+    execution_service: ExecutionService = Depends(
+        get_execution_service
+    ),
+    trade_service: TradeService = Depends(
+        get_trade_service
+    ),
+) -> PositionSyncService:
+
+    return PositionSyncService(
+        execution_service=execution_service,
+        position_repository=position_repository,
+        position_service=position_service,
+        order_repository=order_repository,
+        trade_service=trade_service,
+    )
+
+
+# ==========================================================
+# ANALYTICS SERVICE
+# ==========================================================
+
+def get_analytics_service(
+    db: AsyncSession = Depends(get_db),
+):
+    return AnalyticsService(
+        repository=AnalyticsRepository(db),
+    )
+
+
+def get_risk_service(
+    db: AsyncSession = Depends(get_db),
+):
+    return RiskService(
+        repository=RiskProfileRepository(db)
     )

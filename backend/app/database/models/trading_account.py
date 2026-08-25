@@ -170,6 +170,13 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+
+    risk_profile = relationship(
+        "RiskProfile",
+        back_populates="account",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
     # ----------------------------------------------------------
     # Representation
     # ----------------------------------------------------------

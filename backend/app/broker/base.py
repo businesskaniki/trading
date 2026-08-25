@@ -5,13 +5,13 @@ class BrokerAdapter(ABC):
     """
     Abstract interface for all broker implementations.
 
-    The trading engine communicates with this interface
-    instead of communicating directly with MT5, Paper Trading,
-    or any other broker.
+    AQE communicates with this interface rather than
+    directly communicating with MT5, Paper Trading,
+    or another broker.
     """
 
     # ==========================================================
-    # Connection
+    # CONNECTION
     # ==========================================================
 
     @abstractmethod
@@ -28,19 +28,26 @@ class BrokerAdapter(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def connection_status(self):
+        """
+        Return the current broker connection status.
+        """
+        raise NotImplementedError
+
     # ==========================================================
-    # Account
+    # ACCOUNT
     # ==========================================================
 
     @abstractmethod
     async def get_account(self):
         """
-        Get the current trading account information.
+        Get current broker account information.
         """
         raise NotImplementedError
 
     # ==========================================================
-    # Symbols
+    # SYMBOLS
     # ==========================================================
 
     @abstractmethod
@@ -57,8 +64,15 @@ class BrokerAdapter(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_tick(self, symbol: str):
+        """
+        Get the latest market tick for a symbol.
+        """
+        raise NotImplementedError
+
     # ==========================================================
-    # Orders
+    # ORDERS
     # ==========================================================
 
     @abstractmethod
@@ -71,18 +85,45 @@ class BrokerAdapter(ABC):
     @abstractmethod
     async def place_order(self, order: dict):
         """
-        Submit an order to the broker.
+        Submit a market or standard order to the broker.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def create_pending_order(self, order: dict):
+        """
+        Create a pending order.
         """
         raise NotImplementedError
 
     # ==========================================================
-    # Positions
+    # POSITIONS
     # ==========================================================
 
     @abstractmethod
     async def get_positions(self):
         """
-        Get open positions.
+        Get all open positions.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_position(self, position_id: int):
+        """
+        Get a specific open position.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def modify_position(
+        self,
+        position_id: int,
+        sl: float | None = None,
+        tp: float | None = None,
+    ):
+        """
+        Modify an existing position's stop loss
+        and/or take profit.
         """
         raise NotImplementedError
 
@@ -91,4 +132,34 @@ class BrokerAdapter(ABC):
         """
         Close an open position.
         """
+        raise NotImplementedError
+
+    # ==========================================================
+    # HISTORY
+    # ==========================================================
+
+    @abstractmethod
+    async def get_order_history(
+        self,
+        start,
+        end,
+    ):
+        """
+        Get historical orders within a time range.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_deal_history(
+        self,
+        start,
+        end,
+    ):
+        """
+        Get historical deals within a time range.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_tick(self, symbol: str):
         raise NotImplementedError

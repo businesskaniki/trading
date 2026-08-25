@@ -2,15 +2,46 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
-from pydantic import Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.core.constants import PerformancePeriod
 
 
 # ==========================================================
-# Base Schema
+# GENERATE PERFORMANCE REQUEST
+# ==========================================================
+
+class PerformanceGenerateRequest(BaseModel):
+    """
+    Request used to generate a Performance snapshot
+    from completed Trade records.
+    """
+
+    account_id: UUID
+
+    strategy_run_id: UUID
+
+    period: PerformancePeriod
+
+    start: datetime
+
+    end: datetime
+
+    generated_at: datetime
+
+    starting_balance: Decimal = Field(
+        ...,
+        ge=0,
+    )
+
+    ending_balance: Decimal = Field(
+        ...,
+        ge=0,
+    )
+
+
+# ==========================================================
+# BASE SCHEMA
 # ==========================================================
 
 class PerformanceBase(BaseModel):
@@ -114,24 +145,24 @@ class PerformanceBase(BaseModel):
 
 
 # ==========================================================
-# Create Schema
+# CREATE SCHEMA
 # ==========================================================
 
 class PerformanceCreate(PerformanceBase):
     """
-    Payload used when creating performance statistics.
+    Internal schema used when creating a Performance snapshot.
     """
 
     pass
 
 
 # ==========================================================
-# Update Schema
+# UPDATE SCHEMA
 # ==========================================================
 
 class PerformanceUpdate(BaseModel):
     """
-    Payload used when updating performance statistics.
+    Fields that may be manually corrected by an administrator.
     """
 
     period: PerformancePeriod | None = None
@@ -139,56 +170,78 @@ class PerformanceUpdate(BaseModel):
     generated_at: datetime | None = None
 
     total_trades: int | None = None
+
     winning_trades: int | None = None
+
     losing_trades: int | None = None
+
     breakeven_trades: int | None = None
 
     gross_profit: Decimal | None = None
+
     gross_loss: Decimal | None = None
+
     net_profit: Decimal | None = None
 
     total_commission: Decimal | None = None
+
     total_swap: Decimal | None = None
+
     total_fees: Decimal | None = None
 
     win_rate: Decimal | None = None
+
     profit_factor: Decimal | None = None
+
     expectancy: Decimal | None = None
 
     sharpe_ratio: Decimal | None = None
+
     sortino_ratio: Decimal | None = None
+
     calmar_ratio: Decimal | None = None
 
     max_drawdown: Decimal | None = None
+
     max_drawdown_percent: Decimal | None = None
 
     average_r_multiple: Decimal | None = None
+
     recovery_factor: Decimal | None = None
+
     payoff_ratio: Decimal | None = None
 
     average_trade_duration_seconds: int | None = None
 
     average_win: Decimal | None = None
+
     average_loss: Decimal | None = None
+
     largest_win: Decimal | None = None
+
     largest_loss: Decimal | None = None
 
     starting_balance: Decimal | None = None
+
     ending_balance: Decimal | None = None
+
     peak_equity: Decimal | None = None
+
     lowest_equity: Decimal | None = None
 
 
 # ==========================================================
-# Response Schema
+# RESPONSE SCHEMA
 # ==========================================================
 
 class PerformanceResponse(PerformanceBase):
     """
-    Returned to API clients.
+    Performance snapshot returned by the API.
     """
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
 
     id: UUID
 

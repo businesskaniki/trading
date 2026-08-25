@@ -3,9 +3,9 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.models.strategy_run import StrategyRun
 from app.core.constants import StrategyRunStatus
 from app.core.constants import StrategyRunType
+from app.database.models.strategy_run import StrategyRun
 
 
 class StrategyRunRepository:
@@ -13,26 +13,42 @@ class StrategyRunRepository:
     Repository responsible for StrategyRun database operations.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(
+        self,
+        db: AsyncSession,
+    ):
         self.db = db
 
-    # ---------------------------------------------------------
-    # Create
-    # ---------------------------------------------------------
+    # ==========================================================
+    # CREATE
+    # ==========================================================
 
-    async def create(self, **kwargs) -> StrategyRun:
-        strategy_run = StrategyRun(**kwargs)
+    async def create(
+        self,
+        commit: bool = True,
+        **data,
+    ) -> StrategyRun:
+
+        strategy_run = StrategyRun(
+            **data
+        )
 
         self.db.add(strategy_run)
 
-        await self.db.commit()
-        await self.db.refresh(strategy_run)
+        await self.db.flush()
+
+        if commit:
+            await self.db.commit()
+
+        await self.db.refresh(
+            strategy_run
+        )
 
         return strategy_run
 
-    # ---------------------------------------------------------
-    # Get
-    # ---------------------------------------------------------
+    # ==========================================================
+    # READ
+    # ==========================================================
 
     async def get_by_id(
         self,
@@ -40,7 +56,8 @@ class StrategyRunRepository:
     ) -> StrategyRun | None:
 
         result = await self.db.execute(
-            select(StrategyRun).where(
+            select(StrategyRun)
+            .where(
                 StrategyRun.id == strategy_run_id
             )
         )
@@ -62,7 +79,9 @@ class StrategyRunRepository:
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
     async def get_by_status(
         self,
@@ -79,7 +98,9 @@ class StrategyRunRepository:
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
     async def get_by_type(
         self,
@@ -96,7 +117,9 @@ class StrategyRunRepository:
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
     async def get_latest(
         self,
@@ -112,49 +135,72 @@ class StrategyRunRepository:
 
         return result.scalar_one_or_none()
 
-    async def get_all(self) -> list[StrategyRun]:
+    async def get_all(
+        self,
+    ) -> list[StrategyRun]:
 
         result = await self.db.execute(
-            select(StrategyRun).order_by(
+            select(StrategyRun)
+            .order_by(
                 StrategyRun.started_at.desc()
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
-    # ---------------------------------------------------------
-    # Update
-    # ---------------------------------------------------------
+    # ==========================================================
+    # UPDATE
+    # ==========================================================
 
     async def update(
         self,
         strategy_run: StrategyRun,
-        **kwargs,
+        commit: bool = True,
+        **data,
     ) -> StrategyRun:
 
-        for key, value in kwargs.items():
-            setattr(strategy_run, key, value)
+        for field, value in data.items():
+            setattr(
+                strategy_run,
+                field,
+                value,
+            )
 
-        await self.db.commit()
-        await self.db.refresh(strategy_run)
+        await self.db.flush()
+
+        if commit:
+            await self.db.commit()
+
+        await self.db.refresh(
+            strategy_run
+        )
 
         return strategy_run
 
-    # ---------------------------------------------------------
-    # Delete
-    # ---------------------------------------------------------
+    # ==========================================================
+    # DELETE
+    # ==========================================================
 
     async def delete(
         self,
         strategy_run: StrategyRun,
+        commit: bool = True,
     ) -> None:
 
-        await self.db.delete(strategy_run)
-        await self.db.commit()
+        await self.db.delete(
+            strategy_run
+        )
 
-    # ---------------------------------------------------------
-    # Utility
-    # ---------------------------------------------------------
+        await self.db.flush()
+
+        if commit:
+            await self.db.commit()
+
+    # ==========================================================
+    # UTILITY
+    # ==========================================================
 
     async def exists(
         self,
@@ -162,5 +208,7 @@ class StrategyRunRepository:
     ) -> bool:
 
         return (
-            await self.get_by_id(strategy_run_id)
+            await self.get_by_id(
+                strategy_run_id
+            )
         ) is not None

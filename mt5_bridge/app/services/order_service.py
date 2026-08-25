@@ -19,7 +19,9 @@ class OrderService:
             "price": request["price"],
             "deviation": request.get("deviation", 20),
             "magic": request.get("magic", 0),
-            "comment": request.get("comment", ""),
+            "comment": " ".join(
+    str(request.get("comment", "AQE")).split()
+)[:31],
         }
 
         # Only add SL when an actual value was supplied
@@ -29,6 +31,9 @@ class OrderService:
         # Only add TP when an actual value was supplied
         if request.get("tp") is not None:
             mt5_request["tp"] = request["tp"]
+
+            
+            print("MT5 REQUEST:", repr(mt5_request))
 
         result = self.broker.send(mt5_request)
 
@@ -92,3 +97,41 @@ class OrderService:
             return None
 
         return orders[0]._asdict()
+
+
+    def create_pending_order(
+        self,
+        symbol: str,
+        volume: float,
+        order_type: int,
+        price: float,
+        sl=None,
+        tp=None,
+        deviation: int = 20,
+        magic: int = 0,
+        comment: str = "",
+    ):
+
+        result = self.broker.pending(
+            symbol=symbol,
+            volume=volume,
+            order_type=order_type,
+            price=price,
+            sl=sl,
+            tp=tp,
+            deviation=deviation,
+            magic=magic,
+            comment=comment,
+        )
+
+        return {
+            "ticket": result.order,
+            "symbol": symbol,
+            "volume": volume,
+            "price_open": price,
+            "sl": sl or 0.0,
+            "tp": tp or 0.0,
+            "order_type": order_type,
+            "state": result.retcode,
+            "comment": result.comment,
+        }

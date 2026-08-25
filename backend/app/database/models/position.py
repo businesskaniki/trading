@@ -2,29 +2,19 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime
-from sqlalchemy import Enum
-from sqlalchemy import ForeignKey
-from sqlalchemy import Index
-from sqlalchemy import Numeric
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped
-from sqlalchemy.orm import mapped_column
-from sqlalchemy.orm import relationship
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.constants import PositionDirection
-from app.core.constants import PositionStatus
-from app.database.base import Base
-from app.database.base import TimestampMixin
-from app.database.base import UUIDMixin
-
+from app.core.constants import PositionDirection, PositionStatus
+from app.database.base import Base, TimestampMixin, UUIDMixin
 
 
 class Position(UUIDMixin, TimestampMixin, Base):
     """
     Represents an active or previously active market position.
 
-    A position is created when an order is executed by the broker.
+    A Position is the persistent AQE representation of broker
+    position state.
     """
 
     __tablename__ = "positions"
@@ -34,10 +24,11 @@ class Position(UUIDMixin, TimestampMixin, Base):
         Index("ix_positions_status", "status"),
         Index("ix_positions_symbol", "symbol_id"),
         Index("ix_positions_account", "account_id"),
+        Index("ix_positions_order", "order_id"),
     )
 
     # ==========================================================
-    # Broker Information
+    # BROKER INFORMATION
     # ==========================================================
 
     ticket: Mapped[int] = mapped_column(
@@ -56,7 +47,7 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Relationships
+    # RELATIONSHIPS
     # ==========================================================
 
     account_id: Mapped[UUID] = mapped_column(
@@ -72,7 +63,6 @@ class Position(UUIDMixin, TimestampMixin, Base):
     order_id: Mapped[UUID] = mapped_column(
         ForeignKey("orders.id"),
         nullable=False,
-        unique=True,
     )
 
     account = relationship(
@@ -97,11 +87,14 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Position Details
+    # POSITION DETAILS
     # ==========================================================
 
     direction: Mapped[PositionDirection] = mapped_column(
-        Enum(PositionDirection, name="position_direction_enum"),
+        Enum(
+            PositionDirection,
+            name="position_direction_enum",
+        ),
         nullable=False,
     )
 
@@ -136,29 +129,29 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Profit Metrics
+    # PROFIT METRICS
     # ==========================================================
 
     floating_profit: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
-        default=0,
+        default=Decimal("0"),
         nullable=False,
     )
 
     swap: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
-        default=0,
+        default=Decimal("0"),
         nullable=False,
     )
 
     commission: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
-        default=0,
+        default=Decimal("0"),
         nullable=False,
     )
 
     # ==========================================================
-    # Risk
+    # RISK
     # ==========================================================
 
     risk_reward_ratio: Mapped[Decimal | None] = mapped_column(
@@ -172,17 +165,20 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Status
+    # STATUS
     # ==========================================================
 
     status: Mapped[PositionStatus] = mapped_column(
-        Enum(PositionStatus, name="position_status_enum"),
+        Enum(
+            PositionStatus,
+            name="position_status_enum",
+        ),
         default=PositionStatus.OPEN,
         nullable=False,
     )
 
     # ==========================================================
-    # Lifecycle
+    # LIFECYCLE
     # ==========================================================
 
     opened_at: Mapped[datetime] = mapped_column(
@@ -201,7 +197,7 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Management Flags
+    # MANAGEMENT FLAGS
     # ==========================================================
 
     break_even_enabled: Mapped[bool] = mapped_column(
@@ -215,7 +211,7 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Notes
+    # NOTES
     # ==========================================================
 
     comment: Mapped[str | None] = mapped_column(
@@ -224,12 +220,13 @@ class Position(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Representation
+    # REPRESENTATION
     # ==========================================================
 
     def __repr__(self) -> str:
         return (
             f"<Position("
+            f"id={self.id}, "
             f"ticket={self.ticket}, "
             f"symbol={self.symbol_id}, "
             f"direction={self.direction}, "

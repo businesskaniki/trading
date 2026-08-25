@@ -1,7 +1,9 @@
+from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.constants import TradeResult
 from app.database.models.trade import Trade
@@ -9,29 +11,43 @@ from app.database.models.trade import Trade
 
 class TradeRepository:
     """
-    Repository responsible for Trade database operations.
+    Repository responsible for Trade persistence and retrieval.
+
+    Trades are immutable records.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(
+        self,
+        db: AsyncSession,
+    ):
         self.db = db
 
-    # ---------------------------------------------------------
-    # Create
-    # ---------------------------------------------------------
+    # ==========================================================
+    # CREATE
+    # ==========================================================
 
-    async def create(self, **kwargs) -> Trade:
-        trade = Trade(**kwargs)
+    async def create(
+        self,
+        commit: bool = True,
+        **data,
+    ) -> Trade:
+
+        trade = Trade(**data)
 
         self.db.add(trade)
 
-        await self.db.commit()
+        await self.db.flush()
+
+        if commit:
+            await self.db.commit()
+
         await self.db.refresh(trade)
 
         return trade
 
-    # ---------------------------------------------------------
-    # Get
-    # ---------------------------------------------------------
+    # ==========================================================
+    # READ
+    # ==========================================================
 
     async def get_by_id(
         self,
@@ -39,7 +55,13 @@ class TradeRepository:
     ) -> Trade | None:
 
         result = await self.db.execute(
-            select(Trade).where(
+            select(Trade)
+            .options(
+                selectinload(Trade.position),
+                selectinload(Trade.account),
+                selectinload(Trade.symbol),
+            )
+            .where(
                 Trade.id == trade_id
             )
         )
@@ -83,11 +105,13 @@ class TradeRepository:
                 Trade.account_id == account_id
             )
             .order_by(
-                Trade.closed_at.desc()
+                Trade.closed_at.asc()
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
     async def get_by_symbol(
         self,
@@ -100,11 +124,13 @@ class TradeRepository:
                 Trade.symbol_id == symbol_id
             )
             .order_by(
-                Trade.closed_at.desc()
+                Trade.closed_at.asc()
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
     async def get_by_strategy(
         self,
@@ -117,11 +143,13 @@ class TradeRepository:
                 Trade.strategy == strategy
             )
             .order_by(
-                Trade.closed_at.desc()
+                Trade.closed_at.asc()
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
     async def get_by_result(
         self,
@@ -134,13 +162,17 @@ class TradeRepository:
                 Trade.result == result_type
             )
             .order_by(
-                Trade.closed_at.desc()
+                Trade.closed_at.asc()
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
-    async def get_latest(self) -> Trade | None:
+    async def get_latest(
+        self,
+    ) -> Trade | None:
 
         result = await self.db.execute(
             select(Trade)
@@ -152,56 +184,130 @@ class TradeRepository:
 
         return result.scalar_one_or_none()
 
-    async def get_all(self) -> list[Trade]:
+    async def get_all(
+        self,
+    ) -> list[Trade]:
 
         result = await self.db.execute(
             select(Trade)
             .order_by(
-                Trade.closed_at.desc()
+                Trade.closed_at.asc()
             )
         )
 
-        return list(result.scalars().all())
+        return list(
+            result.scalars().all()
+        )
 
-    # ---------------------------------------------------------
-    # Update
-    # ---------------------------------------------------------
+    # ==========================================================
+    # PERFORMANCE / ANALYTICS QUERIES
+    # ==========================================================
 
-    async def update(
+    async def get_by_account_and_period(
         self,
-        trade: Trade,
-        **kwargs,
-    ) -> Trade:
+        account_id: UUID,
+        start: datetime,
+        end: datetime,
+    ) -> list[Trade]:
 
-        for key, value in kwargs.items():
-            setattr(trade, key, value)
+        result = await self.db.execute(
+            select(Trade)
+            .where(
+                Trade.account_id == account_id,
+                Trade.closed_at >= start,
+                Trade.closed_at < end,
+            )
+            .order_by(
+                Trade.closed_at.asc()
+            )
+        )
 
-        await self.db.commit()
-        await self.db.refresh(trade)
+        return list(
+            result.scalars().all()
+        )
 
-        return trade
-
-    # ---------------------------------------------------------
-    # Delete
-    # ---------------------------------------------------------
-
-    async def delete(
+    async def get_by_strategy_and_period(
         self,
-        trade: Trade,
-    ) -> None:
+        strategy: str,
+        start: datetime,
+        end: datetime,
+    ) -> list[Trade]:
 
-        await self.db.delete(trade)
-        await self.db.commit()
+        result = await self.db.execute(
+            select(Trade)
+            .where(
+                Trade.strategy == strategy,
+                Trade.closed_at >= start,
+                Trade.closed_at < end,
+            )
+            .order_by(
+                Trade.closed_at.asc()
+            )
+        )
 
-    # ---------------------------------------------------------
-    # Utility
-    # ---------------------------------------------------------
+        return list(
+            result.scalars().all()
+        )
 
-    async def exists(
+    async def get_by_symbol_and_period(
         self,
-        trade_id: UUID,
+        symbol_id: UUID,
+        start: datetime,
+        end: datetime,
+    ) -> list[Trade]:
+
+        result = await self.db.execute(
+            select(Trade)
+            .where(
+                Trade.symbol_id == symbol_id,
+                Trade.closed_at >= start,
+                Trade.closed_at < end,
+            )
+            .order_by(
+                Trade.closed_at.asc()
+            )
+        )
+
+        return list(
+            result.scalars().all()
+        )
+
+    # ==========================================================
+    # EXISTS
+    # ==========================================================
+
+    async def exists_by_ticket(
+        self,
+        ticket: int,
     ) -> bool:
 
+        result = await self.db.execute(
+            select(Trade.id)
+            .where(
+                Trade.ticket == ticket
+            )
+            .limit(1)
+        )
+
         return (
-            await self.get_by_id(trade_id)
-        ) is not None
+            result.scalar_one_or_none()
+            is not None
+        )
+
+    async def exists_by_position(
+        self,
+        position_id: UUID,
+    ) -> bool:
+
+        result = await self.db.execute(
+            select(Trade.id)
+            .where(
+                Trade.position_id == position_id
+            )
+            .limit(1)
+        )
+
+        return (
+            result.scalar_one_or_none()
+            is not None
+        )

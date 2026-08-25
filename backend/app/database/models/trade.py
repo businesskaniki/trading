@@ -2,30 +2,18 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime
-from sqlalchemy import Enum
-from sqlalchemy import ForeignKey
-from sqlalchemy import Index
-from sqlalchemy import Integer
-from sqlalchemy import Numeric
-from sqlalchemy import String
-from sqlalchemy.orm import Mapped
-from sqlalchemy.orm import mapped_column
-from sqlalchemy.orm import relationship
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, String
+from sqlalchemy.orm import Mapped, mapped_column, relationship
 
-from app.core.constants import PositionDirection
-from app.core.constants import TradeResult
-from app.database.base import Base
-from app.database.base import TimestampMixin
-from app.database.base import UUIDMixin
-
+from app.core.constants import PositionDirection, TradeResult
+from app.database.base import Base, TimestampMixin, UUIDMixin
 
 
 class Trade(UUIDMixin, TimestampMixin, Base):
     """
     Immutable record of a completed trade.
 
-    Created only after a position has been completely closed.
+    A Trade is created only after a Position has been completely closed.
     """
 
     __tablename__ = "trades"
@@ -40,7 +28,7 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Broker Information
+    # BROKER INFORMATION
     # ==========================================================
 
     ticket: Mapped[int] = mapped_column(
@@ -55,7 +43,7 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Relationships
+    # RELATIONSHIPS
     # ==========================================================
 
     position_id: Mapped[UUID] = mapped_column(
@@ -90,11 +78,14 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Trade Details
+    # TRADE DETAILS
     # ==========================================================
 
     direction: Mapped[PositionDirection] = mapped_column(
-        Enum(PositionDirection, name="position_direction_enum"),
+        Enum(
+            PositionDirection,
+            name="position_direction_enum",
+        ),
         nullable=False,
     )
 
@@ -124,7 +115,7 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Profit
+    # PROFIT
     # ==========================================================
 
     gross_profit: Mapped[Decimal] = mapped_column(
@@ -134,19 +125,19 @@ class Trade(UUIDMixin, TimestampMixin, Base):
 
     commission: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
-        default=0,
+        default=Decimal("0"),
         nullable=False,
     )
 
     swap: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
-        default=0,
+        default=Decimal("0"),
         nullable=False,
     )
 
     fees: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
-        default=0,
+        default=Decimal("0"),
         nullable=False,
     )
 
@@ -161,7 +152,7 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Risk Statistics
+    # RISK STATISTICS
     # ==========================================================
 
     initial_risk: Mapped[Decimal | None] = mapped_column(
@@ -185,16 +176,19 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Classification
+    # CLASSIFICATION
     # ==========================================================
 
     result: Mapped[TradeResult] = mapped_column(
-        Enum(TradeResult, name="trade_result_enum"),
+        Enum(
+            TradeResult,
+            name="trade_result_enum",
+        ),
         nullable=False,
     )
 
     # ==========================================================
-    # Lifecycle
+    # LIFECYCLE
     # ==========================================================
 
     opened_at: Mapped[datetime] = mapped_column(
@@ -213,7 +207,7 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Notes
+    # NOTES
     # ==========================================================
 
     comment: Mapped[str | None] = mapped_column(
@@ -222,13 +216,15 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     )
 
     # ==========================================================
-    # Representation
+    # REPRESENTATION
     # ==========================================================
 
     def __repr__(self) -> str:
         return (
             f"<Trade("
+            f"id={self.id}, "
             f"ticket={self.ticket}, "
             f"strategy='{self.strategy}', "
-            f"net_profit={self.net_profit})>"
+            f"net_profit={self.net_profit}, "
+            f"result={self.result})>"
         )

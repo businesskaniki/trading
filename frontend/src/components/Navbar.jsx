@@ -1,128 +1,347 @@
-import { NavLink, useNavigate } from "react-router-dom";
-import {
-    FaBell,
-    FaUserCircle,
-    FaSignOutAlt,
-} from "react-icons/fa";
+import { useEffect, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
+import { useNavigate } from "react-router-dom";
+
+import {
+  FaBell,
+  FaChevronDown,
+  FaCog,
+  FaShieldAlt,
+  FaSignOutAlt,
+  FaThLarge,
+  FaUser,
+  FaUserCircle,
+} from "react-icons/fa";
 
 import { logoutUser } from "../redux/auth/authThunks";
 
-import "../css/navcss.css"
+import "../css/navcss.css";
 
 const Navbar = () => {
-    const dispatch = useDispatch();
-    const navigate = useNavigate();
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
 
-    const { isAuthenticated, user } = useSelector(
-        (state) => state.auth
-    );
+  const { isAuthenticated } = useSelector((state) => state.auth);
 
-    console.log(user);
-    
+  const [user, setUser] = useState(null);
+  const [dropdownOpen, setDropdownOpen] = useState(false);
 
-    const handleLogout = async () => {
-        await dispatch(logoutUser());
+  const dropdownRef = useRef(null);
 
-        navigate("/login");
+  // ==========================================================
+  // Load User
+  // ==========================================================
+
+  useEffect(() => {
+    const loadUser = () => {
+      const storedUser = localStorage.getItem("user");
+
+      if (!storedUser) {
+        setUser(null);
+        return;
+      }
+
+      try {
+        setUser(JSON.parse(storedUser));
+      } catch (error) {
+        console.error("Invalid user data in localStorage:", error);
+
+        localStorage.removeItem("user");
+
+        setUser(null);
+      }
     };
 
-    return (
-        <header className="navbar">
-            <div className="navbar__logo">
-                <h2>AQE</h2>
-                <span>Athena Quant Engine</span>
-            </div>
+    loadUser();
+  }, [isAuthenticated]);
 
-            <nav className="navbar__links">
-                <NavLink to="/" end>
-                    Dashboard
-                </NavLink>
+  // ==========================================================
+  // Close Dropdown When Clicking Outside
+  // ==========================================================
 
-                <NavLink to="/accounts">
-                    Accounts
-                </NavLink>
+  useEffect(() => {
+    const handleClickOutside = (event) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
+        setDropdownOpen(false);
+      }
+    };
 
-                <NavLink to="/symbols">
-                    Symbols
-                </NavLink>
+    document.addEventListener("mousedown", handleClickOutside);
 
-                <NavLink to="/bots">
-                    Bots
-                </NavLink>
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, []);
 
-                <NavLink to="/orders">
-                    Orders
-                </NavLink>
+  // ==========================================================
+  // Close Dropdown With Escape
+  // ==========================================================
 
-                <NavLink to="/positions">
-                    Positions
-                </NavLink>
+  useEffect(() => {
+    const handleEscape = (event) => {
+      if (event.key === "Escape") {
+        setDropdownOpen(false);
+      }
+    };
 
-                <NavLink to="/history">
-                    History
-                </NavLink>
+    document.addEventListener("keydown", handleEscape);
 
-                <NavLink to="/logs">
-                    Logs
-                </NavLink>
-            </nav>
+    return () => {
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
 
-            <div className="navbar__right">
-                {isAuthenticated ? (
-                    <>
-                        <button className="notification-btn">
-                            <FaBell />
-                        </button>
+  // ==========================================================
+  // Navigation
+  // ==========================================================
 
-                        <button className="profile-btn">
-                            <FaUserCircle />
+  const handleNavigation = (path) => {
+    setDropdownOpen(false);
 
-                            <span>
-                                {user?.full_name ||
-                                    user?.username ||
-                                    user?.email ||
-                                    "User"}
-                            </span>
-                        </button>
+    navigate(path);
+  };
 
-                        <button
-                            className="logout-btn"
-                            onClick={handleLogout}
-                        >
-                            <FaSignOutAlt />
+  // ==========================================================
+  // Logout
+  // ==========================================================
 
-                            <span>Logout</span>
-                        </button>
-                    </>
-                ) : (
-                    <div className="auth-links">
-                        <NavLink
-                            to="/login"
-                            className={({ isActive }) =>
-                                isActive
-                                    ? "login-btn active-auth"
-                                    : "login-btn"
-                            }
-                        >
-                            Login
-                        </NavLink>
+  const handleLogout = async () => {
+    setDropdownOpen(false);
 
-                        <NavLink
-                            to="/register"
-                            className={({ isActive }) =>
-                                isActive
-                                    ? "register-btn active-register"
-                                    : "register-btn"
-                            }
-                        >
-                            Register
-                        </NavLink>
+    await dispatch(logoutUser());
+
+    setUser(null);
+
+    navigate("/login", {
+      replace: true,
+    });
+  };
+
+  // ==========================================================
+  // User Information
+  // ==========================================================
+
+  const displayName =
+    user?.full_name || user?.username || user?.email || "User";
+
+  const email = user?.email || "";
+
+  return (
+    <header className="navbar">
+      {/* ==================================================
+                BRAND
+            ================================================== */}
+
+      <div
+        className="navbar-brand"
+        onClick={() => handleNavigation(isAuthenticated ? "/dashboard" : "/")}
+      >
+        <div className="navbar-brand__mark">AQE</div>
+
+        <div className="navbar-brand__text">
+          <strong>Athena Quant Engine</strong>
+
+          <span>Algorithmic Trading Infrastructure</span>
+        </div>
+      </div>
+
+      {/* ==================================================
+                RIGHT SIDE
+            ================================================== */}
+
+      <div className="navbar-actions">
+        {isAuthenticated ? (
+          <>
+            {/* ==================================================
+                            Notifications
+                        ================================================== */}
+
+            <button
+              type="button"
+              className="navbar-notification"
+              aria-label="Notifications"
+            >
+              <FaBell />
+
+              <span className="notification-indicator" />
+            </button>
+
+            {/* ==================================================
+                            Profile
+                        ================================================== */}
+
+            <div className="profile-wrapper" ref={dropdownRef}>
+              <button
+                type="button"
+                className={
+                  dropdownOpen
+                    ? "profile-trigger profile-trigger--active"
+                    : "profile-trigger"
+                }
+                onClick={() => setDropdownOpen((previous) => !previous)}
+                aria-expanded={dropdownOpen}
+                aria-haspopup="menu"
+              >
+                <FaUserCircle className="profile-avatar" />
+
+                <div className="profile-info">
+                  <strong>{displayName}</strong>
+
+                  <span>{email}</span>
+                </div>
+
+                <FaChevronDown
+                  className={
+                    dropdownOpen
+                      ? "profile-chevron profile-chevron--open"
+                      : "profile-chevron"
+                  }
+                />
+              </button>
+
+              {/* ==================================================
+                                Dropdown
+                            ================================================== */}
+
+              {dropdownOpen && (
+                <div className="profile-dropdown" role="menu">
+                  {/* User */}
+
+                  <div className="dropdown-user">
+                    <div className="dropdown-user__avatar">
+                      <FaUserCircle />
                     </div>
-                )}
+
+                    <div className="dropdown-user__details">
+                      <strong>{displayName}</strong>
+
+                      <span>{email}</span>
+                    </div>
+                  </div>
+
+                  <div className="dropdown-divider" />
+
+                  {/* Dashboard */}
+
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={() => handleNavigation("/dashboard")}
+                  >
+                    <span className="dropdown-item__icon">
+                      <FaThLarge />
+                    </span>
+
+                    <span className="dropdown-item__content">
+                      <strong>Dashboard</strong>
+
+                      <small>Trading overview</small>
+                    </span>
+                  </button>
+
+                  {/* Profile */}
+
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={() => handleNavigation("/profile")}
+                  >
+                    <span className="dropdown-item__icon">
+                      <FaUser />
+                    </span>
+
+                    <span className="dropdown-item__content">
+                      <strong>Profile</strong>
+
+                      <small>Account information</small>
+                    </span>
+                  </button>
+
+                  {/* Settings */}
+
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={() => handleNavigation("/settings")}
+                  >
+                    <span className="dropdown-item__icon">
+                      <FaCog />
+                    </span>
+
+                    <span className="dropdown-item__content">
+                      <strong>Settings</strong>
+
+                      <small>Application preferences</small>
+                    </span>
+                  </button>
+
+                  {/* Security */}
+
+                  <button
+                    type="button"
+                    className="dropdown-item"
+                    onClick={() => handleNavigation("/security")}
+                  >
+                    <span className="dropdown-item__icon">
+                      <FaShieldAlt />
+                    </span>
+
+                    <span className="dropdown-item__content">
+                      <strong>Security</strong>
+
+                      <small>Password & authentication</small>
+                    </span>
+                  </button>
+
+                  <div className="dropdown-divider" />
+
+                  {/* Logout */}
+
+                  <button
+                    type="button"
+                    className="dropdown-item dropdown-item--logout"
+                    onClick={handleLogout}
+                  >
+                    <span className="dropdown-item__icon">
+                      <FaSignOutAlt />
+                    </span>
+
+                    <span className="dropdown-item__content">
+                      <strong>Logout</strong>
+
+                      <small>Sign out of AQE</small>
+                    </span>
+                  </button>
+                </div>
+              )}
             </div>
-        </header>
-    );
+          </>
+        ) : (
+          /* ==================================================
+                       PUBLIC
+                    ================================================== */
+
+          <div className="navbar-auth">
+            <button
+              type="button"
+              className="navbar-login"
+              onClick={() => navigate("/login")}
+            >
+              Login
+            </button>
+
+            <button
+              type="button"
+              className="navbar-register"
+              onClick={() => navigate("/register")}
+            >
+              Get Started
+            </button>
+          </div>
+        )}
+      </div>
+    </header>
+  );
 };
 
 export default Navbar;

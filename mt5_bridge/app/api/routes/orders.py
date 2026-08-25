@@ -44,3 +44,32 @@ def create_order(request: OrderRequest):
 def list_orders():
 
     return service.list_orders()
+
+
+
+@router.post(
+    "/pending",
+    response_model=OrderResponse,
+)
+def create_pending_order(request: OrderRequest):
+
+    try:
+
+        return service.create_pending_order(
+            symbol=request.symbol,
+            volume=request.volume,
+            order_type=request.order_type,
+            price=request.price,
+            sl=request.sl,
+            tp=request.tp,
+            deviation=request.deviation,
+            magic=request.magic,
+            comment=request.comment,
+        )
+
+    except Exception as exc:
+
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )

@@ -86,3 +86,106 @@ class ExecutionService:
                 f"Failed to close position "
                 f"{position_id}: {exc}"
             ) from exc
+
+    async def create_pending_order(
+        self,
+        order: ExecutionOrder,
+    ) -> ExecutionResult:
+
+        try:
+            return await self.broker.create_pending_order(
+                order
+            )
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(
+                f"Failed to create pending order: {exc}"
+            ) from exc
+
+
+    async def modify_position(
+        self,
+        position_id: int,
+        sl: float | None = None,
+        tp: float | None = None,
+    ):
+
+        try:
+            return await self.broker.modify_position(
+                position_id=position_id,
+                sl=sl,
+                tp=tp,
+            )
+
+        except BrokerPositionError:
+            raise
+
+        except Exception as exc:
+            raise BrokerPositionError(
+                f"Failed to modify position "
+                f"{position_id}: {exc}"
+            ) from exc
+
+
+    async def get_order_history(
+        self,
+        start,
+        end,
+    ):
+
+        try:
+            return await self.broker.get_order_history(
+                start=start,
+                end=end,
+            )
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(
+                f"Failed to retrieve order history: {exc}"
+            ) from exc
+
+
+    async def get_deal_history(
+        self,
+        start,
+        end,
+    ):
+
+        try:
+            return await self.broker.get_deal_history(
+                start=start,
+                end=end,
+            )
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(
+                f"Failed to retrieve deal history: {exc}"
+            ) from exc
+
+    async def get_deals_by_position(
+        self,
+        position_id: int,
+    ):
+
+        try:
+            return await self.broker.get_deals_by_position(
+                position_id
+            )
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(
+                f"Failed to retrieve deals "
+                f"for position {position_id}: {exc}"
+            ) from exc

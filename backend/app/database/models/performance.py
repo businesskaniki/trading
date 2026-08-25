@@ -18,7 +18,6 @@ from app.database.base import TimestampMixin
 from app.database.base import UUIDMixin
 
 
-
 class Performance(UUIDMixin, TimestampMixin, Base):
     """
     Performance statistics generated for a strategy run.
@@ -144,10 +143,9 @@ class Performance(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    profit_factor: Mapped[Decimal] = mapped_column(
+    profit_factor: Mapped[Decimal | None] = mapped_column(
         Numeric(10, 4),
-        default=0,
-        nullable=False,
+        nullable=True,
     )
 
     expectancy: Mapped[Decimal] = mapped_column(

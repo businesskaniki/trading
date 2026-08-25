@@ -1,28 +1,49 @@
-from datetime import datetime
-
 import MetaTrader5 as mt5
+from datetime import datetime
 
 
 class HistoryBroker:
 
-    @staticmethod
-    def deals(
-        date_from: datetime,
-        date_to: datetime,
-    ):
-
-        return mt5.history_deals_get(
-            date_from,
-            date_to,
-        )
+    # ==========================================================
+    # ORDER HISTORY
+    # ==========================================================
 
     @staticmethod
     def orders(
-        date_from: datetime,
-        date_to: datetime,
+        start: datetime,
+        end: datetime,
     ):
-
         return mt5.history_orders_get(
-            date_from,
-            date_to,
+            start,
+            end,
+        )
+
+    # ==========================================================
+    # DEAL HISTORY
+    # ==========================================================
+
+    @staticmethod
+    def deals(
+        start: datetime,
+        end: datetime,
+    ):
+        return mt5.history_deals_get(
+            start,
+            end,
+        )
+
+    # ==========================================================
+    # DEALS BY POSITION
+    # ==========================================================
+
+    @staticmethod
+    def deals_by_position(
+        position_id: int,
+    ):
+        """
+        Return all historical deals belonging to a position.
+        """
+
+        return mt5.history_deals_get(
+            position=position_id,
         )

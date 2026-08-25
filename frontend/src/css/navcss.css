@@ -1,324 +1,656 @@
-*{
-    margin:0;
-    padding:0;
-    box-sizing:border-box;
+/* ==========================================================
+   AQE NAVBAR
+========================================================== */
+
+.navbar {
+  position: relative;
+
+  width: 100%;
+  height: 72px;
+
+  padding: 0 32px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  background: rgba(5, 7, 11, 0.82);
+
+  border-bottom: 1px solid rgba(255, 255, 255, 0.07);
+
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+
+  z-index: 1000;
 }
 
-.navbar{
-    position:fixed;
-    top:0;
-    left:0;
-    width:100%;
-    height:72px;
+/* ==========================================================
+   BRAND
+========================================================== */
 
-    display:flex;
-    justify-content:space-between;
-    align-items:center;
+.navbar-brand {
+  display: flex;
+  align-items: center;
 
-    padding:0 40px;
+  gap: 12px;
 
-    background:#111827;
-    border-bottom:1px solid #1F2937;
+  cursor: pointer;
 
-    z-index:999;
+  user-select: none;
 }
 
-.navbar__logo{
-    display:flex;
-    flex-direction:column;
+.navbar-brand__mark {
+  width: 39px;
+  height: 39px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 9px;
+
+  background: linear-gradient(135deg, #6378ff, #7857d9);
+
+  color: #ffffff;
+
+  font-size: 11px;
+  font-weight: 800;
+
+  letter-spacing: 0.5px;
+
+  box-shadow: 0 0 25px rgba(99, 120, 255, 0.18);
 }
 
-.navbar__logo h2{
-    color:#2563EB;
-    font-size:26px;
-    font-weight:700;
+.navbar-brand__text {
+  display: flex;
+  flex-direction: column;
+
+  gap: 2px;
 }
 
-.navbar__logo span{
-    color:#94A3B8;
-    font-size:11px;
-    letter-spacing:1px;
+.navbar-brand__text strong {
+  color: #f1f4f8;
+
+  font-size: 13px;
+
+  font-weight: 700;
+
+  letter-spacing: -0.2px;
 }
 
-.navbar__links{
-    display:flex;
-    align-items:center;
-    gap:30px;
+.navbar-brand__text span {
+  color: #667181;
+
+  font-size: 9px;
+
+  letter-spacing: 0.6px;
 }
 
-.navbar__links a{
-    text-decoration:none;
-    color:#CBD5E1;
-    font-size:15px;
-    font-weight:500;
-    transition:.25s;
-    padding-bottom:6px;
+/* ==========================================================
+   RIGHT ACTIONS
+========================================================== */
+
+.navbar-actions {
+  display: flex;
+  align-items: center;
+
+  gap: 12px;
 }
 
-.navbar__links a:hover{
-    color:white;
+/* ==========================================================
+   NOTIFICATIONS
+========================================================== */
+
+.navbar-notification {
+  position: relative;
+
+  width: 38px;
+  height: 38px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border: 1px solid rgba(255, 255, 255, 0.07);
+
+  border-radius: 9px;
+
+  background: rgba(255, 255, 255, 0.025);
+
+  color: #8b96a7;
+
+  cursor: pointer;
+
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease,
+    color 0.2s ease;
 }
 
-.navbar__links a.active{
-    color:#2563EB;
-    border-bottom:2px solid #2563EB;
+.navbar-notification:hover {
+  background: rgba(255, 255, 255, 0.06);
+
+  border-color: rgba(255, 255, 255, 0.14);
+
+  color: #ffffff;
 }
 
-.navbar__right{
-    display:flex;
-    align-items:center;
-    gap:18px;
+.navbar-notification svg {
+  font-size: 14px;
 }
 
-.notification-btn,
-.profile-btn{
-    border:none;
-    outline:none;
-    background:transparent;
-    color:white;
-    cursor:pointer;
+.notification-indicator {
+  position: absolute;
+
+  top: 7px;
+  right: 7px;
+
+  width: 5px;
+  height: 5px;
+
+  border-radius: 50%;
+
+  background: #7286ff;
+
+  box-shadow: 0 0 8px rgba(114, 134, 255, 0.9);
 }
 
-.notification-btn{
-    font-size:22px;
+/* ==========================================================
+   PROFILE WRAPPER
+========================================================== */
+
+.profile-wrapper {
+  position: relative;
 }
 
-.notification-btn:hover{
-    color:#2563EB;
+/* ==========================================================
+   PROFILE TRIGGER
+========================================================== */
+
+.profile-trigger {
+  min-height: 44px;
+
+  display: flex;
+  align-items: center;
+
+  gap: 9px;
+
+  padding: 5px 9px;
+
+  border: 1px solid transparent;
+
+  border-radius: 9px;
+
+  background: transparent;
+
+  color: #d9dee6;
+
+  cursor: pointer;
+
+  transition:
+    background 0.2s ease,
+    border-color 0.2s ease;
 }
 
-.profile-btn{
-    display:flex;
-    align-items:center;
-    gap:10px;
-    font-size:15px;
+.profile-trigger:hover,
+.profile-trigger--active {
+  background: rgba(255, 255, 255, 0.045);
+
+  border-color: rgba(255, 255, 255, 0.07);
 }
 
-.profile-btn svg{
-    font-size:30px;
+/* ==========================================================
+   PROFILE AVATAR
+========================================================== */
+
+.profile-avatar {
+  flex-shrink: 0;
+
+  font-size: 29px;
+
+  color: #7e91ff;
 }
 
-.profile-btn:hover{
-    color:#2563EB;
+/* ==========================================================
+   PROFILE INFO
+========================================================== */
+
+.profile-info {
+  display: flex;
+  flex-direction: column;
+
+  align-items: flex-start;
+
+  gap: 2px;
+
+  max-width: 160px;
 }
 
-@media(max-width:1100px){
+.profile-info strong {
+  max-width: 160px;
 
-    .navbar{
-        padding:0 20px;
-    }
+  overflow: hidden;
 
-    .navbar__links{
-        gap:18px;
-    }
+  text-overflow: ellipsis;
 
+  white-space: nowrap;
+
+  color: #e5e9ef;
+
+  font-size: 12px;
+
+  font-weight: 600;
 }
 
-@media(max-width:900px){
+.profile-info span {
+  max-width: 160px;
 
-    .navbar__links{
-        display:none;
-    }
+  overflow: hidden;
 
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  color: #687486;
+
+  font-size: 9px;
 }
 
-.auth-links{
-    display:flex;
-    align-items:center;
-    gap:15px;
+/* ==========================================================
+   CHEVRON
+========================================================== */
+
+.profile-chevron {
+  margin-left: 3px;
+
+  color: #687486;
+
+  font-size: 9px;
+
+  transition: transform 0.2s ease;
 }
 
-.auth-links a{
-    text-decoration:none;
-    font-weight:600;
-    transition:0.3s;
+.profile-chevron--open {
+  transform: rotate(180deg);
 }
 
-.login-btn{
-    color:#CBD5E1;
+/* ==========================================================
+   PROFILE DROPDOWN
+========================================================== */
+
+.profile-dropdown {
+  position: absolute;
+
+  top: calc(100% + 10px);
+  right: 0;
+
+  width: 285px;
+
+  padding: 8px;
+
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  border-radius: 13px;
+
+  background: rgba(11, 15, 22, 0.97);
+
+  backdrop-filter: blur(24px);
+  -webkit-backdrop-filter: blur(24px);
+
+  box-shadow:
+    0 25px 70px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(255, 255, 255, 0.015);
+
+  animation: dropdown-enter 0.18s ease-out;
+
+  transform-origin: top right;
 }
 
-.login-btn:hover{
-    color:#ffffff;
+@keyframes dropdown-enter {
+  from {
+    opacity: 0;
+
+    transform: translateY(-7px) scale(0.97);
+  }
+
+  to {
+    opacity: 1;
+
+    transform: translateY(0) scale(1);
+  }
 }
 
-.register-btn{
-    background:#2563EB;
-    color:white;
-    padding:10px 18px;
-    border-radius:8px;
+/* ==========================================================
+   DROPDOWN USER
+========================================================== */
+
+.dropdown-user {
+  display: flex;
+  align-items: center;
+
+  gap: 12px;
+
+  padding: 12px 11px;
 }
 
-.register-btn:hover{
-    background:#1D4ED8;
+.dropdown-user__avatar {
+  width: 39px;
+  height: 39px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 10px;
+
+  background: rgba(114, 134, 255, 0.1);
+
+  color: #8295ff;
 }
 
-
-/* ===========================
-   Shared Button Animation
-=========================== */
-
-.notification-btn,
-.profile-btn,
-.logout-btn {
-    border: none;
-    outline: none;
-    background: transparent;
-    color: white;
-    cursor: pointer;
-    transition: .25s ease;
+.dropdown-user__avatar svg {
+  font-size: 25px;
 }
 
-/* ===========================
-   Notification
-=========================== */
+.dropdown-user__details {
+  min-width: 0;
 
-.notification-btn{
-    font-size:22px;
+  display: flex;
+  flex-direction: column;
+
+  gap: 4px;
 }
 
-.notification-btn:hover{
-    color:#2563EB;
-    transform:translateY(-2px);
+.dropdown-user__details strong {
+  overflow: hidden;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+
+  color: #eef1f5;
+
+  font-size: 12px;
+
+  font-weight: 600;
 }
 
-/* ===========================
-   Profile
-=========================== */
+.dropdown-user__details span {
+  overflow: hidden;
 
-.profile-btn{
-    display:flex;
-    align-items:center;
-    gap:10px;
+  text-overflow: ellipsis;
 
-    padding:8px 14px;
+  white-space: nowrap;
 
-    border-radius:10px;
+  color: #687486;
+
+  font-size: 10px;
 }
 
-.profile-btn svg{
-    font-size:30px;
+/* ==========================================================
+   DIVIDER
+========================================================== */
+
+.dropdown-divider {
+  width: 100%;
+  height: 1px;
+
+  margin: 5px 0;
+
+  background: rgba(255, 255, 255, 0.06);
 }
 
-.profile-btn:hover{
-    background:#1E293B;
-    color:#60A5FA;
+/* ==========================================================
+   DROPDOWN ITEM
+========================================================== */
+
+.dropdown-item {
+  width: 100%;
+
+  display: flex;
+  align-items: center;
+
+  gap: 11px;
+
+  padding: 10px;
+
+  border: none;
+
+  border-radius: 8px;
+
+  background: transparent;
+
+  color: #b1bac7;
+
+  cursor: pointer;
+
+  text-align: left;
+
+  transition:
+    background 0.18s ease,
+    color 0.18s ease;
 }
 
-/* ===========================
-   Logout
-=========================== */
+.dropdown-item:hover {
+  background: rgba(255, 255, 255, 0.045);
 
-.logout-btn{
-    display:flex;
-    align-items:center;
-    gap:8px;
-
-    padding:10px 16px;
-
-    background:#DC2626;
-    border-radius:8px;
-
-    font-weight:600;
+  color: #ffffff;
 }
 
-.logout-btn:hover{
-    background:#B91C1C;
-    transform:translateY(-2px);
+/* ==========================================================
+   ITEM ICON
+========================================================== */
+
+.dropdown-item__icon {
+  width: 31px;
+  height: 31px;
+
+  flex-shrink: 0;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  border-radius: 7px;
+
+  background: rgba(255, 255, 255, 0.035);
+
+  color: #758198;
+
+  transition:
+    background 0.18s ease,
+    color 0.18s ease;
 }
 
-/* ===========================
-   Nav Links
-=========================== */
+.dropdown-item:hover .dropdown-item__icon {
+  background: rgba(114, 134, 255, 0.1);
 
-.navbar__links a{
-    position:relative;
-    text-decoration:none;
-    color:#CBD5E1;
-    font-size:15px;
-    font-weight:500;
-    transition:.25s;
-    padding-bottom:8px;
+  color: #8194ff;
 }
 
-.navbar__links a::after{
-    content:"";
-    position:absolute;
-    left:0;
-    bottom:0;
-
-    width:0%;
-    height:2px;
-
-    background:#2563EB;
-
-    transition:.3s;
+.dropdown-item__icon svg {
+  font-size: 12px;
 }
 
-.navbar__links a:hover{
-    color:white;
+/* ==========================================================
+   ITEM CONTENT
+========================================================== */
+
+.dropdown-item__content {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 2px;
 }
 
-.navbar__links a:hover::after{
-    width:100%;
+.dropdown-item__content strong {
+  color: inherit;
+
+  font-size: 11px;
+
+  font-weight: 600;
 }
 
-.navbar__links a.active{
-    color:#60A5FA;
+.dropdown-item__content small {
+  color: #626e7f;
+
+  font-size: 9px;
 }
 
-.navbar__links a.active::after{
-    width:100%;
+/* ==========================================================
+   LOGOUT
+========================================================== */
+
+.dropdown-item--logout {
+  color: #d97882;
 }
 
-/* ===========================
-   Login
-=========================== */
+.dropdown-item--logout .dropdown-item__icon {
+  color: #c86672;
 
-.login-btn{
-    color:#CBD5E1;
-    padding:10px 16px;
-    border-radius:8px;
-    transition:.25s;
+  background: rgba(215, 94, 108, 0.06);
 }
 
-.login-btn:hover{
-    background:#1E293B;
-    color:white;
+.dropdown-item--logout:hover {
+  color: #ff8d98;
+
+  background: rgba(215, 94, 108, 0.07);
 }
 
-.active-auth{
-    background:#1E40AF;
-    color:white !important;
+.dropdown-item--logout:hover .dropdown-item__icon {
+  color: #ff7e8a;
+
+  background: rgba(215, 94, 108, 0.1);
 }
 
-/* ===========================
-   Register
-=========================== */
+/* ==========================================================
+   PUBLIC AUTH BUTTONS
+========================================================== */
 
-.register-btn{
-    background:#2563EB;
-    color:white;
-    padding:10px 18px;
-    border-radius:8px;
-    transition:.25s;
+.navbar-auth {
+  display: flex;
+  align-items: center;
+
+  gap: 9px;
 }
 
-.register-btn:hover{
-    background:#1D4ED8;
-    transform:translateY(-2px);
+.navbar-login,
+.navbar-register {
+  height: 38px;
+
+  padding: 0 16px;
+
+  border-radius: 8px;
+
+  font-size: 11px;
+
+  font-weight: 600;
+
+  cursor: pointer;
+
+  transition:
+    transform 0.2s ease,
+    background 0.2s ease,
+    border-color 0.2s ease;
 }
 
-.active-register{
-    background:#1E40AF;
+.navbar-login {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+
+  background: rgba(255, 255, 255, 0.025);
+
+  color: #b7c0cc;
 }
 
-/* ===========================
-   Auth Links
-=========================== */
+.navbar-login:hover {
+  background: rgba(255, 255, 255, 0.06);
 
-.auth-links{
-    display:flex;
-    gap:15px;
-    align-items:center;
+  color: #ffffff;
+}
+
+.navbar-register {
+  border: none;
+
+  background: linear-gradient(135deg, #687dff, #7558d9);
+
+  color: #ffffff;
+
+  box-shadow: 0 8px 25px rgba(103, 125, 255, 0.15);
+}
+
+.navbar-register:hover {
+  transform: translateY(-1px);
+
+  box-shadow: 0 12px 30px rgba(103, 125, 255, 0.25);
+}
+
+/* ==========================================================
+   MOBILE
+========================================================== */
+
+@media (max-width: 700px) {
+  .navbar {
+    height: 64px;
+
+    padding: 0 16px;
+  }
+
+  .navbar-brand__text span {
+    display: none;
+  }
+
+  .navbar-brand__text strong {
+    font-size: 12px;
+  }
+
+  .profile-info {
+    display: none;
+  }
+
+  .profile-trigger {
+    padding: 5px;
+  }
+
+  .profile-chevron {
+    display: none;
+  }
+
+  .profile-dropdown {
+    right: -5px;
+
+    width: 270px;
+  }
+
+  .navbar-notification {
+    width: 36px;
+    height: 36px;
+  }
+}
+
+@media (max-width: 420px) {
+  .navbar-brand__mark {
+    width: 35px;
+    height: 35px;
+  }
+
+  .navbar-brand__text strong {
+    font-size: 11px;
+  }
+
+  .navbar-actions {
+    gap: 5px;
+  }
+
+  .navbar-auth {
+    gap: 5px;
+  }
+
+  .navbar-login,
+  .navbar-register {
+    padding: 0 10px;
+
+    font-size: 10px;
+  }
 }
