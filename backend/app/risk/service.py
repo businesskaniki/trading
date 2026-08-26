@@ -1,14 +1,15 @@
+from dataclasses import dataclass
 from decimal import Decimal
 from uuid import UUID
+
+from app.core.constants import PositionStatus
 
 from app.risk.calculator import RiskCalculator
 from app.risk.exceptions import (
     InvalidRiskConfiguration,
     RiskProfileNotFound,
 )
-from app.risk.repository import (
-    RiskProfileRepository,
-)
+from app.risk.repository import RiskProfileRepository
 from app.risk.rules import RiskRules
 from app.risk.schemas import (
     RiskCheckRequest,
@@ -20,24 +21,114 @@ from app.risk.schemas import (
     RiskSizingResponse,
 )
 
+from app.repositories.trading_account_repository import (
+    TradingAccountRepository,
+)
+from app.repositories.symbol_repository import (
+    SymbolRepository,
+)
+from app.repositories.position_repository import (
+    PositionRepository,
+)
+
+# ==============================================================
+# SERVER-SIDE RISK STATE
+# ==============================================================
+
+
+@dataclass
+class RiskState:
+    """
+    Server-side representation of the current risk state
+    of a trading account.
+
+    This object is NOT persisted directly.
+
+    It is constructed from the database and represents the
+    current state that the Risk Engine uses when evaluating
+    a proposed trade.
+    """
+
+    # ----------------------------------------------------------
+    # Account
+    # ----------------------------------------------------------
+
+    account_id: UUID
+
+    balance: Decimal
+    equity: Decimal
+    margin: Decimal
+    free_margin: Decimal
+    margin_level: Decimal
+
+    # ----------------------------------------------------------
+    # Open positions
+    # ----------------------------------------------------------
+
+    open_positions: int
+    total_volume: Decimal
+
+    # ----------------------------------------------------------
+    # Risk
+    # ----------------------------------------------------------
+
+    total_open_risk: Decimal
+    total_exposure: Decimal
+
+    # ----------------------------------------------------------
+    # Daily / drawdown
+    #
+    # These are currently derived from available position/account
+    # information. Later they should be connected to the account
+    # equity history / risk snapshots.
+    # ----------------------------------------------------------
+
+    floating_profit_loss: Decimal
+    daily_loss_amount: Decimal
+    drawdown_amount: Decimal
+
 
 class RiskService:
     """
-    Application service for account risk management.
+    Application service / orchestrator for the AQE Risk Engine.
 
-    Responsibilities:
+    Responsibilities
+    ----------------
 
-    - Manage account risk profiles.
-    - Calculate effective risk.
-    - Calculate risk-based position sizing.
-    - Enforce account-level risk limits.
+    1. Manage risk profiles.
+    2. Load the trading account from the database.
+    3. Load symbol information from the database.
+    4. Build the current server-side RiskState.
+    5. Calculate effective risk.
+    6. Calculate position sizing.
+    7. Evaluate proposed trades against risk rules.
+
+    Important
+    ---------
+
+    The frontend must NOT be trusted to provide current:
+
+        - account equity
+        - open positions
+        - open risk
+        - exposure
+        - daily loss
+        - drawdown
+
+    Those values are reconstructed server-side.
     """
 
     def __init__(
         self,
-        repository: RiskProfileRepository,
+        risk_repository: RiskProfileRepository,
+        trading_account_repository: TradingAccountRepository,
+        symbol_repository: SymbolRepository,
+        position_repository: PositionRepository,
     ):
-        self.repository = repository
+        self.risk_repository = risk_repository
+        self.trading_account_repository = trading_account_repository
+        self.symbol_repository = symbol_repository
+        self.position_repository = position_repository
 
     # ==========================================================
     # PROFILE VALIDATION
@@ -56,32 +147,20 @@ class RiskService:
     ) -> None:
 
         if min_risk_percent <= 0:
-            raise InvalidRiskConfiguration(
-                "Minimum risk must be greater than zero"
-            )
+            raise InvalidRiskConfiguration("Minimum risk must be greater than zero")
 
         if base_risk_percent <= 0:
-            raise InvalidRiskConfiguration(
-                "Base risk must be greater than zero"
-            )
+            raise InvalidRiskConfiguration("Base risk must be greater than zero")
 
         if max_risk_percent <= 0:
-            raise InvalidRiskConfiguration(
-                "Maximum risk must be greater than zero"
-            )
+            raise InvalidRiskConfiguration("Maximum risk must be greater than zero")
 
-        if (
-            min_risk_percent
-            > base_risk_percent
-        ):
+        if min_risk_percent > base_risk_percent:
             raise InvalidRiskConfiguration(
                 "Minimum risk cannot be greater than base risk"
             )
 
-        if (
-            base_risk_percent
-            > max_risk_percent
-        ):
+        if base_risk_percent > max_risk_percent:
             raise InvalidRiskConfiguration(
                 "Base risk cannot be greater than maximum risk"
             )
@@ -124,44 +203,37 @@ class RiskService:
             base_risk_percent=data.base_risk_percent,
             max_risk_percent=data.max_risk_percent,
             risk_multiplier=data.risk_multiplier,
-            max_daily_loss_percent=(
-                data.max_daily_loss_percent
-            ),
-            max_drawdown_percent=(
-                data.max_drawdown_percent
-            ),
-            max_open_risk_percent=(
-                data.max_open_risk_percent
-            ),
+            max_daily_loss_percent=data.max_daily_loss_percent,
+            max_drawdown_percent=data.max_drawdown_percent,
+            max_open_risk_percent=data.max_open_risk_percent,
         )
 
-        if (
-            data.max_open_risk_percent
-            < data.max_risk_percent
-        ):
+        if data.max_open_risk_percent < data.max_risk_percent:
             raise InvalidRiskConfiguration(
-                "Maximum open risk cannot be lower than "
-                "maximum risk per trade"
+                "Maximum open risk cannot be lower than " "maximum risk per trade"
             )
 
-        existing = (
-            await self.repository.get_by_account(
-                data.account_id
-            )
-        )
+        existing = await self.risk_repository.get_by_account(data.account_id)
 
         if existing:
             raise InvalidRiskConfiguration(
                 "A risk profile already exists for this account"
             )
 
-        profile = await self.repository.create(
-            **data.model_dump()
-        )
+        # ------------------------------------------------------
+        # Verify trading account exists
+        # ------------------------------------------------------
 
-        return RiskProfileResponse.model_validate(
-            profile
-        )
+        account = await self.trading_account_repository.get_by_id(data.account_id)
+
+        if not account:
+            raise InvalidRiskConfiguration(
+                f"Trading account {data.account_id} does not exist"
+            )
+
+        profile = await self.risk_repository.create(**data.model_dump())
+
+        return RiskProfileResponse.model_validate(profile)
 
     # ==========================================================
     # GET PROFILE
@@ -172,21 +244,14 @@ class RiskService:
         account_id: UUID,
     ) -> RiskProfileResponse:
 
-        profile = (
-            await self.repository.get_by_account(
-                account_id
-            )
-        )
+        profile = await self.risk_repository.get_by_account(account_id)
 
         if not profile:
             raise RiskProfileNotFound(
-                f"No risk profile exists for account "
-                f"{account_id}"
+                f"No risk profile exists for account " f"{account_id}"
             )
 
-        return RiskProfileResponse.model_validate(
-            profile
-        )
+        return RiskProfileResponse.model_validate(profile)
 
     # ==========================================================
     # UPDATE PROFILE
@@ -198,21 +263,14 @@ class RiskService:
         data: RiskProfileUpdate,
     ) -> RiskProfileResponse:
 
-        profile = (
-            await self.repository.get_by_account(
-                account_id
-            )
-        )
+        profile = await self.risk_repository.get_by_account(account_id)
 
         if not profile:
             raise RiskProfileNotFound(
-                f"No risk profile exists for account "
-                f"{account_id}"
+                f"No risk profile exists for account " f"{account_id}"
             )
 
-        values = data.model_dump(
-            exclude_unset=True
-        )
+        values = data.model_dump(exclude_unset=True)
 
         min_risk = values.get(
             "min_risk_percent",
@@ -261,17 +319,213 @@ class RiskService:
 
         if max_open_risk < max_risk:
             raise InvalidRiskConfiguration(
-                "Maximum open risk cannot be lower than "
-                "maximum risk per trade"
+                "Maximum open risk cannot be lower than " "maximum risk per trade"
             )
 
-        profile = await self.repository.update(
+        profile = await self.risk_repository.update(
             profile,
             **values,
         )
 
-        return RiskProfileResponse.model_validate(
-            profile
+        return RiskProfileResponse.model_validate(profile)
+
+    # ==========================================================
+    # LOAD ACCOUNT
+    # ==========================================================
+
+    async def _get_account(
+        self,
+        account_id: UUID,
+    ):
+        """
+        Load the trading account from the database.
+
+        Centralized so every risk operation uses the same
+        account lookup.
+        """
+
+        account = await self.trading_account_repository.get_by_id(account_id)
+
+        if not account:
+            raise InvalidRiskConfiguration(
+                f"Trading account {account_id} does not exist"
+            )
+
+        return account
+
+    # ==========================================================
+    # LOAD SYMBOL
+    # ==========================================================
+
+    async def _get_symbol(
+        self,
+        symbol_id: UUID,
+    ):
+        """
+        Load symbol metadata from the database.
+        """
+
+        symbol = await self.symbol_repository.get_by_id(symbol_id)
+
+        if not symbol:
+            raise InvalidRiskConfiguration(f"Symbol {symbol_id} does not exist")
+
+        if not symbol.active:
+            raise InvalidRiskConfiguration(f"Symbol {symbol_id} is not active")
+
+        return symbol
+
+    # ==========================================================
+    # BUILD SERVER-SIDE RISK STATE
+    # ==========================================================
+
+    async def build_risk_state(
+        self,
+        account_id: UUID,
+    ) -> RiskState:
+
+        # ------------------------------------------------------
+        # 1. Load account
+        # ------------------------------------------------------
+
+        account = await self._get_account(account_id)
+
+        # ------------------------------------------------------
+        # 2. Load open positions
+        # ------------------------------------------------------
+
+        positions = await self.position_repository.get_by_account(account_id)
+
+        open_positions = [
+            position for position in positions if position.status == PositionStatus.OPEN
+        ]
+
+        # ------------------------------------------------------
+        # 3. Aggregate position volume
+        # ------------------------------------------------------
+
+        total_volume = Decimal("0")
+
+        for position in open_positions:
+
+            current_volume = (
+                position.current_volume
+                if position.current_volume is not None
+                else position.volume
+            )
+
+            total_volume += current_volume
+
+        # ------------------------------------------------------
+        # 4. Aggregate open risk
+        # ------------------------------------------------------
+
+        total_open_risk = Decimal("0")
+
+        for position in open_positions:
+
+            if position.initial_risk is not None:
+                total_open_risk += position.initial_risk
+
+        # ------------------------------------------------------
+        # 5. Aggregate floating P/L
+        # ------------------------------------------------------
+
+        floating_profit_loss = Decimal("0")
+
+        for position in open_positions:
+
+            if position.floating_profit is not None:
+                floating_profit_loss += position.floating_profit
+
+        # ------------------------------------------------------
+        # 6. Exposure
+        # ------------------------------------------------------
+        #
+        # At this stage we use:
+        #
+        #       current_price × current_volume
+        #
+        # Later, this should be upgraded to use the symbol's
+        # contract size / broker-specific notional calculation.
+        #
+        # We deliberately keep this calculation here rather than
+        # putting it inside RiskCalculator because RiskCalculator
+        # must remain a pure mathematical component.
+        # ------------------------------------------------------
+
+        total_exposure = Decimal("0")
+
+        for position in open_positions:
+
+            current_volume = (
+                position.current_volume
+                if position.current_volume is not None
+                else position.volume
+            )
+
+            current_price = position.current_price
+
+            if current_volume is not None and current_price is not None:
+                total_exposure += current_volume * current_price
+
+        # ------------------------------------------------------
+        # 7. Daily loss
+        # ------------------------------------------------------
+        #
+        # At this stage the account model does not appear to have
+        # a dedicated daily-start-equity field.
+        #
+        # Therefore we do NOT fabricate a daily loss number.
+        #
+        # The current floating loss is used as the temporary
+        # server-side risk signal.
+        #
+        # Once RiskSnapshot/history is implemented, this will be
+        # replaced by:
+        #
+        #     start_of_day_equity - current_equity
+        #
+        # ------------------------------------------------------
+
+        daily_loss_amount = Decimal("0")
+
+        if floating_profit_loss < 0:
+            daily_loss_amount = abs(floating_profit_loss)
+
+        # ------------------------------------------------------
+        # 8. Drawdown
+        # ------------------------------------------------------
+        #
+        # True drawdown requires an equity high-water mark.
+        #
+        # That will be introduced with RiskSnapshot / account
+        # equity history.
+        #
+        # For now, we use zero rather than pretending floating
+        # loss is historical drawdown.
+        # ------------------------------------------------------
+
+        drawdown_amount = Decimal("0")
+
+        # ------------------------------------------------------
+        # 9. Return server-side state
+        # ------------------------------------------------------
+
+        return RiskState(
+            account_id=account.id,
+            balance=account.balance,
+            equity=account.equity,
+            margin=account.margin,
+            free_margin=account.free_margin,
+            margin_level=account.margin_level,
+            open_positions=len(open_positions),
+            total_volume=total_volume,
+            total_open_risk=total_open_risk,
+            total_exposure=total_exposure,
+            floating_profit_loss=floating_profit_loss,
+            daily_loss_amount=daily_loss_amount,
+            drawdown_amount=drawdown_amount,
         )
 
     # ==========================================================
@@ -283,16 +537,16 @@ class RiskService:
         account_id: UUID,
     ) -> Decimal:
 
-        profile = (
-            await self.repository.get_by_account(
-                account_id
-            )
-        )
+        profile = await self.risk_repository.get_by_account(account_id)
 
         if not profile:
             raise RiskProfileNotFound(
-                f"No risk profile exists for account "
-                f"{account_id}"
+                f"No risk profile exists for account " f"{account_id}"
+            )
+
+        if not profile.enabled:
+            raise InvalidRiskConfiguration(
+                "Risk management is disabled for this account"
             )
 
         return RiskCalculator.effective_risk_percent(
@@ -309,19 +563,29 @@ class RiskService:
     async def calculate_position_size(
         self,
         data: RiskSizingRequest,
-        account_equity: Decimal,
     ) -> RiskSizingResponse:
 
-        profile = (
-            await self.repository.get_by_account(
-                data.account_id
-            )
-        )
+        # ------------------------------------------------------
+        # 1. Load account server-side
+        # ------------------------------------------------------
+
+        account = await self._get_account(data.account_id)
+
+        # ------------------------------------------------------
+        # 2. Load symbol server-side
+        # ------------------------------------------------------
+
+        symbol = await self._get_symbol(data.symbol_id)
+
+        # ------------------------------------------------------
+        # 3. Load risk profile
+        # ------------------------------------------------------
+
+        profile = await self.risk_repository.get_by_account(data.account_id)
 
         if not profile:
             raise RiskProfileNotFound(
-                f"No risk profile exists for account "
-                f"{data.account_id}"
+                f"No risk profile exists for account " f"{data.account_id}"
             )
 
         if not profile.enabled:
@@ -329,48 +593,100 @@ class RiskService:
                 "Risk management is disabled for this account"
             )
 
-        risk_percent = (
-            RiskCalculator.effective_risk_percent(
-                base_risk_percent=profile.base_risk_percent,
-                risk_multiplier=profile.risk_multiplier,
-                min_risk_percent=profile.min_risk_percent,
-                max_risk_percent=profile.max_risk_percent,
-            )
+        # ------------------------------------------------------
+        # 4. Effective risk
+        # ------------------------------------------------------
+
+        risk_percent = RiskCalculator.effective_risk_percent(
+            base_risk_percent=profile.base_risk_percent,
+            risk_multiplier=profile.risk_multiplier,
+            min_risk_percent=profile.min_risk_percent,
+            max_risk_percent=profile.max_risk_percent,
         )
 
-        risk_amount = (
-            RiskCalculator.risk_amount(
-                equity=account_equity,
-                risk_percent=risk_percent,
-            )
+        # ------------------------------------------------------
+        # 5. Account risk amount
+        # ------------------------------------------------------
+
+        risk_amount = RiskCalculator.risk_amount(
+            equity=account.equity,
+            risk_percent=risk_percent,
         )
 
-        stop_distance = (
-            RiskCalculator.stop_distance(
-                entry_price=data.entry_price,
-                stop_loss_price=data.stop_loss_price,
-            )
+        # ------------------------------------------------------
+        # 6. Stop distance
+        # ------------------------------------------------------
+
+        stop_distance = RiskCalculator.stop_distance(
+            entry_price=data.entry_price,
+            stop_loss_price=data.stop_loss_price,
         )
 
-        risk_per_unit = (
-            RiskCalculator.risk_per_unit(
-                stop_distance=stop_distance,
-                tick_size=data.tick_size,
-                tick_value=data.tick_value,
+        # ------------------------------------------------------
+        # 7. Tick information
+        # ------------------------------------------------------
+        #
+        # Symbol metadata is now loaded server-side.
+        #
+        # We prefer the database symbol values.
+        #
+        # The request should not be trusted to override broker
+        # symbol specifications.
+        # ------------------------------------------------------
+
+        tick_size = symbol.tick_size
+
+        tick_value = symbol.tick_value
+
+        if tick_size <= 0:
+            raise InvalidRiskConfiguration(
+                f"Symbol {symbol.name} has an invalid tick size"
             )
+
+        if tick_value <= 0:
+            raise InvalidRiskConfiguration(
+                f"Symbol {symbol.name} has an invalid tick value"
+            )
+
+        # ------------------------------------------------------
+        # 8. Risk per unit
+        # ------------------------------------------------------
+
+        risk_per_unit = RiskCalculator.risk_per_unit(
+            stop_distance=stop_distance,
+            tick_size=tick_size,
+            tick_value=tick_value,
         )
 
-        raw_volume = (
-            risk_amount
-            / risk_per_unit
+        # ------------------------------------------------------
+        # 9. Raw volume
+        # ------------------------------------------------------
+
+        raw_volume = risk_amount / risk_per_unit
+
+        # ------------------------------------------------------
+        # 10. Recommended volume
+        # ------------------------------------------------------
+
+        recommended_volume = RiskCalculator.position_size(
+            risk_amount=risk_amount,
+            risk_per_unit=risk_per_unit,
+            volume_step=symbol.volume_step,
         )
 
-        recommended_volume = (
-            RiskCalculator.position_size(
-                risk_amount=risk_amount,
-                risk_per_unit=risk_per_unit,
+        # ------------------------------------------------------
+        # 11. Broker volume limits
+        # ------------------------------------------------------
+
+        if recommended_volume < symbol.min_volume:
+            raise InvalidRiskConfiguration(
+                "Calculated position size is below the symbol " "minimum volume"
             )
-        )
+
+        if recommended_volume > symbol.max_volume:
+            raise InvalidRiskConfiguration(
+                "Calculated position size exceeds the symbol " "maximum volume"
+            )
 
         return RiskSizingResponse(
             risk_percent=risk_percent,
@@ -379,17 +695,15 @@ class RiskService:
             entry_price=data.entry_price,
             stop_loss_price=data.stop_loss_price,
             stop_distance=stop_distance,
-            tick_size=data.tick_size,
-            tick_value=data.tick_value,
-            raw_volume=raw_volume.quantize(
-                Decimal("0.00000001")
-            ),
+            tick_size=tick_size,
+            tick_value=tick_value,
+            raw_volume=raw_volume.quantize(Decimal("0.00000001")),
             recommended_volume=recommended_volume,
             risk_per_unit=risk_per_unit,
         )
 
     # ==========================================================
-    # RISK CHECK
+    # SERVER-SIDE RISK CHECK
     # ==========================================================
 
     async def check_trade(
@@ -397,45 +711,69 @@ class RiskService:
         data: RiskCheckRequest,
     ) -> RiskCheckResponse:
 
-        profile = (
-            await self.repository.get_by_account(
-                data.account_id
-            )
-        )
+        # ------------------------------------------------------
+        # 1. Load account
+        # ------------------------------------------------------
+
+        account = await self._get_account(data.account_id)
+
+        # ------------------------------------------------------
+        # 2. Load risk profile
+        # ------------------------------------------------------
+
+        profile = await self.risk_repository.get_by_account(data.account_id)
 
         if not profile:
             raise RiskProfileNotFound(
-                f"No risk profile exists for account "
-                f"{data.account_id}"
+                f"No risk profile exists for account " f"{data.account_id}"
             )
 
-        rules = RiskRules(
-            profile
-        )
+        if not profile.enabled:
+            raise InvalidRiskConfiguration(
+                "Risk management is disabled for this account"
+            )
+
+        # ------------------------------------------------------
+        # 3. Build server-side risk state
+        # ------------------------------------------------------
+
+        state = await self.build_risk_state(data.account_id)
+
+        # ------------------------------------------------------
+        # 4. Determine proposed risk
+        # ------------------------------------------------------
+        #
+        # The proposed trade risk amount may still come from the
+        # position-sizing calculation.
+        #
+        # However, current account state MUST come from the
+        # server-side RiskState.
+        # ------------------------------------------------------
+
+        proposed_risk_amount = data.proposed_risk_amount
+
+        proposed_symbol_exposure_amount = data.proposed_symbol_exposure_amount
+
+        proposed_strategy_exposure_amount = data.proposed_strategy_exposure_amount
+
+        # ------------------------------------------------------
+        # 5. Risk rules
+        # ------------------------------------------------------
+
+        rules = RiskRules(profile)
 
         return rules.check(
-            proposed_risk_amount=(
-                data.proposed_risk_amount
-            ),
-            proposed_symbol_exposure_amount=(
-                data.proposed_symbol_exposure_amount
-            ),
-            proposed_strategy_exposure_amount=(
-                data.proposed_strategy_exposure_amount
-            ),
-            current_open_risk_amount=(
-                data.current_open_risk_amount
-            ),
-            current_symbol_exposure_amount=(
-                data.current_symbol_exposure_amount
-            ),
-            current_strategy_exposure_amount=(
-                data.current_strategy_exposure_amount
-            ),
-            current_open_positions=(
-                data.current_open_positions
-            ),
-            account_equity=data.account_equity,
-            daily_loss_amount=data.daily_loss_amount,
-            drawdown_amount=data.drawdown_amount,
+            proposed_risk_amount=(proposed_risk_amount),
+            proposed_symbol_exposure_amount=(proposed_symbol_exposure_amount),
+            proposed_strategy_exposure_amount=(proposed_strategy_exposure_amount),
+            # --------------------------------------------------
+            # SERVER-SIDE VALUES
+            # --------------------------------------------------
+            current_open_risk_amount=(state.total_open_risk),
+            current_symbol_exposure_amount=(data.current_symbol_exposure_amount),
+            current_strategy_exposure_amount=(data.current_strategy_exposure_amount),
+            current_open_positions=(state.open_positions),
+            account_equity=(state.equity),
+            daily_loss_amount=(state.daily_loss_amount),
+            drawdown_amount=(state.drawdown_amount),
         )

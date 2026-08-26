@@ -1,18 +1,45 @@
 class RiskError(Exception):
     """
-    Base exception for Risk Engine failures.
+    Base exception for all Risk Engine failures.
     """
+
+
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
 
 
 class InvalidRiskConfiguration(RiskError):
     """
-    Risk configuration is invalid.
+    Risk profile or risk configuration is invalid.
     """
+
+
+class RiskProfileNotFound(RiskError):
+    """
+    No risk profile exists for the trading account.
+    """
+
+
+# ==========================================================
+# CALCULATION
+# ==========================================================
+
+
+class RiskCalculationError(RiskError):
+    """
+    A mathematical risk calculation failed.
+    """
+
+
+# ==========================================================
+# RISK LIMITS
+# ==========================================================
 
 
 class RiskLimitExceeded(RiskError):
     """
-    Proposed trade violates a risk limit.
+    A proposed trade violates one or more risk limits.
     """
 
 
@@ -22,9 +49,15 @@ class DailyLossLimitExceeded(RiskLimitExceeded):
     """
 
 
+class WeeklyLossLimitExceeded(RiskLimitExceeded):
+    """
+    Weekly loss limit has been exceeded.
+    """
+
+
 class DrawdownLimitExceeded(RiskLimitExceeded):
     """
-    Maximum drawdown limit has been exceeded.
+    Maximum account drawdown has been exceeded.
     """
 
 
@@ -52,13 +85,48 @@ class StrategyExposureLimitExceeded(RiskLimitExceeded):
     """
 
 
-class RiskProfileNotFound(RiskError):
+# ==========================================================
+# ACCOUNT / MARKET DATA
+# ==========================================================
+
+
+class TradingAccountNotFound(RiskError):
     """
-    No risk profile exists for the trading account.
+    Trading account does not exist.
     """
 
 
-class RiskCalculationError(RiskError):
+class SymbolNotFound(RiskError):
     """
-    Position sizing calculation failed.
+    Trading symbol does not exist.
+    """
+
+
+class AccountNotTradable(RiskError):
+    """
+    Trading account exists but is not currently tradable.
+    """
+
+
+class SymbolNotTradable(RiskError):
+    """
+    Symbol exists but is not currently active/tradable.
+    """
+
+
+# ==========================================================
+# RISK STATE
+# ==========================================================
+
+
+class RiskStateError(RiskError):
+    """
+    Risk state could not be constructed or evaluated.
+    """
+
+
+class TradingHalted(RiskLimitExceeded):
+    """
+    Trading has been halted for the account because
+    of a risk condition.
     """

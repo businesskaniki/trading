@@ -7,20 +7,25 @@ class RiskCalculator:
     """
     Pure mathematical risk calculations.
 
-    This class does not access:
-        - database
-        - broker
-        - orders
-        - positions
-        - HTTP
+    This class has no knowledge of:
+    - databases
+    - repositories
+    - trading accounts
+    - symbols
+    - positions
+    - orders
+    - brokers
+    - FastAPI
 
-    Symbol-specific trading constraints such as:
-        - min_volume
-        - max_volume
-        - volume_step
-
-    are supplied by the caller.
+    All inputs and outputs use Decimal for financial precision.
     """
+
+    DEFAULT_VOLUME_STEP = Decimal("0.01")
+
+    RISK_PERCENT_QUANTIZE = Decimal("0.0001")
+    MONEY_QUANTIZE = Decimal("0.01")
+    PRICE_QUANTIZE = Decimal("0.00000001")
+    VOLUME_QUANTIZE = Decimal("0.00000001")
 
     # ==========================================================
     # EFFECTIVE RISK
@@ -36,12 +41,13 @@ class RiskCalculator:
         """
         Calculate the effective risk percentage.
 
-        effective risk =
-            base risk × multiplier
+        Formula:
 
-        The result is clamped between:
-            min_risk_percent
-            max_risk_percent
+            effective risk =
+                base risk × risk multiplier
+
+        The result is then constrained between the configured
+        minimum and maximum risk percentages.
         """
 
         if base_risk_percent <= 0:
@@ -58,22 +64,20 @@ class RiskCalculator:
 
         if min_risk_percent > max_risk_percent:
             raise RiskCalculationError(
-                "Minimum risk cannot be greater than maximum risk"
+                "Minimum risk percent cannot be greater " "than maximum risk percent"
             )
 
-        requested = base_risk_percent * risk_multiplier
+        requested_risk = base_risk_percent * risk_multiplier
 
-        requested = max(
-            requested,
+        effective_risk = max(
             min_risk_percent,
+            min(
+                requested_risk,
+                max_risk_percent,
+            ),
         )
 
-        requested = min(
-            requested,
-            max_risk_percent,
-        )
-
-        return requested.quantize(Decimal("0.0001"))
+        return effective_risk.quantize(RiskCalculator.RISK_PERCENT_QUANTIZE)
 
     # ==========================================================
     # RISK AMOUNT
@@ -85,8 +89,12 @@ class RiskCalculator:
         risk_percent: Decimal,
     ) -> Decimal:
         """
-        Convert account equity and risk percentage
-        into a monetary risk amount.
+        Calculate the monetary amount that may be risked.
+
+        Formula:
+
+            risk amount =
+                equity × risk percent / 100
         """
 
         if equity <= 0:
@@ -95,7 +103,9 @@ class RiskCalculator:
         if risk_percent <= 0:
             raise RiskCalculationError("Risk percent must be greater than zero")
 
-        return (equity * risk_percent / Decimal("100")).quantize(Decimal("0.01"))
+        amount = equity * risk_percent / Decimal("100")
+
+        return amount.quantize(RiskCalculator.MONEY_QUANTIZE)
 
     # ==========================================================
     # STOP DISTANCE
@@ -107,8 +117,17 @@ class RiskCalculator:
         stop_loss_price: Decimal,
     ) -> Decimal:
         """
-        Calculate absolute distance between entry
-        and stop-loss.
+        Calculate absolute price distance between entry and stop.
+
+        Direction is intentionally irrelevant here.
+
+        BUY:
+            stop < entry
+
+        SELL:
+            stop > entry
+
+        Both produce the same positive distance.
         """
 
         if entry_price <= 0:
@@ -122,7 +141,7 @@ class RiskCalculator:
         if distance <= 0:
             raise RiskCalculationError("Entry and stop-loss prices cannot be equal")
 
-        return distance
+        return distance.quantize(RiskCalculator.PRICE_QUANTIZE)
 
     # ==========================================================
     # RISK PER UNIT
@@ -139,7 +158,14 @@ class RiskCalculator:
 
         Formula:
 
-            stop_distance / tick_size × tick_value
+            number of ticks =
+                stop distance / tick size
+
+            risk per unit =
+                number of ticks × tick value
+
+        This assumes tick_value represents the monetary value
+        of one tick for one unit of trading volume.
         """
 
         if stop_distance <= 0:
@@ -151,40 +177,16 @@ class RiskCalculator:
         if tick_value <= 0:
             raise RiskCalculationError("Tick value must be greater than zero")
 
-        result = stop_distance / tick_size * tick_value
+        number_of_ticks = stop_distance / tick_size
 
-        if result <= 0:
-            raise RiskCalculationError("Risk per unit must be greater than zero")
+        risk = number_of_ticks * tick_value
 
-        return result.quantize(Decimal("0.00000001"))
-
-    # ==========================================================
-    # RAW POSITION SIZE
-    # ==========================================================
-
-    @staticmethod
-    def raw_position_size(
-        risk_amount: Decimal,
-        risk_per_unit: Decimal,
-    ) -> Decimal:
-        """
-        Calculate the unrounded position size.
-        """
-
-        if risk_amount <= 0:
-            raise RiskCalculationError("Risk amount must be greater than zero")
-
-        if risk_per_unit <= 0:
-            raise RiskCalculationError("Risk per unit must be greater than zero")
-
-        raw_volume = risk_amount / risk_per_unit
-
-        if raw_volume <= 0:
+        if risk <= 0:
             raise RiskCalculationError(
-                "Calculated raw position size must be " "greater than zero"
+                "Calculated risk per unit must be greater than zero"
             )
 
-        return raw_volume.quantize(Decimal("0.00000001"))
+        return risk.quantize(RiskCalculator.PRICE_QUANTIZE)
 
     # ==========================================================
     # POSITION SIZE
@@ -194,19 +196,20 @@ class RiskCalculator:
     def position_size(
         risk_amount: Decimal,
         risk_per_unit: Decimal,
-        volume_step: Decimal,
+        volume_step: Decimal = DEFAULT_VOLUME_STEP,
         min_volume: Decimal | None = None,
         max_volume: Decimal | None = None,
     ) -> Decimal:
         """
-        Calculate broker-compatible position size.
+        Calculate the position volume that respects the risk amount.
 
-        The volume is rounded DOWN to the broker's
+        The raw volume is always rounded DOWN to the nearest valid
         volume step.
 
-        Optional:
-            min_volume
-            max_volume
+        This is intentional.
+
+        Rounding UP could cause the resulting position to exceed
+        the requested monetary risk.
         """
 
         if risk_amount <= 0:
@@ -235,44 +238,34 @@ class RiskCalculator:
 
         raw_volume = risk_amount / risk_per_unit
 
-        # ------------------------------------------------------
-        # Round DOWN to broker volume step
-        # ------------------------------------------------------
-
-        recommended_volume = (raw_volume / volume_step).to_integral_value(
+        stepped_volume = (raw_volume / volume_step).to_integral_value(
             rounding=ROUND_DOWN
         ) * volume_step
 
-        # ------------------------------------------------------
-        # Check minimum volume
-        # ------------------------------------------------------
-
-        if recommended_volume <= 0:
+        if stepped_volume <= 0:
             raise RiskCalculationError(
-                "Calculated position size is below the " "minimum usable volume step"
-            )
-
-        if min_volume is not None and recommended_volume < min_volume:
-            raise RiskCalculationError(
-                "Calculated position size is below the " "symbol minimum volume"
+                "Calculated position size is below " "the minimum usable volume step"
             )
 
         # ------------------------------------------------------
-        # Check maximum volume
+        # Broker minimum volume
         # ------------------------------------------------------
 
-        if max_volume is not None and recommended_volume > max_volume:
-            recommended_volume = max_volume
+        if min_volume is not None and stepped_volume < min_volume:
+            raise RiskCalculationError(
+                "Calculated position size is below " "the symbol minimum volume"
+            )
 
-            # Make sure max volume itself respects
-            # the broker's volume step.
-            recommended_volume = (recommended_volume / volume_step).to_integral_value(
+        # ------------------------------------------------------
+        # Broker maximum volume
+        # ------------------------------------------------------
+
+        if max_volume is not None and stepped_volume > max_volume:
+            stepped_volume = (max_volume / volume_step).to_integral_value(
                 rounding=ROUND_DOWN
             ) * volume_step
 
-        if recommended_volume <= 0:
-            raise RiskCalculationError(
-                "Maximum volume is incompatible with " "the symbol volume step"
-            )
+        if stepped_volume <= 0:
+            raise RiskCalculationError("Calculated position size is not usable")
 
-        return recommended_volume.quantize(volume_step)
+        return stepped_volume.quantize(RiskCalculator.VOLUME_QUANTIZE)
