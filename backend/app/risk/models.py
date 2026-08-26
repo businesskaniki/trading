@@ -120,6 +120,16 @@ class RiskProfile(
         nullable=False,
     )
 
+
+    @property
+    def max_open_positions(self) -> int:
+        """Backward-compatible alias used by risk schemas and rules."""
+        return self.max_positions
+
+    @max_open_positions.setter
+    def max_open_positions(self, value: int) -> None:
+        self.max_positions = value
+
     # ==========================================================
     # EXPOSURE LIMITS
     # ==========================================================

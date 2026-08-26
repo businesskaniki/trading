@@ -1,0 +1,24 @@
+name: Docker
+
+on:
+  push:
+    paths:
+      - "docker/**"
+      - "infrastructure/**"
+      - "backend/Dockerfile"
+      - "frontend/Dockerfile"
+      - "docker-compose.yml"
+  pull_request:
+    paths:
+      - "docker/**"
+      - "infrastructure/**"
+      - "backend/Dockerfile"
+      - "frontend/Dockerfile"
+      - "docker-compose.yml"
+
+jobs:
+  compose-config:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose -f infrastructure/docker-compose.yml config

@@ -1,4 +1,3 @@
-```python
 from decimal import Decimal
 
 import pytest
@@ -61,4 +60,3 @@ def test_position_size_is_calculated_correctly():
 
 def test_engine_exists():
     assert RiskEngine is not None
-```
