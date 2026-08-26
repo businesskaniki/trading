@@ -135,6 +135,33 @@ class StrategyRunRepository:
 
         return result.scalar_one_or_none()
 
+    async def get_latest_for_user(
+        self,
+        user_id: UUID,
+    ) -> StrategyRun | None:
+        result = await self.db.execute(
+            select(StrategyRun)
+            .where(StrategyRun.user_id == user_id)
+            .order_by(StrategyRun.started_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_running_for_user(
+        self,
+        user_id: UUID,
+    ) -> StrategyRun | None:
+        result = await self.db.execute(
+            select(StrategyRun)
+            .where(
+                StrategyRun.user_id == user_id,
+                StrategyRun.status == StrategyRunStatus.RUNNING,
+            )
+            .order_by(StrategyRun.started_at.desc())
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
     async def get_all(
         self,
     ) -> list[StrategyRun]:

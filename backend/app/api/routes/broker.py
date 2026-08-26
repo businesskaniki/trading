@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_broker_manager
+from app.api.dependencies import get_broker_manager, get_current_user
 from app.broker.broker_manager import BrokerManager
 from app.broker.exceptions import BrokerConnectionError
 
@@ -8,6 +8,7 @@ from app.broker.exceptions import BrokerConnectionError
 router = APIRouter(
     prefix="/broker",
     tags=["broker"],
+    dependencies=[Depends(get_current_user)],
 )
 
 

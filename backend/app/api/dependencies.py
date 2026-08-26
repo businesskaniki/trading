@@ -7,6 +7,7 @@ from app.core.security import (
     oauth2_scheme,
     verify_token,
 )
+from app.core.config import settings
 
 # ==========================================================
 # REPOSITORIES
@@ -56,6 +57,7 @@ from app.services.trade_service import TradeService
 from app.services.trading_account_service import TradingAccountService
 from app.services.risk_snapshot_service import RiskSnapshotService
 from app.services.execution_service import ExecutionService
+from app.services.bot_service import BotService
 
 # ==========================================================
 # BROKER
@@ -299,7 +301,7 @@ def get_broker_manager() -> BrokerManager:
     Currently configured for MetaTrader 5.
     """
 
-    adapter = get_broker_adapter("mt5")
+    adapter = get_broker_adapter(settings.BROKER)
 
     return BrokerManager(
         adapter
@@ -392,3 +394,9 @@ def get_risk_service(
         symbol_repository=SymbolRepository(db),
         position_repository=PositionRepository(db),
     )
+
+
+def get_bot_service(
+    db: AsyncSession = Depends(get_db),
+):
+    return BotService(StrategyRunRepository(db))

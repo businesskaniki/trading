@@ -22,6 +22,9 @@ import Orders from "./pages/Dashboard/Orders/Orders";
 import Positions from "./pages/Dashboard/Positions/Positions";
 import Trades from "./pages/Dashboard/Trades/Trades";
 import NotFound from "./pages/NotFound";
+import RiskManagement from "./pages/Dashboard/Risk/RiskManagement";
+import Analytics from "./pages/Dashboard/Analytics/Analytics";
+import StrategyRuns from "./pages/Dashboard/Strategies/StrategyRuns";
 
 import "./App.css";
 
@@ -114,6 +117,9 @@ const App = () => {
           <Route path="positions" element={<Positions />} />
 
           <Route path="trades" element={<Trades />} />
+          <Route path="risk" element={<RiskManagement />} />
+          <Route path="strategies" element={<StrategyRuns />} />
+          <Route path="performance" element={<Analytics />} />
 
           <Route index element={<Dashboard />} />
         </Route>

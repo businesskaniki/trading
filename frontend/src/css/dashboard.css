@@ -65,6 +65,60 @@
     cursor: not-allowed;
 }
 
+.bot-control {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 24px;
+    margin-bottom: 24px;
+    padding: 22px 24px;
+    border: 1px solid #314158;
+    border-radius: 12px;
+    background: #101a29;
+}
+
+.bot-control h2 {
+    margin: 0;
+    font-size: 20px;
+}
+
+.bot-control p {
+    margin: 6px 0 0;
+    color: #94a3b8;
+}
+
+.bot-control__actions {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+}
+
+.bot-status {
+    color: #fbbf24;
+    font-size: 12px;
+    font-weight: 700;
+}
+
+.bot-status--active {
+    color: #34d399;
+}
+
+.bot-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    padding: 11px 16px;
+    border: 0;
+    border-radius: 8px;
+    color: #08111f;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.bot-button--start { background: #34d399; }
+.bot-button--stop { background: #f87171; }
+.bot-button:disabled { opacity: 0.6; cursor: not-allowed; }
+
 .spin {
     animation: spin 1s linear infinite;
 }

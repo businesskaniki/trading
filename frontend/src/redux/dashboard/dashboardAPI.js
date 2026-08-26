@@ -105,6 +105,11 @@ const dashboardAPI = {
     return response.data;
   },
 
+  getStrategyPerformance: async (accountId) => {
+    const response = await api.get(`/analytics/accounts/${accountId}/strategies`);
+    return response.data;
+  },
+
   // =====================================================
   // RISK
   // =====================================================

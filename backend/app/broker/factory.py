@@ -1,6 +1,7 @@
 from app.core.config import settings
 from app.broker.base import BrokerAdapter
 from app.broker.mt5.adapter import MT5Adapter
+from app.broker.paper.adapter import PaperBroker
 
 
 def get_broker_adapter(broker: str) -> BrokerAdapter:
@@ -14,6 +15,9 @@ def get_broker_adapter(broker: str) -> BrokerAdapter:
         return MT5Adapter(
             bridge_url=settings.MT5_BRIDGE_URL
         )
+
+    if broker == "paper":
+        return PaperBroker()
 
     raise ValueError(
         f"Unsupported broker: {broker}"
