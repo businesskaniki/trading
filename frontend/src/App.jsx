@@ -19,6 +19,8 @@ import Landing from "./pages/Landing/Landing";
 import Accounts from "./pages/Dashboard/Accounts/Accounts";
 import Symbols from "./pages/Dashboard/Symbols/SymbolsPage";
 import Orders from "./pages/Dashboard/Orders/Orders";
+import Positions from "./pages/Dashboard/Positions/Positions";
+import Trades from "./pages/Dashboard/Trades/Trades";
 import NotFound from "./pages/NotFound";
 
 import "./App.css";
@@ -108,6 +110,10 @@ const App = () => {
           <Route path="symbols" element={<Symbols />} />
 
           <Route path="orders" element={<Orders />} />
+
+          <Route path="positions" element={<Positions />} />
+
+          <Route path="trades" element={<Trades />} />
 
           <Route index element={<Dashboard />} />
         </Route>
