@@ -5,7 +5,7 @@ import Navbar from "./components/Navbar";
 import ProtectedRoute from "./components/routing/ProtectedRoute";
 import PublicRoute from "./components/routing/PublicRoute";
 
-import DashboardLayout from "./components/Dashboard/DashboardLayout";
+import DashboardLayout from "./components/dashboard/DashboardLayout";
 
 import Login from "./pages/auth/Login";
 import Register from "./pages/auth/Register";
@@ -17,6 +17,7 @@ import Dashboard from "./pages/Dashboard/Dashboard";
 import Landing from "./pages/Landing/Landing";
 
 import Accounts from "./pages/Dashboard/Accounts/Accounts";
+import Symbols from "./pages/Dashboard/Symbols/SymbolsPage";
 import NotFound from "./pages/NotFound";
 
 import "./App.css";
@@ -102,6 +103,8 @@ const App = () => {
         <Route path="/dashboard" element={<DashboardLayout />}>
           {/* /dashboard */}
           <Route path="accounts" element={<Accounts />} />
+
+          <Route path="symbols" element={<Symbols />} />
 
           <Route index element={<Dashboard />} />
         </Route>
