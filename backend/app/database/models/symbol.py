@@ -101,6 +101,12 @@ class Symbol(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
+
+    @property
+    def tick_value(self) -> Decimal:
+        """Monetary value of one tick for one unit of volume."""
+        return self.contract_size * self.tick_size
+
     # ------------------------------------------------------------------
     # Status
     # ------------------------------------------------------------------

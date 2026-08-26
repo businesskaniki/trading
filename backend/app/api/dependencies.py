@@ -387,5 +387,8 @@ def get_risk_service(
     db: AsyncSession = Depends(get_db),
 ):
     return RiskService(
-        repository=RiskProfileRepository(db)
+        risk_repository=RiskProfileRepository(db),
+        trading_account_repository=TradingAccountRepository(db),
+        symbol_repository=SymbolRepository(db),
+        position_repository=PositionRepository(db),
     )

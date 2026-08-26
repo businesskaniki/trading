@@ -1,4 +1,3 @@
-```python
 from decimal import Decimal
 
 import pytest
@@ -72,4 +71,3 @@ def test_position_size_below_volume_step_is_rejected():
             risk_per_unit=Decimal("1000"),
             volume_step=Decimal("0.01"),
         )
-```

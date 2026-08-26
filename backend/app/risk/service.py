@@ -86,6 +86,8 @@ class RiskState:
     floating_profit_loss: Decimal
     daily_loss_amount: Decimal
     drawdown_amount: Decimal
+    symbol_exposure_amount: Decimal = Decimal("0")
+    strategy_exposure_amount: Decimal = Decimal("0")
 
 
 class RiskService:
@@ -231,7 +233,10 @@ class RiskService:
                 f"Trading account {data.account_id} does not exist"
             )
 
-        profile = await self.risk_repository.create(**data.model_dump())
+        create_values = data.model_dump()
+        create_values["max_positions"] = create_values.pop("max_open_positions")
+
+        profile = await self.risk_repository.create(**create_values)
 
         return RiskProfileResponse.model_validate(profile)
 
@@ -382,6 +387,8 @@ class RiskService:
     async def build_risk_state(
         self,
         account_id: UUID,
+        symbol_id: UUID | None = None,
+        strategy: str | None = None,
     ) -> RiskState:
 
         # ------------------------------------------------------
@@ -455,6 +462,8 @@ class RiskService:
         # ------------------------------------------------------
 
         total_exposure = Decimal("0")
+        symbol_exposure_amount = Decimal("0")
+        strategy_exposure_amount = Decimal("0")
 
         for position in open_positions:
 
@@ -467,7 +476,14 @@ class RiskService:
             current_price = position.current_price
 
             if current_volume is not None and current_price is not None:
-                total_exposure += current_volume * current_price
+                exposure = current_volume * current_price
+                total_exposure += exposure
+
+                if symbol_id is not None and position.symbol_id == symbol_id:
+                    symbol_exposure_amount += exposure
+
+                if strategy is not None and position.strategy == strategy:
+                    strategy_exposure_amount += exposure
 
         # ------------------------------------------------------
         # 7. Daily loss
@@ -526,6 +542,8 @@ class RiskService:
             floating_profit_loss=floating_profit_loss,
             daily_loss_amount=daily_loss_amount,
             drawdown_amount=drawdown_amount,
+            symbol_exposure_amount=symbol_exposure_amount,
+            strategy_exposure_amount=strategy_exposure_amount,
         )
 
     # ==========================================================
@@ -689,17 +707,23 @@ class RiskService:
             )
 
         return RiskSizingResponse(
+            account_id=data.account_id,
+            symbol_id=data.symbol_id,
             risk_percent=risk_percent,
             risk_multiplier=profile.risk_multiplier,
+            equity=account.equity,
             risk_amount=risk_amount,
             entry_price=data.entry_price,
             stop_loss_price=data.stop_loss_price,
             stop_distance=stop_distance,
             tick_size=tick_size,
             tick_value=tick_value,
+            risk_per_unit=risk_per_unit,
             raw_volume=raw_volume.quantize(Decimal("0.00000001")),
             recommended_volume=recommended_volume,
-            risk_per_unit=risk_per_unit,
+            volume_step=symbol.volume_step,
+            minimum_volume=symbol.min_volume,
+            maximum_volume=symbol.max_volume,
         )
 
     # ==========================================================
@@ -737,7 +761,11 @@ class RiskService:
         # 3. Build server-side risk state
         # ------------------------------------------------------
 
-        state = await self.build_risk_state(data.account_id)
+        state = await self.build_risk_state(
+            data.account_id,
+            symbol_id=data.symbol_id,
+            strategy=data.strategy,
+        )
 
         # ------------------------------------------------------
         # 4. Determine proposed risk
@@ -762,18 +790,27 @@ class RiskService:
 
         rules = RiskRules(profile)
 
-        return rules.check(
-            proposed_risk_amount=(proposed_risk_amount),
-            proposed_symbol_exposure_amount=(proposed_symbol_exposure_amount),
-            proposed_strategy_exposure_amount=(proposed_strategy_exposure_amount),
-            # --------------------------------------------------
-            # SERVER-SIDE VALUES
-            # --------------------------------------------------
-            current_open_risk_amount=(state.total_open_risk),
-            current_symbol_exposure_amount=(data.current_symbol_exposure_amount),
-            current_strategy_exposure_amount=(data.current_strategy_exposure_amount),
-            current_open_positions=(state.open_positions),
-            account_equity=(state.equity),
-            daily_loss_amount=(state.daily_loss_amount),
-            drawdown_amount=(state.drawdown_amount),
+        decision = rules.check(
+            state=state,
+            proposed_risk_amount=proposed_risk_amount,
+            proposed_symbol_exposure_amount=proposed_symbol_exposure_amount,
+            proposed_strategy_exposure_amount=proposed_strategy_exposure_amount,
+        )
+
+        projected_open_risk = state.total_open_risk + proposed_risk_amount
+
+        return RiskCheckResponse(
+            account_id=data.account_id,
+            symbol_id=data.symbol_id,
+            approved=decision.approved,
+            code=decision.code,
+            message=decision.message,
+            risk_percent=rules.effective_risk_percent(),
+            proposed_risk_amount=proposed_risk_amount,
+            current_open_risk=state.total_open_risk,
+            projected_open_risk=projected_open_risk,
+            current_open_positions=state.open_positions,
+            projected_open_positions=state.open_positions + 1,
+            trading_halted=decision.rejected,
+            metadata=decision.metadata,
         )

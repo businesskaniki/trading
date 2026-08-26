@@ -1,0 +1,4 @@
+app:
+  name: Athena Quant Engine
+  environment: development
+  log_level: INFO
