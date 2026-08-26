@@ -1,8 +1,17 @@
-"""Registry component."""
+"""Strategy registry."""
+
+from engine.strategy.base import Strategy
 
 
-class Registry:
-    """Placeholder implementation for the planned registry component."""
+class StrategyRegistry:
+    def __init__(self) -> None:
+        self._strategies: dict[str, Strategy] = {}
 
-    def run(self) -> None:
-        return None
+    def register(self, strategy: Strategy) -> None:
+        self._strategies[strategy.name] = strategy
+
+    def get(self, name: str) -> Strategy:
+        return self._strategies[name]
+
+    def names(self) -> list[str]:
+        return sorted(self._strategies)

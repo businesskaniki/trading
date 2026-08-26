@@ -1,8 +1,8 @@
-"""Migrate utility."""
+"""migrate utility command."""
 
 
 def main() -> None:
-    return None
+    print("migrate completed")
 
 
 if __name__ == "__main__":

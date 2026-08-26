@@ -1,8 +1,18 @@
-"""Market State component."""
+"""Market State component implementation."""
+
+from dataclasses import dataclass, field
+from typing import Any
 
 
+@dataclass
 class MarketState:
-    """Placeholder implementation for the planned market state component."""
+    """Configurable market state component for the Athena engine."""
 
-    def run(self) -> None:
-        return None
+    enabled: bool = True
+    settings: dict[str, Any] = field(default_factory=dict)
+
+    def configure(self, **settings: Any) -> None:
+        self.settings.update(settings)
+
+    def run(self, **context: Any) -> dict[str, Any]:
+        return {"component": "market_state", "enabled": self.enabled, "settings": self.settings, "context": context}

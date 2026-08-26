@@ -1,8 +1,13 @@
-"""Handlers component."""
+"""Common event handlers."""
+
+from engine.events.bus import Event
 
 
-class Handlers:
-    """Placeholder implementation for the planned handlers component."""
+class MemoryEventHandler:
+    """Stores received events for tests, debugging, and dry-runs."""
 
-    def run(self) -> None:
-        return None
+    def __init__(self) -> None:
+        self.events: list[Event] = []
+
+    def __call__(self, event: Event) -> None:
+        self.events.append(event)

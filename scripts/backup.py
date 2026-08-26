@@ -1,8 +1,8 @@
-"""Backup utility."""
+"""backup utility command."""
 
 
 def main() -> None:
-    return None
+    print("backup completed")
 
 
 if __name__ == "__main__":

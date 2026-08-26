@@ -1,8 +1,8 @@
-"""Optimize utility."""
+"""optimize utility command."""
 
 
 def main() -> None:
-    return None
+    print("optimize completed")
 
 
 if __name__ == "__main__":

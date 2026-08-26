@@ -1,8 +1,18 @@
-"""Metrics component."""
+"""Metrics component implementation."""
+
+from dataclasses import dataclass, field
+from typing import Any
 
 
+@dataclass
 class Metrics:
-    """Placeholder implementation for the planned metrics component."""
+    """Configurable metrics component for the Athena engine."""
 
-    def run(self) -> None:
-        return None
+    enabled: bool = True
+    settings: dict[str, Any] = field(default_factory=dict)
+
+    def configure(self, **settings: Any) -> None:
+        self.settings.update(settings)
+
+    def run(self, **context: Any) -> dict[str, Any]:
+        return {"component": "metrics", "enabled": self.enabled, "settings": self.settings, "context": context}

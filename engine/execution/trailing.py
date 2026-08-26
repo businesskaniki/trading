@@ -1,8 +1,18 @@
-"""Trailing component."""
+"""Trailing component implementation."""
+
+from dataclasses import dataclass, field
+from typing import Any
 
 
+@dataclass
 class Trailing:
-    """Placeholder implementation for the planned trailing component."""
+    """Configurable trailing component for the Athena engine."""
 
-    def run(self) -> None:
-        return None
+    enabled: bool = True
+    settings: dict[str, Any] = field(default_factory=dict)
+
+    def configure(self, **settings: Any) -> None:
+        self.settings.update(settings)
+
+    def run(self, **context: Any) -> dict[str, Any]:
+        return {"component": "trailing", "enabled": self.enabled, "settings": self.settings, "context": context}

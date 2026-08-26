@@ -1,8 +1,11 @@
-"""Publisher component."""
+"""Event publishing helper."""
+
+from engine.events.bus import Event, EventBus
 
 
 class Publisher:
-    """Placeholder implementation for the planned publisher component."""
+    def __init__(self, bus: EventBus) -> None:
+        self.bus = bus
 
-    def run(self) -> None:
-        return None
+    def publish(self, event_type: str, **payload: object) -> int:
+        return self.bus.publish(Event(type=event_type, payload=dict(payload)))

@@ -1,8 +1,17 @@
-"""Ticks component."""
+"""Market tick models."""
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from decimal import Decimal
 
 
-class Ticks:
-    """Placeholder implementation for the planned ticks component."""
+@dataclass(frozen=True)
+class Tick:
+    symbol: str
+    bid: Decimal
+    ask: Decimal
+    time: datetime = datetime.now(timezone.utc)
 
-    def run(self) -> None:
-        return None
+    @property
+    def mid(self) -> Decimal:
+        return (self.bid + self.ask) / Decimal("2")

@@ -1,8 +1,12 @@
-"""Base component."""
+"""Base strategy interface."""
+
+from typing import Protocol
+
+from engine.market.candles import Candle
+from engine.strategy.signals import Signal
 
 
-class Base:
-    """Placeholder implementation for the planned base component."""
+class Strategy(Protocol):
+    name: str
 
-    def run(self) -> None:
-        return None
+    def on_candle(self, candle: Candle) -> Signal | None: ...

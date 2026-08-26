@@ -1,8 +1,12 @@
-"""Executor component."""
+"""Service wrapper around the execution engine."""
+
+from engine.execution.engine import ExecutionEngine
+from engine.execution.orders import Order
 
 
 class Executor:
-    """Placeholder implementation for the planned executor component."""
+    def __init__(self, engine: ExecutionEngine | None = None) -> None:
+        self.engine = engine or ExecutionEngine()
 
-    def run(self) -> None:
-        return None
+    def submit(self, order: Order):
+        return self.engine.execute(order)

@@ -1,8 +1,8 @@
-"""Start Engine utility."""
+"""start engine utility command."""
 
 
 def main() -> None:
-    return None
+    print("start_engine completed")
 
 
 if __name__ == "__main__":

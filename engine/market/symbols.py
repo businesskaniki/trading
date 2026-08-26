@@ -1,8 +1,18 @@
-"""Symbols component."""
+"""Tradable symbol metadata."""
+
+from dataclasses import dataclass
+from decimal import Decimal
 
 
-class Symbols:
-    """Placeholder implementation for the planned symbols component."""
+@dataclass(frozen=True)
+class SymbolSpec:
+    name: str
+    tick_size: Decimal
+    contract_size: Decimal
+    min_volume: Decimal = Decimal("0.01")
+    max_volume: Decimal = Decimal("100")
+    volume_step: Decimal = Decimal("0.01")
 
-    def run(self) -> None:
-        return None
+    @property
+    def tick_value(self) -> Decimal:
+        return self.tick_size * self.contract_size

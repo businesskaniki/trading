@@ -1,8 +1,11 @@
-"""Subscriber component."""
+"""Event subscription helper."""
+
+from engine.events.bus import EventBus, EventHandler
 
 
 class Subscriber:
-    """Placeholder implementation for the planned subscriber component."""
+    def __init__(self, bus: EventBus) -> None:
+        self.bus = bus
 
-    def run(self) -> None:
-        return None
+    def on(self, event_type: str, handler: EventHandler) -> None:
+        self.bus.subscribe(event_type, handler)

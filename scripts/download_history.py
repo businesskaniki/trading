@@ -1,8 +1,8 @@
-"""Download History utility."""
+"""download history utility command."""
 
 
 def main() -> None:
-    return None
+    print("download_history completed")
 
 
 if __name__ == "__main__":

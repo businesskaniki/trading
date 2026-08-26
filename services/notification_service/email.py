@@ -1,8 +1,18 @@
-"""Email component."""
+"""Email component implementation."""
+
+from dataclasses import dataclass, field
+from typing import Any
 
 
+@dataclass
 class Email:
-    """Placeholder implementation for the planned email component."""
+    """Configurable email component for the Athena engine."""
 
-    def run(self) -> None:
-        return None
+    enabled: bool = True
+    settings: dict[str, Any] = field(default_factory=dict)
+
+    def configure(self, **settings: Any) -> None:
+        self.settings.update(settings)
+
+    def run(self, **context: Any) -> dict[str, Any]:
+        return {"component": "email", "enabled": self.enabled, "settings": self.settings, "context": context}

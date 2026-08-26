@@ -1,8 +1,8 @@
-"""Event Types component."""
+"""Canonical engine event names."""
 
-
-class EventTypes:
-    """Placeholder implementation for the planned event types component."""
-
-    def run(self) -> None:
-        return None
+MARKET_TICK = "market.tick"
+SIGNAL_CREATED = "strategy.signal_created"
+ORDER_CREATED = "execution.order_created"
+ORDER_FILLED = "execution.order_filled"
+POSITION_OPENED = "portfolio.position_opened"
+RISK_REJECTED = "risk.rejected"
