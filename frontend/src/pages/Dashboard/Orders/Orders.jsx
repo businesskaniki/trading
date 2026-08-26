@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { FaArrowDown, FaArrowUp, FaClipboardList, FaEdit, FaPlay, FaPlus, FaSearch, FaSyncAlt, FaTrash } from "react-icons/fa";
 import OrderForm from "./OrderForm";
+import ConfirmModal from "../../../components/common/ConfirmModal";
 import { fetchAccounts } from "../../../redux/dashboard/accounts/accountsThunks";
 import { fetchSymbols } from "../../../redux/dashboard/symbols/symbolsThunks";
 import { clearOrdersError } from "../../../redux/dashboard/orders/ordersSlice";
@@ -19,6 +20,7 @@ const Orders = () => {
   const [status, setStatus] = useState("ALL");
   const [modalOpen, setModalOpen] = useState(false);
   const [editingOrder, setEditingOrder] = useState(null);
+  const [confirmation, setConfirmation] = useState(null);
 
   useEffect(() => {
     dispatch(fetchOrders());
@@ -44,9 +46,10 @@ const Orders = () => {
       : await dispatch(createOrder(data));
     if (createOrder.fulfilled.match(result) || updateOrder.fulfilled.match(result)) setModalOpen(false);
   };
-  const handleDelete = async (order) => { if (window.confirm(`Delete order ${order.ticket || order.id.slice(0, 8)}?`)) await dispatch(removeOrder(order.id)); };
-  const handleExecute = async (order) => { if (window.confirm(`Execute ${order.side} ${order.volume} ${symbolName(order.symbol_id)} now?`)) await dispatch(executeOrder(order.id)); };
-  const handleCancel = async (order) => { if (window.confirm("Cancel this order?")) await dispatch(updateOrderStatus({ orderId: order.id, statusValue: "CANCELLED" })); };
+  const handleDelete = (order) => setConfirmation({ title: "Delete order?", message: `Order ${order.ticket || order.id.slice(0, 8)} will be permanently removed.`, confirmLabel: "Delete Order", danger: true, action: () => dispatch(removeOrder(order.id)) });
+  const handleExecute = (order) => setConfirmation({ title: "Execute order?", message: `Submit ${order.side} ${order.volume} ${symbolName(order.symbol_id)} to the execution pipeline.`, confirmLabel: "Execute Order", action: () => dispatch(executeOrder(order.id)) });
+  const handleCancel = (order) => setConfirmation({ title: "Cancel order?", message: "This order will be marked as cancelled and can no longer be executed.", confirmLabel: "Cancel Order", danger: true, action: () => dispatch(updateOrderStatus({ orderId: order.id, statusValue: "CANCELLED" })) });
+  const confirmAction = async () => { await confirmation.action(); setConfirmation(null); };
 
   return (
     <main className="orders-page">
@@ -60,6 +63,7 @@ const Orders = () => {
         {!loading && filteredOrders.map((order) => <tr key={order.id}><td><div className="order-name"><span className={order.side === "BUY" ? "order-side buy" : "order-side sell"}>{order.side === "BUY" ? <FaArrowUp /> : <FaArrowDown />}</span><div><strong>{order.strategy}</strong><span>{order.order_type} {order.ticket ? `#${order.ticket}` : "Pending ticket"}</span></div></div></td><td><strong>{symbolName(order.symbol_id)}</strong><span className="order-subvalue">{order.comment || "No comment"}</span></td><td>{accountName(order.account_id)}</td><td><strong>{order.volume}</strong><span className="order-subvalue">{order.executed_price || order.requested_price ? `@ ${order.executed_price || order.requested_price}` : "Market price"}</span></td><td><span className={`order-status order-status--${String(order.status || "").toLowerCase()}`}>{order.status || "UNKNOWN"}</span></td><td>{order.created_at ? new Date(order.created_at).toLocaleDateString() : "-"}</td><td><div className="order-actions"><button title="Execute order" onClick={() => handleExecute(order)} disabled={acting || terminalStatuses.includes(order.status)}><FaPlay /></button><button title="Cancel order" onClick={() => handleCancel(order)} disabled={acting || terminalStatuses.includes(order.status)}><FaTrash /></button><button title="Edit order" onClick={() => { setEditingOrder(order); setModalOpen(true); }} disabled={acting}><FaEdit /></button><button title="Delete order" onClick={() => handleDelete(order)} disabled={acting}><FaTrash /></button></div></td></tr>)}
       </tbody></table></div></section>
       <OrderForm isOpen={modalOpen} onClose={() => !saving && setModalOpen(false)} onSubmit={handleSubmit} order={editingOrder} accounts={accounts} symbols={symbols} loading={saving} />
+      <ConfirmModal isOpen={Boolean(confirmation)} {...confirmation} loading={acting} onConfirm={confirmAction} onClose={() => !acting && setConfirmation(null)} />
     </main>
   );
 };

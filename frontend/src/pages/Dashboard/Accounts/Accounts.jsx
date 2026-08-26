@@ -16,10 +16,13 @@ import { useEffect, useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 import AccountForm from "./AccountForm";
+import ConfirmModal from "../../../components/common/ConfirmModal";
 
 import {
   fetchAccounts,
   createTradingAccount,
+  updateTradingAccount,
+  removeTradingAccount,
 } from "../../../redux/dashboard/accounts/accountsThunks";
 
 import {
@@ -28,6 +31,7 @@ import {
 } from "../../../redux/dashboard/accounts/accountsSlice";
 
 import "../../../css/accounts.css";
+import "../../../css/accountDetails.css";
 
 const Accounts = () => {
   // =====================================================
@@ -36,7 +40,7 @@ const Accounts = () => {
 
   const dispatch = useDispatch();
 
-  const { accounts, loading, creating, error } = useSelector(
+  const { accounts, loading, creating, updating, deleting, error } = useSelector(
     (state) => state.accounts,
   );
 
@@ -45,6 +49,9 @@ const Accounts = () => {
   // =====================================================
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
+  const [editingAccount, setEditingAccount] = useState(null);
+  const [viewingAccount, setViewingAccount] = useState(null);
+  const [accountToDelete, setAccountToDelete] = useState(null);
 
   const [searchTerm, setSearchTerm] = useState("");
 
@@ -177,6 +184,29 @@ const Accounts = () => {
     if (createTradingAccount.fulfilled.match(result)) {
       setIsCreateOpen(false);
 
+      dispatch(clearAccountOperationState());
+    }
+  };
+
+  const handleAccountSubmit = async (data) => {
+    if (!editingAccount) return handleCreateAccount(data);
+
+    const result = await dispatch(updateTradingAccount({
+      accountId: editingAccount.id,
+      accountData: data,
+    }));
+
+    if (updateTradingAccount.fulfilled.match(result)) {
+      setEditingAccount(null);
+      dispatch(clearAccountOperationState());
+    }
+  };
+
+  const handleDeleteAccount = async () => {
+    const result = await dispatch(removeTradingAccount(accountToDelete.id));
+
+    if (removeTradingAccount.fulfilled.match(result)) {
+      setAccountToDelete(null);
       dispatch(clearAccountOperationState());
     }
   };
@@ -557,9 +587,7 @@ const Accounts = () => {
                         <button
                           type="button"
                           title="View account"
-                          onClick={() =>
-                            console.log("View account:", account.id)
-                          }
+                          onClick={() => setViewingAccount(account)}
                         >
                           <FaEye />
                         </button>
@@ -569,9 +597,7 @@ const Accounts = () => {
                         <button
                           type="button"
                           title="Edit account"
-                          onClick={() =>
-                            console.log("Edit account:", account.id)
-                          }
+                          onClick={() => setEditingAccount(account)}
                         >
                           <FaEdit />
                         </button>
@@ -581,9 +607,8 @@ const Accounts = () => {
                         <button
                           type="button"
                           title="Delete account"
-                          onClick={() =>
-                            console.log("Delete account:", account.id)
-                          }
+                          onClick={() => setAccountToDelete(account)}
+                          disabled={deleting}
                         >
                           <FaTrash />
                         </button>
@@ -602,14 +627,44 @@ const Accounts = () => {
       ================================================= */}
 
       <AccountForm
-        isOpen={isCreateOpen}
+        isOpen={isCreateOpen || Boolean(editingAccount)}
         onClose={() => {
-          if (!creating) {
+          if (!creating && !updating) {
             setIsCreateOpen(false);
+            setEditingAccount(null);
           }
         }}
-        loading={creating}
-        onSubmit={handleCreateAccount}
+        loading={creating || updating}
+        onSubmit={handleAccountSubmit}
+        account={editingAccount}
+      />
+      {viewingAccount && (
+        <div className="account-detail-overlay" onMouseDown={(event) => event.target === event.currentTarget && setViewingAccount(null)}>
+          <div className="account-detail-modal" role="dialog" aria-modal="true">
+            <button className="account-detail-close" onClick={() => setViewingAccount(null)} aria-label="Close">×</button>
+            <span className="accounts-eyebrow">ACCOUNT PROFILE</span>
+            <h2>{viewingAccount.account_name || "Trading Account"}</h2>
+            <p className="account-detail-number">#{viewingAccount.account_number} · {viewingAccount.broker || "Unknown broker"}</p>
+            <div className="account-detail-grid">
+              <div><span>Server</span><strong>{viewingAccount.server || "-"}</strong></div>
+              <div><span>Environment</span><strong>{viewingAccount.is_demo ? "DEMO" : "LIVE"}</strong></div>
+              <div><span>Balance</span><strong>{formatMoney(viewingAccount.balance, viewingAccount.currency)}</strong></div>
+              <div><span>Equity</span><strong>{formatMoney(viewingAccount.equity, viewingAccount.currency)}</strong></div>
+              <div><span>Margin</span><strong>{formatMoney(viewingAccount.margin, viewingAccount.currency)}</strong></div>
+              <div><span>Status</span><strong>{viewingAccount.status || "-"}</strong></div>
+            </div>
+          </div>
+        </div>
+      )}
+      <ConfirmModal
+        isOpen={Boolean(accountToDelete)}
+        title="Delete trading account?"
+        message={`${accountToDelete?.account_name || "This account"} will be permanently removed from the account registry.`}
+        confirmLabel="Delete Account"
+        danger={true}
+        loading={deleting}
+        onConfirm={handleDeleteAccount}
+        onClose={() => !deleting && setAccountToDelete(null)}
       />
     </main>
   );
