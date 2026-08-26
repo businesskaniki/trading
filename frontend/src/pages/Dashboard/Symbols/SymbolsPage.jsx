@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import { FaCheckCircle, FaCoins, FaEdit, FaPlus, FaSearch, FaSyncAlt, FaTrash } from "react-icons/fa";
 import SymbolForm from "./SymbolForm";
+import ConfirmModal from "../../../components/common/ConfirmModal";
 import { createSymbol, fetchSymbols, removeSymbol, updateSymbol } from "../../../redux/dashboard/symbols/symbolsThunks";
 import { clearSymbolsError } from "../../../redux/dashboard/symbols/symbolsSlice";
 import "../../../css/symbols.css";
@@ -13,6 +14,7 @@ const SymbolsPage = () => {
   const [assetFilter, setAssetFilter] = useState("ALL");
   const [modalOpen, setModalOpen] = useState(false);
   const [editingSymbol, setEditingSymbol] = useState(null);
+  const [symbolToDelete, setSymbolToDelete] = useState(null);
 
   useEffect(() => { dispatch(fetchSymbols()); }, [dispatch]);
 
@@ -36,9 +38,8 @@ const SymbolsPage = () => {
       : await dispatch(createSymbol(symbolData));
     if (createSymbol.fulfilled.match(result) || updateSymbol.fulfilled.match(result)) setModalOpen(false);
   };
-  const handleDelete = async (symbol) => {
-    if (window.confirm(`Delete ${symbol.name}? This cannot be undone.`)) await dispatch(removeSymbol(symbol.id));
-  };
+  const handleDelete = (symbol) => setSymbolToDelete(symbol);
+  const confirmDelete = async () => { await dispatch(removeSymbol(symbolToDelete.id)); setSymbolToDelete(null); };
 
   return (
     <main className="symbols-page">
@@ -69,6 +70,7 @@ const SymbolsPage = () => {
         </div>
       </section>
       <SymbolForm isOpen={modalOpen} onClose={() => !saving && setModalOpen(false)} onSubmit={handleSubmit} symbol={editingSymbol} loading={saving} />
+      <ConfirmModal isOpen={Boolean(symbolToDelete)} title="Delete symbol?" message={`${symbolToDelete?.name || "This symbol"} will be permanently removed from the instrument registry.`} confirmLabel="Delete Symbol" danger={true} loading={saving} onConfirm={confirmDelete} onClose={() => !saving && setSymbolToDelete(null)} />
     </main>
   );
 };
