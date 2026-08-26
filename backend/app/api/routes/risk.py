@@ -1,4 +1,3 @@
-from decimal import Decimal
 from uuid import UUID
 
 from fastapi import (
@@ -202,21 +201,20 @@ async def calculate_position_size(
             ),
         )
 
-    # Account equity will later come from the live
-    # TradingAccount rather than from the client.
-    #
-    # We temporarily require it as a query/body integration
-    # value until the account-state repository is wired into
-    # RiskService.
-    #
-    # For now the service expects this through the endpoint.
-    raise HTTPException(
-        status_code=status.HTTP_501_NOT_IMPLEMENTED,
-        detail=(
-            "Live account equity integration is the next "
-            "Risk Engine step"
-        ),
-    )
+    try:
+        return await service.calculate_position_size(payload)
+
+    except RiskProfileNotFound as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    except (InvalidRiskConfiguration, RiskCalculationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
 
 
 # ==========================================================

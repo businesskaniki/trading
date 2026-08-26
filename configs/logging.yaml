@@ -1,0 +1,4 @@
+logging:
+  version: 1
+  format: json
+  level: INFO

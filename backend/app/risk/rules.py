@@ -1,9 +1,6 @@
 from decimal import Decimal
 
-from app.risk.decisions import (
-    RiskDecision,
-    RiskDecisionStatus,
-)
+from app.risk.decision import RiskDecision
 from app.risk.exceptions import InvalidRiskConfiguration
 from app.risk.models import RiskProfile
 from app.risk.state import RiskState

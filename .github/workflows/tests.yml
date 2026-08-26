@@ -1,0 +1,26 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  python-compile:
+    runs-on: ubuntu-latest
+    env:
+      SECRET_KEY: test-secret
+      POSTGRES_HOST: localhost
+      POSTGRES_DB: trading
+      POSTGRES_USER: trading
+      POSTGRES_PASSWORD: trading
+      REDIS_HOST: localhost
+      SMTP_HOST: localhost
+      SMTP_USERNAME: test
+      SMTP_PASSWORD: test
+      SMTP_FROM_EMAIL: test@example.com
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m py_compile $(find backend/app engine services -name '*.py' | sort)

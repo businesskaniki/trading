@@ -1,0 +1,3 @@
+strategy:
+  name: trend
+  enabled: true
