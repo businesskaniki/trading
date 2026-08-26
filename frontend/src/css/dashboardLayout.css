@@ -1,0 +1,96 @@
+/* ==========================================
+   DASHBOARD LAYOUT
+========================================== */
+
+.dashboard-layout {
+    display: flex;
+    width: 100%;
+    min-height: 100vh;
+    background: #0a0f1a;
+    color: #e8edf5;
+}
+
+
+/* ==========================================
+   SIDEBAR AREA
+========================================== */
+
+.dashboard-layout > .dashboard-nav {
+    flex: 0 0 260px;
+    width: 260px;
+    min-height: 100vh;
+    position: sticky;
+    top: 0;
+    align-self: flex-start;
+}
+
+
+/* ==========================================
+   MAIN CONTENT
+========================================== */
+
+.dashboard-layout__content {
+    flex: 1;
+    min-width: 0;
+    min-height: 100vh;
+
+    padding: 32px;
+
+    overflow-x: hidden;
+}
+
+
+/* ==========================================
+   DASHBOARD PAGE
+========================================== */
+
+.dashboard-layout__content > .dashboard {
+    width: 100%;
+    max-width: 1600px;
+    margin: 0 auto;
+}
+
+
+/* ==========================================
+   RESPONSIVE
+========================================== */
+
+@media (max-width: 1200px) {
+
+    .dashboard-layout__content {
+        padding: 24px;
+    }
+
+}
+
+
+@media (max-width: 900px) {
+
+    .dashboard-layout {
+        flex-direction: column;
+    }
+
+    .dashboard-layout > .dashboard-nav {
+        position: relative;
+
+        width: 100%;
+        min-height: auto;
+
+        flex: none;
+    }
+
+    .dashboard-layout__content {
+        width: 100%;
+        padding: 20px;
+    }
+
+}
+
+
+@media (max-width: 600px) {
+
+    .dashboard-layout__content {
+        padding: 16px;
+    }
+
+}

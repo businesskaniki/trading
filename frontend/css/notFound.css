@@ -1,0 +1,681 @@
+/* ==========================================
+   AQE 404 PAGE
+========================================== */
+
+.not-found {
+    position: relative;
+
+    min-height: 100vh;
+    width: 100%;
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    overflow: hidden;
+
+    background:
+        radial-gradient(
+            circle at 50% 40%,
+            rgba(30, 70, 120, 0.18),
+            transparent 40%
+        ),
+        #070b12;
+
+    color: #e8edf5;
+
+    font-family:
+        "Inter",
+        "Segoe UI",
+        sans-serif;
+}
+
+
+/* ==========================================
+   BACKGROUND GRID
+========================================== */
+
+.not-found__grid {
+    position: absolute;
+    inset: 0;
+
+    opacity: 0.16;
+
+    background-image:
+        linear-gradient(
+            rgba(255, 255, 255, 0.04) 1px,
+            transparent 1px
+        ),
+        linear-gradient(
+            90deg,
+            rgba(255, 255, 255, 0.04) 1px,
+            transparent 1px
+        );
+
+    background-size: 50px 50px;
+
+    transform:
+        perspective(600px)
+        rotateX(55deg)
+        scale(1.5);
+
+    transform-origin: center bottom;
+
+    animation: gridMove 12s linear infinite;
+}
+
+
+@keyframes gridMove {
+
+    from {
+        background-position:
+            0 0,
+            0 0;
+    }
+
+    to {
+        background-position:
+            0 50px,
+            50px 0;
+    }
+
+}
+
+
+/* ==========================================
+   AMBIENT GLOW
+========================================== */
+
+.not-found__glow {
+    position: absolute;
+
+    width: 400px;
+    height: 400px;
+
+    border-radius: 50%;
+
+    filter: blur(100px);
+
+    pointer-events: none;
+}
+
+
+.not-found__glow--one {
+    top: -150px;
+    left: -100px;
+
+    background: rgba(0, 180, 255, 0.08);
+}
+
+
+.not-found__glow--two {
+    right: -150px;
+    bottom: -150px;
+
+    background: rgba(120, 70, 255, 0.08);
+}
+
+
+/* ==========================================
+   CONTENT
+========================================== */
+
+.not-found__content {
+    position: relative;
+    z-index: 2;
+
+    width: min(850px, 92%);
+
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+
+    text-align: center;
+
+    padding: 50px 20px;
+}
+
+
+/* ==========================================
+   SYSTEM LABEL
+========================================== */
+
+.not-found__system {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+
+    padding: 8px 15px;
+
+    border: 1px solid rgba(255, 255, 255, 0.08);
+
+    border-radius: 30px;
+
+    background: rgba(255, 255, 255, 0.025);
+
+    color: #78869b;
+
+    font-size: 11px;
+    font-weight: 700;
+
+    letter-spacing: 2px;
+
+    margin-bottom: 20px;
+}
+
+
+.not-found__status-dot {
+    width: 7px;
+    height: 7px;
+
+    border-radius: 50%;
+
+    background: #35d07f;
+
+    box-shadow:
+        0 0 8px rgba(53, 208, 127, 0.8);
+
+    animation: pulse 1.8s infinite;
+}
+
+
+@keyframes pulse {
+
+    0%,
+    100% {
+        opacity: 1;
+        transform: scale(1);
+    }
+
+    50% {
+        opacity: 0.4;
+        transform: scale(0.75);
+    }
+
+}
+
+
+/* ==========================================
+   404 CODE
+========================================== */
+
+.not-found__code {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    gap: 18px;
+
+    margin-bottom: 10px;
+
+    font-size: clamp(110px, 20vw, 210px);
+
+    font-weight: 900;
+
+    line-height: 0.9;
+
+    letter-spacing: -12px;
+
+    color: #f1f5fb;
+
+    text-shadow:
+        0 0 40px rgba(255, 255, 255, 0.05);
+}
+
+
+/* ==========================================
+   CENTER ORB
+========================================== */
+
+.not-found__orb {
+    width: clamp(90px, 13vw, 140px);
+    height: clamp(90px, 13vw, 140px);
+
+    display: flex;
+    align-items: center;
+    justify-content: center;
+
+    border-radius: 50%;
+
+    border: 1px solid rgba(0, 191, 255, 0.3);
+
+    background:
+        radial-gradient(
+            circle,
+            rgba(0, 170, 255, 0.18),
+            rgba(0, 0, 0, 0.5) 65%
+        );
+
+    color: #46c7ff;
+
+    font-size: clamp(28px, 5vw, 50px);
+
+    box-shadow:
+        0 0 35px rgba(0, 180, 255, 0.12),
+        inset 0 0 30px rgba(0, 180, 255, 0.05);
+
+    animation: orbFloat 4s ease-in-out infinite;
+}
+
+
+@keyframes orbFloat {
+
+    0%,
+    100% {
+        transform: translateY(0);
+    }
+
+    50% {
+        transform: translateY(-10px);
+    }
+
+}
+
+
+/* ==========================================
+   MESSAGE
+========================================== */
+
+.not-found__message {
+    max-width: 650px;
+
+    margin-top: 15px;
+}
+
+
+.not-found__warning {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+
+    color: #f0a84b;
+
+    font-size: 11px;
+    font-weight: 800;
+
+    letter-spacing: 2px;
+
+    margin-bottom: 14px;
+}
+
+
+.not-found__message h1 {
+    margin: 0;
+
+    font-size: clamp(28px, 5vw, 48px);
+
+    line-height: 1.1;
+
+    letter-spacing: -1.5px;
+
+    color: #f4f7fb;
+}
+
+
+.not-found__message h1 span {
+    color: #46c7ff;
+}
+
+
+.not-found__message p {
+    max-width: 560px;
+
+    margin: 18px auto 0;
+
+    color: #7f8da1;
+
+    font-size: 15px;
+
+    line-height: 1.7;
+}
+
+
+/* ==========================================
+   TERMINAL
+========================================== */
+
+.not-found__terminal {
+    width: min(650px, 100%);
+
+    margin-top: 32px;
+
+    overflow: hidden;
+
+    border: 1px solid rgba(255, 255, 255, 0.07);
+
+    border-radius: 12px;
+
+    background: rgba(10, 15, 24, 0.85);
+
+    box-shadow:
+        0 20px 60px rgba(0, 0, 0, 0.35),
+        inset 0 1px rgba(255, 255, 255, 0.03);
+
+    text-align: left;
+}
+
+
+.terminal__header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+
+    padding: 12px 16px;
+
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+
+    color: #657286;
+
+    font-size: 10px;
+    font-weight: 700;
+
+    letter-spacing: 1.5px;
+}
+
+
+.terminal__live {
+    color: #35d07f;
+}
+
+
+.terminal__body {
+    display: grid;
+
+    grid-template-columns:
+        repeat(3, 1fr);
+
+    gap: 1px;
+
+    background: rgba(255, 255, 255, 0.04);
+}
+
+
+.terminal__body > div {
+    display: flex;
+    flex-direction: column;
+
+    gap: 5px;
+
+    padding: 16px;
+
+    background: #0b111b;
+}
+
+
+.terminal__body span {
+    color: #59677b;
+
+    font-size: 9px;
+
+    font-weight: 700;
+
+    letter-spacing: 1.5px;
+}
+
+
+.terminal__body strong {
+    color: #dfe7f2;
+
+    font-size: 13px;
+
+    letter-spacing: 0.5px;
+}
+
+
+.terminal__negative {
+    color: #ff6171 !important;
+}
+
+
+.terminal__warning {
+    color: #f0a84b !important;
+}
+
+
+/* ==========================================
+   MINI CHART
+========================================== */
+
+.terminal__chart {
+    height: 80px;
+
+    display: flex;
+
+    align-items: flex-end;
+
+    justify-content: center;
+
+    gap: 14px;
+
+    padding: 15px 25px;
+
+    background:
+        linear-gradient(
+            rgba(255, 255, 255, 0.025) 1px,
+            transparent 1px
+        );
+
+    background-size: 100% 20px;
+}
+
+
+.candle {
+    position: relative;
+
+    width: 7px;
+
+    border-radius: 2px;
+
+    background: #35d07f;
+
+    opacity: 0.65;
+}
+
+
+.candle::before {
+    content: "";
+
+    position: absolute;
+
+    left: 3px;
+
+    width: 1px;
+
+    background: currentColor;
+
+    top: -8px;
+
+    bottom: -8px;
+}
+
+
+.candle--1 {
+    height: 18px;
+}
+
+
+.candle--2 {
+    height: 35px;
+}
+
+
+.candle--3 {
+    height: 24px;
+}
+
+
+.candle--4 {
+    height: 48px;
+}
+
+
+.candle--5 {
+    height: 30px;
+}
+
+
+.candle--6 {
+    height: 55px;
+}
+
+
+.candle--7 {
+    height: 40px;
+}
+
+
+.candle--8 {
+    height: 22px;
+
+    background: #ff6171;
+}
+
+
+/* ==========================================
+   ACTIONS
+========================================== */
+
+.not-found__actions {
+    display: flex;
+
+    gap: 12px;
+
+    margin-top: 28px;
+}
+
+
+.not-found__button {
+    display: inline-flex;
+
+    align-items: center;
+    justify-content: center;
+
+    gap: 9px;
+
+    min-width: 170px;
+
+    padding: 12px 20px;
+
+    border-radius: 7px;
+
+    font-size: 12px;
+
+    font-weight: 700;
+
+    text-decoration: none;
+
+    transition:
+        transform 0.2s ease,
+        box-shadow 0.2s ease,
+        border-color 0.2s ease;
+}
+
+
+.not-found__button:hover {
+    transform: translateY(-2px);
+}
+
+
+.not-found__button--primary {
+    color: #041019;
+
+    background: #46c7ff;
+
+    box-shadow:
+        0 8px 25px rgba(70, 199, 255, 0.15);
+}
+
+
+.not-found__button--primary:hover {
+    box-shadow:
+        0 12px 35px rgba(70, 199, 255, 0.25);
+}
+
+
+.not-found__button--secondary {
+    color: #c9d3df;
+
+    border: 1px solid rgba(255, 255, 255, 0.1);
+
+    background: rgba(255, 255, 255, 0.025);
+}
+
+
+.not-found__button--secondary:hover {
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+
+/* ==========================================
+   FOOTER
+========================================== */
+
+.not-found__footer {
+    display: flex;
+
+    align-items: center;
+
+    gap: 8px;
+
+    margin-top: 25px;
+
+    color: #4f5d70;
+
+    font-size: 11px;
+}
+
+
+/* ==========================================
+   RESPONSIVE
+========================================== */
+
+@media (max-width: 600px) {
+
+    .not-found__content {
+        padding: 30px 15px;
+    }
+
+
+    .not-found__code {
+        gap: 8px;
+
+        letter-spacing: -7px;
+    }
+
+
+    .not-found__message h1 {
+        font-size: 29px;
+    }
+
+
+    .not-found__message p {
+        font-size: 13px;
+    }
+
+
+    .terminal__body {
+        grid-template-columns: 1fr;
+    }
+
+
+    .not-found__actions {
+        flex-direction: column;
+
+        width: 100%;
+    }
+
+
+    .not-found__button {
+        width: 100%;
+    }
+
+
+    .not-found__footer {
+        text-align: center;
+
+        justify-content: center;
+
+        line-height: 1.5;
+    }
+
+}
