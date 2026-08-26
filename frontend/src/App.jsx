@@ -18,6 +18,7 @@ import Landing from "./pages/Landing/Landing";
 
 import Accounts from "./pages/Dashboard/Accounts/Accounts";
 import Symbols from "./pages/Dashboard/Symbols/SymbolsPage";
+import Orders from "./pages/Dashboard/Orders/Orders";
 import NotFound from "./pages/NotFound";
 
 import "./App.css";
@@ -105,6 +106,8 @@ const App = () => {
           <Route path="accounts" element={<Accounts />} />
 
           <Route path="symbols" element={<Symbols />} />
+
+          <Route path="orders" element={<Orders />} />
 
           <Route index element={<Dashboard />} />
         </Route>

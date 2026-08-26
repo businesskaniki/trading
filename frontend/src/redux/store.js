@@ -4,6 +4,7 @@ import authReducer from "./auth/authSlice";
 import dashboardReducer from "./dashboard/dashboardSlice";
 import accountsReducer from "./dashboard/accounts/accountsSlice"
 import symbolsReducer from "./dashboard/symbols/symbolsSlice";
+import ordersReducer from "./dashboard/orders/ordersSlice";
 
 export const store = configureStore({
   reducer: {
@@ -11,6 +12,7 @@ export const store = configureStore({
     dashboard: dashboardReducer,
     accounts: accountsReducer,
     symbols: symbolsReducer,
+    orders: ordersReducer,
   },
 
   middleware: (getDefaultMiddleware) =>
