@@ -13,7 +13,9 @@ from app.api.routes import (
     broker,
     execution,
     analytics,
-    risk
+    risk,
+    bot,
+    stream,
 )
 
 api_router = APIRouter()
@@ -31,4 +33,6 @@ api_router.include_router(broker.router)
 api_router.include_router(execution.router)
 api_router.include_router(analytics.router)
 api_router.include_router(risk.router)
+api_router.include_router(bot.router)
+api_router.include_router(stream.router)
 

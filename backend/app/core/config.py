@@ -1,6 +1,6 @@
 from functools import lru_cache
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     SECRET_KEY: str
+
+    BROKER: str = "paper"
+    CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
 
     API_PREFIX: str = "/api/v1"
 
@@ -75,6 +78,14 @@ class Settings(BaseSettings):
     @property
     def REDIS_URL(self):
         return f"redis://" f"{self.REDIS_HOST}:" f"{self.REDIS_PORT}"
+
+    @model_validator(mode="after")
+    def validate_production_safety(self):
+        if self.APP_ENV.lower() == "production" and self.BROKER.lower() == "paper":
+            raise ValueError("BROKER must be explicitly set to mt5 in production")
+        if self.APP_ENV.lower() == "production" and self.DEBUG:
+            raise ValueError("DEBUG must be false in production")
+        return self
 
 
 @lru_cache

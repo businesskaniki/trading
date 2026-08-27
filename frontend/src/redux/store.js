@@ -7,6 +7,8 @@ import symbolsReducer from "./dashboard/symbols/symbolsSlice";
 import ordersReducer from "./dashboard/orders/ordersSlice";
 import positionsReducer from "./dashboard/positions/positionsSlice";
 import tradesReducer from "./dashboard/trades/tradesSlice";
+import botReducer from "./dashboard/botSlice";
+import riskReducer from "./dashboard/riskSlice";
 
 export const store = configureStore({
   reducer: {
@@ -17,6 +19,8 @@ export const store = configureStore({
     orders: ordersReducer,
     positions: positionsReducer,
     trades: tradesReducer,
+    bot: botReducer,
+    risk: riskReducer,
   },
 
   middleware: (getDefaultMiddleware) =>

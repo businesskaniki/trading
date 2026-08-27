@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from app.api.dependencies import get_execution_service
+from app.api.dependencies import get_current_user, get_execution_service
 
 from app.broker.exceptions import (
     BrokerOrderError,
@@ -15,6 +15,7 @@ from app.services.execution_service import ExecutionService
 router = APIRouter(
     prefix="/execution",
     tags=["execution"],
+    dependencies=[Depends(get_current_user)],
 )
 
 

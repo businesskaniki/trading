@@ -1,0 +1,10 @@
+.strategy-runs-header button { margin-left: auto; }
+.strategy-runs-table-wrap { margin-top: 20px; }
+.strategy-runs-table-wrap td { color: #cbd5e1; }
+.strategy-runs-table-wrap td:first-child strong, .strategy-runs-table-wrap td:first-child span { display: block; }
+.strategy-runs-table-wrap td:first-child span { margin-top: 4px; color: #64748b; font-size: 12px; }
+.strategy-status { display: inline-block; padding: 5px 8px; border-radius: 5px; font-size: 11px; font-weight: 700; }
+.strategy-status--running { background: rgba(52, 211, 153, .14); color: #34d399; }
+.strategy-status--completed { background: rgba(96, 165, 250, .14); color: #60a5fa; }
+.strategy-status--cancelled, .strategy-status--failed { background: rgba(248, 113, 113, .14); color: #f87171; }
+.strategy-empty { min-height: 120px; flex-direction: column; }
