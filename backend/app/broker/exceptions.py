@@ -22,6 +22,15 @@ class BrokerAuthenticationError(BrokerError):
     pass
 
 
+class BrokerDataError(BrokerError):
+    """
+    Raised when broker data cannot be retrieved,
+    is unavailable, malformed, or invalid.
+    """
+
+    pass
+
+
 class BrokerOrderError(BrokerError):
     """
     Raised when an order cannot be submitted or processed.

@@ -1,313 +1,234 @@
-"""Broker data models for the Athena Quant Engine.
-
-These models define the normalized data exchanged between the AQE engine
-and broker adapters.
-
-They are intentionally independent of:
-    - MetaTrader 5
-    - SQLAlchemy
-    - FastAPI
-    - API request/response schemas
-
-Broker adapters are responsible for converting broker-specific data into
-these models.
-"""
-
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import StrEnum
+from datetime import datetime
+from decimal import Decimal
+from enum import Enum
 from typing import Any
-from uuid import UUID
 
-# ============================================================================
-# ENUMS
-# ============================================================================
+from pydantic import BaseModel, ConfigDict, Field
 
 
-class OrderSide(StrEnum):
-    """Order direction."""
-
-    BUY = "buy"
-    SELL = "sell"
+class BrokerType(str, Enum):
+    MT5 = "mt5"
 
 
-class OrderType(StrEnum):
-    """Supported order types."""
-
-    MARKET = "market"
-    LIMIT = "limit"
-    STOP = "stop"
-    STOP_LIMIT = "stop_limit"
+class BrokerConnectionStatus(str, Enum):
+    CONNECTED = "connected"
+    DISCONNECTED = "disconnected"
+    ERROR = "error"
 
 
-class OrderStatus(StrEnum):
-    """Normalized order lifecycle states."""
+class BrokerConnection(BaseModel):
+    """
+    Normalized broker connection information.
+    """
 
-    PENDING = "pending"
-    SUBMITTED = "submitted"
-    ACCEPTED = "accepted"
-    PARTIALLY_FILLED = "partially_filled"
-    FILLED = "filled"
-    CANCEL_REQUESTED = "cancel_requested"
-    CANCELLED = "cancelled"
-    REJECTED = "rejected"
-    EXPIRED = "expired"
-    FAILED = "failed"
+    model_config = ConfigDict(extra="ignore")
+
+    broker: BrokerType
+    status: BrokerConnectionStatus
+    message: str | None = None
 
 
-class PositionSide(StrEnum):
-    """Position direction."""
+class BrokerAccount(BaseModel):
+    """
+    Normalized account information returned by a broker.
+    """
 
-    LONG = "long"
-    SHORT = "short"
+    model_config = ConfigDict(extra="ignore")
 
+    login: int | str
+    name: str | None = None
+    server: str | None = None
+    currency: str | None = None
 
-# ============================================================================
-# ACCOUNT
-# ============================================================================
-
-
-@dataclass(slots=True)
-class AccountInfo:
-    """Normalized broker account information."""
-
-    account_id: str
-    balance: float
-    equity: float
-    currency: str
-
-    margin: float = 0.0
-    free_margin: float = 0.0
-    margin_level: float | None = None
+    balance: Decimal = Decimal("0")
+    equity: Decimal = Decimal("0")
+    margin: Decimal = Decimal("0")
+    free_margin: Decimal = Decimal("0")
+    margin_level: Decimal | None = None
 
     leverage: int | None = None
 
-    broker: str | None = None
-    server: str | None = None
-
-    is_demo: bool = False
-
-    timestamp: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc),
-    )
+    is_demo: bool | None = None
+    is_trade_allowed: bool | None = None
 
 
-# ============================================================================
-# SYMBOL
-# ============================================================================
+class BrokerSymbol(BaseModel):
+    """
+    Normalized market symbol information.
+    """
 
+    model_config = ConfigDict(extra="ignore")
 
-@dataclass(slots=True)
-class SymbolInfo:
-    """Normalized trading-symbol specification."""
-
-    symbol: str
-
+    name: str
     description: str | None = None
-    base_currency: str | None = None
-    quote_currency: str | None = None
 
-    digits: int = 5
+    digits: int | None = None
 
-    tick_size: float = 0.0
-    tick_value: float = 0.0
+    point: Decimal | None = None
+    tick_size: Decimal | None = None
+    tick_value: Decimal | None = None
 
-    contract_size: float = 0.0
+    contract_size: Decimal | None = None
 
-    min_volume: float = 0.0
-    max_volume: float = 0.0
-    volume_step: float = 0.0
+    volume_min: Decimal | None = None
+    volume_max: Decimal | None = None
+    volume_step: Decimal | None = None
 
-    min_stop_distance: float | None = None
+    bid: Decimal | None = None
+    ask: Decimal | None = None
 
-    tradeable: bool = True
+    spread: Decimal | None = None
 
-    metadata: dict[str, Any] = field(
-        default_factory=dict,
-    )
+    trade_allowed: bool | None = None
 
 
-# ============================================================================
-# MARKET DATA
-# ============================================================================
+class BrokerTick(BaseModel):
+    """
+    Normalized market tick.
+    """
 
-
-@dataclass(slots=True)
-class Tick:
-    """Normalized real-time bid/ask tick."""
+    model_config = ConfigDict(extra="ignore")
 
     symbol: str
 
-    bid: float
-    ask: float
+    bid: Decimal
+    ask: Decimal
 
-    timestamp: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc),
-    )
+    time: datetime | None = None
 
-    volume: float | None = None
-
-    metadata: dict[str, Any] = field(
-        default_factory=dict,
-    )
-
-    @property
-    def spread(self) -> float:
-        """Return the absolute bid/ask spread."""
-
-        return self.ask - self.bid
-
-    @property
-    def mid_price(self) -> float:
-        """Return the midpoint between bid and ask."""
-
-        return (self.bid + self.ask) / 2
+    last: Decimal | None = None
+    volume: Decimal | None = None
 
 
-@dataclass(slots=True)
-class Candle:
-    """Normalized OHLCV candle."""
+class BrokerOrder(BaseModel):
+    """
+    Normalized pending/order information.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    ticket: int | str
+    symbol: str
+
+    order_type: str | None = None
+    state: str | None = None
+
+    volume: Decimal = Decimal("0")
+    price_open: Decimal | None = None
+    price_current: Decimal | None = None
+
+    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = None
+
+    magic: int | None = None
+
+    comment: str | None = None
+
+    time_setup: datetime | None = None
+    time_done: datetime | None = None
+
+
+class BrokerPosition(BaseModel):
+    """
+    Normalized open-position information.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    ticket: int | str
+    symbol: str
+
+    position_type: str | None = None
+
+    volume: Decimal = Decimal("0")
+
+    price_open: Decimal | None = None
+    price_current: Decimal | None = None
+
+    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = None
+
+    profit: Decimal = Decimal("0")
+    swap: Decimal = Decimal("0")
+
+    magic: int | None = None
+    comment: str | None = None
+
+    time_open: datetime | None = None
+
+
+class BrokerDeal(BaseModel):
+    """
+    Normalized executed deal/trade information.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    ticket: int | str
+    order_ticket: int | str | None = None
+    position_ticket: int | str | None = None
 
     symbol: str
-    timeframe: str
 
-    timestamp: datetime
+    deal_type: str | None = None
+    entry: str | None = None
 
-    open: float
-    high: float
-    low: float
-    close: float
+    volume: Decimal = Decimal("0")
+    price: Decimal = Decimal("0")
 
-    volume: float = 0.0
+    profit: Decimal = Decimal("0")
+    commission: Decimal = Decimal("0")
+    swap: Decimal = Decimal("0")
 
-    tick_volume: float | None = None
-    spread: float | None = None
+    magic: int | None = None
+    comment: str | None = None
 
-    metadata: dict[str, Any] = field(
-        default_factory=dict,
-    )
+    time: datetime | None = None
 
 
-# ============================================================================
-# ORDERS
-# ============================================================================
+class BrokerOrderRequest(BaseModel):
+    """
+    Engine-level request for submitting an order.
 
-
-@dataclass(slots=True)
-class OrderRequest:
-    """Standardized order request sent from AQE to a broker."""
+    This is deliberately broker-neutral. MT5-specific request
+    structures should be created by the MT5 adapter.
+    """
 
     symbol: str
-    side: OrderSide
-    order_type: OrderType
-    quantity: float
+    side: str
 
-    price: float | None = None
+    volume: Decimal = Field(gt=0)
 
-    stop_loss: float | None = None
-    take_profit: float | None = None
+    order_type: str | None = None
 
-    client_order_id: str | None = None
+    price: Decimal | None = None
+    stop_loss: Decimal | None = None
+    take_profit: Decimal | None = None
 
-    account_id: str | None = None
+    deviation: int | None = None
+    magic: int | None = None
+    comment: str | None = None
 
-    strategy: str | None = None
-
-    correlation_id: UUID | None = None
-
-    metadata: dict[str, Any] = field(
-        default_factory=dict,
-    )
+    model_config = ConfigDict(extra="ignore")
 
 
-@dataclass(slots=True)
-class OrderResult:
-    """Normalized result of an order operation."""
+class BrokerOrderResult(BaseModel):
+    """
+    Normalized result returned after an order submission.
+    """
 
     success: bool
 
-    order_id: str | None = None
-
-    status: OrderStatus | None = None
+    order_ticket: int | str | None = None
+    deal_ticket: int | str | None = None
 
     symbol: str | None = None
-    side: OrderSide | None = None
+    volume: Decimal | None = None
+    price: Decimal | None = None
 
-    requested_quantity: float | None = None
-    filled_quantity: float = 0.0
-
-    requested_price: float | None = None
-    average_fill_price: float | None = None
-
+    retcode: int | None = None
     message: str | None = None
-    error_code: str | None = None
 
-    timestamp: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc),
-    )
-
-    metadata: dict[str, Any] = field(
-        default_factory=dict,
-    )
-
-
-# ============================================================================
-# POSITIONS
-# ============================================================================
-
-
-@dataclass(slots=True)
-class Position:
-    """Normalized open trading position."""
-
-    position_id: str
-    symbol: str
-
-    side: PositionSide
-    quantity: float
-
-    average_price: float
-
-    current_price: float | None = None
-
-    stop_loss: float | None = None
-    take_profit: float | None = None
-
-    realized_pnl: float = 0.0
-    unrealized_pnl: float = 0.0
-
-    swap: float = 0.0
-    commission: float = 0.0
-
-    account_id: str | None = None
-
-    opened_at: datetime | None = None
-    updated_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc),
-    )
-
-    metadata: dict[str, Any] = field(
-        default_factory=dict,
-    )
-
-
-# ============================================================================
-# EXPORTS
-# ============================================================================
-
-
-__all__ = [
-    "AccountInfo",
-    "Candle",
-    "OrderRequest",
-    "OrderResult",
-    "OrderSide",
-    "OrderStatus",
-    "OrderType",
-    "Position",
-    "PositionSide",
-    "SymbolInfo",
-    "Tick",
-]
+    raw: dict[str, Any] | None = None

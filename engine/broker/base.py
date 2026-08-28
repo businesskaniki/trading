@@ -1,40 +1,20 @@
-"""Broker abstraction for the Athena Quant Engine.
-
-This module defines the interface that all broker implementations must
-follow.
-
-The trading engine depends on this abstraction rather than directly
-depending on MetaTrader 5 or another broker SDK.
-
-Concrete implementations may include:
-
-    - MT5Broker
-    - PaperBroker
-    - Future broker/exchange adapters
-
-The interface intentionally contains no broker-specific implementation
-logic.
-"""
-
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Sequence
-
-from engine.broker.models import (
-    AccountInfo,
-    Candle,
-    OrderRequest,
-    OrderResult,
-    OrderStatus,
-    Position,
-    SymbolInfo,
-    Tick,
-)
+from decimal import Decimal
+from typing import Any
 
 
 class Broker(ABC):
-    """Abstract interface for broker connectivity and trading."""
+    """
+    Abstract broker interface used by the trading engine.
+
+    Concrete implementations such as MT5Broker and PaperBroker
+    must implement this interface.
+
+    The engine depends on this contract rather than depending
+    directly on MetaTrader 5 or any other broker.
+    """
 
     # ------------------------------------------------------------------
     # Connection
@@ -42,80 +22,113 @@ class Broker(ABC):
 
     @abstractmethod
     async def connect(self) -> None:
-        """Establish a connection to the broker."""
+        """
+        Establish a connection to the broker.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def disconnect(self) -> None:
-        """Close the broker connection."""
+        """
+        Close the broker connection and release resources.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def is_connected(self) -> bool:
-        """Return whether the broker connection is active."""
+        """
+        Return True when the broker connection is healthy.
+        """
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Account
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def get_account(self) -> AccountInfo:
-        """Return current broker account information."""
+    async def get_account(self) -> dict[str, Any]:
+        """
+        Return current broker account information.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_balance(self) -> Decimal:
+        """
+        Return current account balance.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_equity(self) -> Decimal:
+        """
+        Return current account equity.
+        """
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Market data
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def get_symbol(self, symbol: str) -> SymbolInfo:
-        """Return information about a trading symbol."""
+    async def get_symbol(self, symbol: str) -> dict[str, Any]:
+        """
+        Return broker information for a symbol.
+        """
+        raise NotImplementedError
 
     @abstractmethod
-    async def get_tick(self, symbol: str) -> Tick:
-        """Return the latest tick for a symbol."""
-
-    @abstractmethod
-    async def get_candles(
-        self,
-        symbol: str,
-        timeframe: str,
-        limit: int = 100,
-    ) -> Sequence[Candle]:
-        """Return historical candles for a symbol."""
+    async def get_tick(self, symbol: str) -> dict[str, Any]:
+        """
+        Return the latest bid/ask tick for a symbol.
+        """
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Orders
     # ------------------------------------------------------------------
 
     @abstractmethod
-    async def submit_order(
+    async def place_order(
         self,
-        request: OrderRequest,
-    ) -> OrderResult:
-        """Submit an order to the broker."""
+        *,
+        symbol: str,
+        side: str,
+        volume: Decimal,
+        order_type: str,
+        price: Decimal | None = None,
+        stop_loss: Decimal | None = None,
+        take_profit: Decimal | None = None,
+        comment: str | None = None,
+        magic_number: int | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        Submit an order to the broker.
+        """
+        raise NotImplementedError
 
     @abstractmethod
-    async def cancel_order(
-        self,
-        order_id: str,
-    ) -> OrderResult:
-        """Cancel an existing order."""
+    async def cancel_order(self, order_id: str) -> dict[str, Any]:
+        """
+        Cancel an existing pending order.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def modify_order(
         self,
         order_id: str,
         *,
-        price: float | None = None,
-        stop_loss: float | None = None,
-        take_profit: float | None = None,
-    ) -> OrderResult:
-        """Modify an existing order."""
-
-    @abstractmethod
-    async def get_order_status(
-        self,
-        order_id: str,
-    ) -> OrderStatus:
-        """Return the current status of an order."""
+        price: Decimal | None = None,
+        stop_loss: Decimal | None = None,
+        take_profit: Decimal | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        Modify an existing order.
+        """
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Positions
@@ -125,43 +138,88 @@ class Broker(ABC):
     async def get_positions(
         self,
         symbol: str | None = None,
-    ) -> Sequence[Position]:
-        """Return currently open positions."""
+    ) -> list[dict[str, Any]]:
+        """
+        Return currently open positions.
+
+        If symbol is supplied, return positions for that symbol only.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def get_position(
         self,
         position_id: str,
-    ) -> Position | None:
-        """Return one position by identifier."""
+    ) -> dict[str, Any] | None:
+        """
+        Return a single open position.
+        """
+        raise NotImplementedError
 
     @abstractmethod
     async def close_position(
         self,
         position_id: str,
-    ) -> OrderResult:
-        """Close an open position."""
+        *,
+        volume: Decimal | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        Close all or part of an open position.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def modify_position(
+        self,
+        position_id: str,
+        *,
+        stop_loss: Decimal | None = None,
+        take_profit: Decimal | None = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        """
+        Modify the protective levels of an open position.
+        """
+        raise NotImplementedError
+
+    # ------------------------------------------------------------------
+    # History
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    async def get_orders(
+        self,
+        *,
+        start: Any | None = None,
+        end: Any | None = None,
+        symbol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Return historical broker orders.
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    async def get_trades(
+        self,
+        *,
+        start: Any | None = None,
+        end: Any | None = None,
+        symbol: str | None = None,
+    ) -> list[dict[str, Any]]:
+        """
+        Return historical executed trades/deals.
+        """
+        raise NotImplementedError
 
     # ------------------------------------------------------------------
     # Health
     # ------------------------------------------------------------------
 
-    async def health(self) -> dict[str, Any]:
-        """Return broker health information.
-
-        Concrete brokers can override this method when they need to
-        expose additional diagnostics.
+    @abstractmethod
+    async def health_check(self) -> dict[str, Any]:
         """
-
-        connected = await self.is_connected()
-
-        return {
-            "status": "healthy" if connected else "disconnected",
-            "connected": connected,
-            "broker": self.__class__.__name__,
-        }
-
-
-__all__ = [
-    "Broker",
-]
+        Return broker health/status information.
+        """
+        raise NotImplementedError
