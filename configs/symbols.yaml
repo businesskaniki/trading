@@ -1,5 +1,0 @@
-symbols:
-  - name: EURUSD
-    asset_class: forex
-  - name: XAUUSD
-    asset_class: metal

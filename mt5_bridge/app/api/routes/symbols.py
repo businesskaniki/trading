@@ -1,8 +1,9 @@
 from typing import List
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 
 from app.schemas.symbol import (
+    CandleResponse,
     SymbolResponse,
     TickResponse,
 )
@@ -79,6 +80,49 @@ def get_tick(symbol: str):
             )
 
         return tick
+
+    except HTTPException:
+        raise
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=str(exc),
+        )
+
+
+@router.get(
+    "/{symbol}/candles",
+    response_model=List[CandleResponse],
+)
+def get_candles(
+    symbol: str,
+    timeframe: str = Query(
+        "M15",
+        description="One of M1, M5, M15, M30, H1, H4, D1",
+    ),
+    count: int = Query(
+        200,
+        le=1000,
+        description="Number of most recent candles to return",
+    ),
+):
+
+    try:
+
+        candles = service.get_candles(
+            symbol,
+            timeframe,
+            count,
+        )
+
+        if candles is None:
+            raise HTTPException(
+                status_code=404,
+                detail="Candles not available",
+            )
+
+        return candles
 
     except HTTPException:
         raise

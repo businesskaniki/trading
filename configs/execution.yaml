@@ -1,4 +1,0 @@
-execution:
-  max_retries: 3
-  retry_delay_seconds: 1
-  max_slippage_points: 20

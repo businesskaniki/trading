@@ -12,10 +12,6 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 9000
 
-    MT5_LOGIN: int = 0
-    MT5_PASSWORD: str = ""
-    MT5_SERVER: str = ""
-
     LOG_LEVEL: str = "INFO"
 
 

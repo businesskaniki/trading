@@ -7,6 +7,8 @@ from sqlalchemy import Index
 from sqlalchemy import Integer
 from sqlalchemy import Numeric
 from sqlalchemy import String
+from sqlalchemy import Text
+from sqlalchemy import UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
@@ -19,36 +21,79 @@ from app.database.base import TimestampMixin
 from app.database.base import UUIDMixin
 
 
-
 class TradingAccount(UUIDMixin, TimestampMixin, Base):
     """
-    Represents a broker trading account.
+    A trading account belonging to an AQE user.
 
-    Examples:
-        MT5 Demo
-        MT5 Live
-        Binance Futures
+    Stores the information required to identify and connect to
+    the user's broker/platform account.
+
+    Example:
+
+        Broker:        MT5
+        Login:         1200122668
+        Server:        JustMarkets-Demo3
+        Demo:          True
+
+    MT5 credentials are stored encrypted in credentials_encrypted.
+    Plain-text passwords must never be returned through the API.
     """
 
     __tablename__ = "trading_accounts"
 
     __table_args__ = (
-        Index("ix_account_number", "account_number"),
-        Index("ix_broker", "broker"),
+        UniqueConstraint(
+            "broker",
+            "server",
+            "login",
+            name="uq_trading_account_identity",
+        ),
+        Index(
+            "ix_trading_accounts_user_id",
+            "user_id",
+        ),
+        Index(
+            "ix_trading_accounts_broker",
+            "broker",
+        ),
+        Index(
+            "ix_trading_accounts_status",
+            "status",
+        ),
     )
 
-    # ----------------------------------------------------------
-    # Broker Information
-    # ----------------------------------------------------------
+    # ==========================================================
+    # Ownership
+    # ==========================================================
 
-    broker: Mapped[BrokerType] = mapped_column(
-        Enum(BrokerType, name="broker_type_enum"),
+    user_id: Mapped[UUID] = mapped_column(
+        ForeignKey("users.id"),
         nullable=False,
     )
 
-    account_number: Mapped[int] = mapped_column(
+    user = relationship(
+        "User",
+        back_populates="trading_accounts",
+    )
+
+    # ==========================================================
+    # Broker
+    # ==========================================================
+
+    broker: Mapped[BrokerType] = mapped_column(
+        Enum(
+            BrokerType,
+            name="broker_type_enum",
+        ),
+        nullable=False,
+    )
+
+    # ==========================================================
+    # Trading Account Identity
+    # ==========================================================
+
+    login: Mapped[int] = mapped_column(
         Integer,
-        unique=True,
         nullable=False,
     )
 
@@ -64,8 +109,8 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
 
     currency: Mapped[str] = mapped_column(
         String(10),
-        nullable=False,
         default="USD",
+        nullable=False,
     )
 
     leverage: Mapped[int] = mapped_column(
@@ -74,9 +119,56 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    # ----------------------------------------------------------
+    # ==========================================================
+    # Credentials
+    # ==========================================================
+
+    credentials_encrypted: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    # ==========================================================
+    # MT5 Bridge
+    # ==========================================================
+
+    bridge_url: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+
+    # ==========================================================
+    # Account Type
+    # ==========================================================
+
+    is_demo: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+
+    # ==========================================================
+    # Connection Status
+    # ==========================================================
+
+    status: Mapped[AccountStatus] = mapped_column(
+        Enum(
+            AccountStatus,
+            name="account_status_enum",
+        ),
+        default=AccountStatus.DISCONNECTED,
+        nullable=False,
+    )
+
+    active: Mapped[bool] = mapped_column(
+        Boolean,
+        default=True,
+        nullable=False,
+    )
+
+    # ==========================================================
     # Account Metrics
-    # ----------------------------------------------------------
+    # ==========================================================
 
     balance: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
@@ -108,41 +200,9 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    # ----------------------------------------------------------
-    # Status
-    # ----------------------------------------------------------
-
-    is_demo: Mapped[bool] = mapped_column(
-        Boolean,
-        default=True,
-        nullable=False,
-    )
-
-    status: Mapped[AccountStatus] = mapped_column(
-        Enum(AccountStatus, name="account_status_enum"),
-        default=AccountStatus.DISCONNECTED,
-        nullable=False,
-    )
-
-    active: Mapped[bool] = mapped_column(
-        Boolean,
-        default=True,
-        nullable=False,
-    )
-
-    # ----------------------------------------------------------
-    # Relationships
-    # ----------------------------------------------------------
-
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id"),
-        nullable=False,
-    )
-
-    user = relationship(
-        "User",
-        back_populates="trading_accounts",
-    )
+    # ==========================================================
+    # Trading Relationships
+    # ==========================================================
 
     orders = relationship(
         "Order",
@@ -164,6 +224,7 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
         cascade="all, delete-orphan",
         lazy="selectin",
     )
+
     risk_snapshots = relationship(
         "RiskSnapshot",
         back_populates="account",
@@ -171,20 +232,22 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
         lazy="selectin",
     )
 
-    risk_profile = relationship(
-        "RiskProfile",
+    account_symbols = relationship(
+        "AccountSymbol",
         back_populates="account",
-        uselist=False,
         cascade="all, delete-orphan",
+        lazy="selectin",
     )
-    # ----------------------------------------------------------
+
+    # ==========================================================
     # Representation
-    # ----------------------------------------------------------
+    # ==========================================================
 
     def __repr__(self) -> str:
         return (
             f"<TradingAccount("
-            f"account={self.account_number}, "
+            f"login={self.login}, "
             f"broker={self.broker}, "
+            f"server={self.server}, "
             f"status={self.status})>"
         )

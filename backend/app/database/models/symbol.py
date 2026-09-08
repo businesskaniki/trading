@@ -9,35 +9,48 @@ from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
 from sqlalchemy.orm import relationship
 
+from app.core.constants import AssetClass
 from app.database.base import Base
 from app.database.base import TimestampMixin
 from app.database.base import UUIDMixin
 
 
-from app.core.constants import AssetClass
-
-
 class Symbol(UUIDMixin, TimestampMixin, Base):
     """
-    Tradable financial instrument.
+    Canonical tradable financial instrument.
 
     Examples:
-        - BTCUSD
-        - XAUUSD
-        - EURUSD
-        - US100
+
+        EURUSD
+        XAUUSD
+        BTCUSD
+        US100
+
+    Broker-specific symbol names and trading specifications belong
+    to AccountSymbol because different trading accounts may expose
+    the same instrument differently.
     """
 
     __tablename__ = "symbols"
 
     __table_args__ = (
-        Index("ix_symbols_name", "name"),
-        Index("ix_symbols_asset_class", "asset_class"),
+        Index(
+            "ix_symbols_name",
+            "name",
+        ),
+        Index(
+            "ix_symbols_asset_class",
+            "asset_class",
+        ),
+        Index(
+            "ix_symbols_active",
+            "active",
+        ),
     )
 
-    # ------------------------------------------------------------------
-    # Basic Information
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # Identity
+    # ==========================================================
 
     name: Mapped[str] = mapped_column(
         String(30),
@@ -50,10 +63,9 @@ class Symbol(UUIDMixin, TimestampMixin, Base):
         nullable=True,
     )
 
-    broker_symbol: Mapped[str] = mapped_column(
-        String(30),
-        nullable=False,
-    )
+    # ==========================================================
+    # Asset Classification
+    # ==========================================================
 
     asset_class: Mapped[AssetClass] = mapped_column(
         SQLEnum(
@@ -63,53 +75,9 @@ class Symbol(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    # ------------------------------------------------------------------
-    # Trading Specifications
-    # ------------------------------------------------------------------
-
-    digits: Mapped[int] = mapped_column(
-        default=5,
-        nullable=False,
-    )
-
-    tick_size: Mapped[Decimal] = mapped_column(
-        Numeric(18, 8),
-        nullable=False,
-    )
-
-    contract_size: Mapped[Decimal] = mapped_column(
-        Numeric(18, 2),
-        default=Decimal("100000"),
-        nullable=False,
-    )
-
-    min_volume: Mapped[Decimal] = mapped_column(
-        Numeric(10, 2),
-        default=Decimal("0.01"),
-        nullable=False,
-    )
-
-    max_volume: Mapped[Decimal] = mapped_column(
-        Numeric(10, 2),
-        default=Decimal("100.00"),
-        nullable=False,
-    )
-
-    volume_step: Mapped[Decimal] = mapped_column(
-        Numeric(10, 2),
-        default=Decimal("0.01"),
-        nullable=False,
-    )
-
-
-    @property
-    def tick_value(self) -> Decimal:
-        """Monetary value of one tick for one unit of volume."""
-        return self.contract_size * self.tick_size
-
-    # ------------------------------------------------------------------
-    # Status
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # AQE Status
+    # ==========================================================
 
     active: Mapped[bool] = mapped_column(
         Boolean,
@@ -117,28 +85,42 @@ class Symbol(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    # ------------------------------------------------------------------
-    # Relationships
-    # ------------------------------------------------------------------
+    # ==========================================================
+    # Account-Specific Symbol Mappings
+    # ==========================================================
+
+    account_symbols = relationship(
+        "AccountSymbol",
+        back_populates="symbol",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    # ==========================================================
+    # Trading Relationships
+    # ==========================================================
 
     orders: Mapped[list["Order"]] = relationship(
+        "Order",
         back_populates="symbol",
         lazy="selectin",
     )
 
     positions: Mapped[list["Position"]] = relationship(
+        "Position",
         back_populates="symbol",
         lazy="selectin",
     )
 
     trades: Mapped[list["Trade"]] = relationship(
+        "Trade",
         back_populates="symbol",
         lazy="selectin",
     )
 
-    # ------------------------------------------------------------------
+    # ==========================================================
     # Representation
-    # ------------------------------------------------------------------
+    # ==========================================================
 
     def __repr__(self) -> str:
         return (

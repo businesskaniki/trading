@@ -1,29 +1,50 @@
 import api from "../../../api/axios";
 
 const symbolsAPI = {
-  getSymbols: async () => {
-    const response = await api.get("/symbols/");
+  /**
+   * Synchronize the selected trading account's symbols
+   * from the MT5 bridge.
+   */
+  syncSymbols: async (accountId) => {
+    const response = await api.post(
+      `/trading-accounts/${accountId}/symbols/sync`,
+    );
+
     return response.data;
   },
 
-  createSymbol: async (symbolData) => {
-    const response = await api.post("/symbols/", symbolData);
+  /**
+   * Fetch all symbols synchronized for a trading account.
+   */
+  getAccountSymbols: async (accountId) => {
+    const response = await api.get(`/trading-accounts/${accountId}/symbols/`);
+
     return response.data;
   },
 
-  getSymbol: async (symbolId) => {
-    const response = await api.get(`/symbols/${symbolId}`);
+  /**
+   * Fetch only the symbols currently enabled for trading.
+   */
+  getTradingUniverse: async (accountId) => {
+    const response = await api.get(
+      `/trading-accounts/${accountId}/symbols/universe`,
+    );
+
     return response.data;
   },
 
-  updateSymbol: async (symbolId, symbolData) => {
-    const response = await api.patch(`/symbols/${symbolId}`, symbolData);
-    return response.data;
-  },
+  /**
+   * Enable or disable a symbol for the trading account.
+   */
+  setSymbolSelection: async (accountId, accountSymbolId, enabled) => {
+    const response = await api.patch(
+      `/trading-accounts/${accountId}/symbols/${accountSymbolId}/selection`,
+      {
+        enabled,
+      },
+    );
 
-  deleteSymbol: async (symbolId) => {
-    await api.delete(`/symbols/${symbolId}`);
-    return symbolId;
+    return response.data;
   },
 };
 

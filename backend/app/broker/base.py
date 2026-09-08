@@ -71,6 +71,18 @@ class BrokerAdapter(ABC):
         """
         raise NotImplementedError
 
+    @abstractmethod
+    async def get_candles(
+        self,
+        symbol: str,
+        timeframe: str = "M15",
+        count: int = 200,
+    ):
+        """
+        Get recent OHLC candles for a symbol.
+        """
+        raise NotImplementedError
+
     # ==========================================================
     # ORDERS
     # ==========================================================
@@ -158,8 +170,4 @@ class BrokerAdapter(ABC):
         """
         Get historical deals within a time range.
         """
-        raise NotImplementedError
-
-    @abstractmethod
-    async def get_tick(self, symbol: str):
         raise NotImplementedError

@@ -13,62 +13,42 @@ import {
   fetchBrokerAccount,
 } from "./dashboardThunks";
 
-const initialState = {
-  // ======================================================
-  // Dashboard
-  // ======================================================
+const normalizeList = (payload) => {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
 
+  if (Array.isArray(payload?.items)) {
+    return payload.items;
+  }
+
+  if (payload && typeof payload === "object") {
+    return [payload];
+  }
+
+  return [];
+};
+
+const initialState = {
   loading: false,
   error: null,
-
-  // ======================================================
-  // Trading Accounts
-  // ======================================================
 
   accounts: [],
   activeAccounts: [],
   accountsTotal: 0,
 
-  // ======================================================
-  // Positions
-  // ======================================================
-
   positions: [],
-
-  // ======================================================
-  // Trades
-  // ======================================================
 
   trades: [],
   latestTrade: null,
 
-  // ======================================================
-  // Symbols
-  // ======================================================
-
   symbols: [],
-
-  // ======================================================
-  // Strategy Runs
-  // ======================================================
 
   strategyRuns: [],
 
-  // ======================================================
-  // Performance
-  // ======================================================
-
   latestPerformance: null,
 
-  // ======================================================
-  // Broker
-  // ======================================================
-
   brokerAccount: null,
-
-  // ======================================================
-  // Last successful dashboard refresh
-  // ======================================================
 
   lastUpdated: null,
 };
@@ -83,9 +63,7 @@ const dashboardSlice = createSlice({
       state.error = null;
     },
 
-    resetDashboard: () => {
-      return initialState;
-    },
+    resetDashboard: () => initialState,
   },
 
   extraReducers: (builder) => {
@@ -99,14 +77,78 @@ const dashboardSlice = createSlice({
         state.error = null;
       })
 
-      .addCase(loadDashboard.fulfilled, (state) => {
+      .addCase(loadDashboard.fulfilled, (state, action) => {
         state.loading = false;
         state.error = null;
+
+        const payload = action.payload || {};
+
+        // ----------------------------------------------
+        // Accounts
+        // ----------------------------------------------
+
+        state.accounts = normalizeList(payload.accounts);
+
+        state.accountsTotal = payload.accounts?.total ?? state.accounts.length;
+
+        // ----------------------------------------------
+        // Active accounts
+        // ----------------------------------------------
+
+        state.activeAccounts = normalizeList(payload.activeAccounts);
+
+        // ----------------------------------------------
+        // Positions
+        // ----------------------------------------------
+
+        state.positions = normalizeList(payload.positions);
+
+        // ----------------------------------------------
+        // Trades
+        // ----------------------------------------------
+
+        state.trades = normalizeList(payload.trades);
+
+        // ----------------------------------------------
+        // Latest trade
+        // ----------------------------------------------
+
+        state.latestTrade = payload.latestTrade ?? null;
+
+        // ----------------------------------------------
+        // Symbols
+        // ----------------------------------------------
+
+        state.symbols = normalizeList(payload.symbols);
+
+        // ----------------------------------------------
+        // Strategy runs
+        // ----------------------------------------------
+
+        state.strategyRuns = normalizeList(payload.strategyRuns);
+
+        // ----------------------------------------------
+        // Performance
+        // ----------------------------------------------
+
+        state.latestPerformance = payload.latestPerformance ?? null;
+
+        // ----------------------------------------------
+        // Broker account
+        // ----------------------------------------------
+
+        state.brokerAccount = payload.brokerAccount ?? null;
+
+        // ----------------------------------------------
+        // Timestamp
+        // ----------------------------------------------
+
         state.lastUpdated = new Date().toISOString();
       })
 
       .addCase(loadDashboard.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -120,6 +162,7 @@ const dashboardSlice = createSlice({
     builder
       .addCase(fetchAccounts.pending, (state) => {
         state.loading = true;
+        state.error = null;
       })
 
       .addCase(fetchAccounts.fulfilled, (state, action) => {
@@ -127,17 +170,14 @@ const dashboardSlice = createSlice({
 
         const payload = action.payload;
 
-        if (Array.isArray(payload)) {
-          state.accounts = payload;
-          state.accountsTotal = payload.length;
-        } else {
-          state.accounts = payload?.items || [];
-          state.accountsTotal = payload?.total ?? payload?.items?.length ?? 0;
-        }
+        state.accounts = normalizeList(payload);
+
+        state.accountsTotal = payload?.total ?? state.accounts.length;
       })
 
       .addCase(fetchAccounts.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -156,17 +196,12 @@ const dashboardSlice = createSlice({
       .addCase(fetchActiveAccounts.fulfilled, (state, action) => {
         state.loading = false;
 
-        const payload = action.payload;
-
-        if (Array.isArray(payload)) {
-          state.activeAccounts = payload;
-        } else {
-          state.activeAccounts = payload?.items || [];
-        }
+        state.activeAccounts = normalizeList(action.payload);
       })
 
       .addCase(fetchActiveAccounts.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -185,15 +220,12 @@ const dashboardSlice = createSlice({
       .addCase(fetchPositions.fulfilled, (state, action) => {
         state.loading = false;
 
-        const payload = action.payload;
-
-        state.positions = Array.isArray(payload)
-          ? payload
-          : payload?.items || [];
+        state.positions = normalizeList(action.payload);
       })
 
       .addCase(fetchPositions.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -212,13 +244,12 @@ const dashboardSlice = createSlice({
       .addCase(fetchTrades.fulfilled, (state, action) => {
         state.loading = false;
 
-        const payload = action.payload;
-
-        state.trades = Array.isArray(payload) ? payload : payload?.items || [];
+        state.trades = normalizeList(action.payload);
       })
 
       .addCase(fetchTrades.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload || action.error?.message || "Failed to load trades.";
       });
@@ -239,6 +270,7 @@ const dashboardSlice = createSlice({
 
       .addCase(fetchLatestTrade.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -257,13 +289,12 @@ const dashboardSlice = createSlice({
       .addCase(fetchSymbols.fulfilled, (state, action) => {
         state.loading = false;
 
-        const payload = action.payload;
-
-        state.symbols = Array.isArray(payload) ? payload : payload?.items || [];
+        state.symbols = normalizeList(action.payload);
       })
 
       .addCase(fetchSymbols.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload || action.error?.message || "Failed to load symbols.";
       });
@@ -280,15 +311,12 @@ const dashboardSlice = createSlice({
       .addCase(fetchStrategyRuns.fulfilled, (state, action) => {
         state.loading = false;
 
-        const payload = action.payload;
-
-        state.strategyRuns = Array.isArray(payload)
-          ? payload
-          : payload?.items || [];
+        state.strategyRuns = normalizeList(action.payload);
       })
 
       .addCase(fetchStrategyRuns.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -306,11 +334,13 @@ const dashboardSlice = createSlice({
 
       .addCase(fetchLatestPerformance.fulfilled, (state, action) => {
         state.loading = false;
-        state.latestPerformance = action.payload;
+
+        state.latestPerformance = action.payload ?? null;
       })
 
       .addCase(fetchLatestPerformance.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||
@@ -328,11 +358,13 @@ const dashboardSlice = createSlice({
 
       .addCase(fetchBrokerAccount.fulfilled, (state, action) => {
         state.loading = false;
-        state.brokerAccount = action.payload;
+
+        state.brokerAccount = action.payload ?? null;
       })
 
       .addCase(fetchBrokerAccount.rejected, (state, action) => {
         state.loading = false;
+
         state.error =
           action.payload ||
           action.error?.message ||

@@ -2,925 +2,1010 @@ import { useEffect, useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 import {
-    FaWallet,
-    FaChartLine,
-    FaExchangeAlt,
-    FaPercentage,
-    FaSyncAlt,
-    FaShieldAlt,
-    FaArrowUp,
-    FaArrowDown,
-    FaPlay,
-    FaStop,
+  FaWallet,
+  FaChartLine,
+  FaExchangeAlt,
+  FaPercentage,
+  FaSyncAlt,
+  FaShieldAlt,
+  FaArrowUp,
+  FaArrowDown,
+  FaPlay,
+  FaStop,
+  FaBolt,
 } from "react-icons/fa";
 
 import { loadDashboard } from "../../redux/dashboard/dashboardThunks";
-import { fetchBotStatus, startBot, stopBot } from "../../redux/dashboard/botThunks";
+import {
+  fetchBotStatus,
+  startBot,
+  stopBot,
+} from "../../redux/dashboard/botThunks";
+import { fetchTradingUniverse } from "../../redux/dashboard/symbols/symbolsThunks";
+
 import { openTickStream } from "../../api/tickStream";
 
 import "../../css/dashboard.css";
 
 const Dashboard = () => {
-    const dispatch = useDispatch();
+  const dispatch = useDispatch();
 
-    const {
-        accounts,
-        positions,
-        trades,
+  // --------------------------------------------------
+  // DASHBOARD STATE
+  // --------------------------------------------------
+
+  const {
+    accounts: dashboardAccounts = [],
+    positions = [],
+    trades = [],
+    loading,
+    error,
+    brokerAccount,
+    lastUpdated,
+  } = useSelector((state) => state.dashboard);
+
+  // --------------------------------------------------
+  // ACCOUNTS STATE
+  // --------------------------------------------------
+
+  const accountsState = useSelector((state) => state.accounts);
+
+  const selectedAccount = accountsState?.selectedAccount || null;
+
+  const accountList = useMemo(() => {
+    if (Array.isArray(accountsState?.accounts)) {
+      return accountsState.accounts;
+    }
+
+    if (Array.isArray(dashboardAccounts)) {
+      return dashboardAccounts;
+    }
+
+    return [];
+  }, [accountsState?.accounts, dashboardAccounts]);
+
+  // --------------------------------------------------
+  // SYMBOL STATE
+  // --------------------------------------------------
+
+  const selectedSymbols = useSelector(
+    (state) => state.symbols?.selectedSymbols || [],
+  );
+
+  const accountSymbols = useSelector((state) => state.symbols?.symbols || []);
+
+  // --------------------------------------------------
+  // BOT STATE
+  // --------------------------------------------------
+
+  const bot = useSelector((state) => state.bot);
+
+  // --------------------------------------------------
+  // LOCAL STATE
+  // --------------------------------------------------
+
+  const [liveTicks, setLiveTicks] = useState({});
+
+  // --------------------------------------------------
+  // LOAD DASHBOARD
+  // --------------------------------------------------
+
+  useEffect(() => {
+    dispatch(loadDashboard());
+    dispatch(fetchBotStatus());
+  }, [dispatch]);
+
+  // --------------------------------------------------
+  // LOAD SELECTED ACCOUNT'S TRADING UNIVERSE
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!selectedAccount?.id) {
+      return;
+    }
+
+    dispatch(fetchTradingUniverse(selectedAccount.id));
+  }, [dispatch, selectedAccount?.id]);
+
+  // --------------------------------------------------
+  // REFRESH DASHBOARD
+  // --------------------------------------------------
+
+  useEffect(() => {
+    const refresh = window.setInterval(() => {
+      dispatch(loadDashboard());
+
+      if (selectedAccount?.id) {
+        dispatch(fetchTradingUniverse(selectedAccount.id));
+      }
+    }, 30000);
+
+    return () => window.clearInterval(refresh);
+  }, [dispatch, selectedAccount?.id]);
+
+  // --------------------------------------------------
+  // LIVE TICK STREAMS
+  // --------------------------------------------------
+
+  useEffect(() => {
+    const symbolsForStream =
+      selectedSymbols.length > 0
+        ? selectedSymbols
+        : accountSymbols.filter((symbol) => symbol.enabled === true);
+
+    const sockets = symbolsForStream
+      .filter((symbol) => symbol.enabled !== false)
+      .map(
+        (symbol) =>
+          symbol.name ||
+          symbol.symbol ||
+          symbol.symbol_name ||
+          symbol.broker_symbol ||
+          symbol.symbol?.name,
+      )
+      .filter(Boolean)
+      .map((symbol) =>
+        openTickStream(
+          symbol,
+          (payload) =>
+            setLiveTicks((current) => ({
+              ...current,
+              [symbol]: payload.tick,
+            })),
+          () => undefined,
+        ),
+      );
+
+    return () => {
+      sockets.forEach((socket) => socket.close());
+    };
+  }, [selectedSymbols, accountSymbols]);
+
+  // --------------------------------------------------
+  // MANUAL REFRESH
+  // --------------------------------------------------
+
+  const handleRefresh = () => {
+    dispatch(loadDashboard());
+    dispatch(fetchBotStatus());
+
+    if (selectedAccount?.id) {
+      dispatch(fetchTradingUniverse(selectedAccount.id));
+    }
+  };
+
+  // --------------------------------------------------
+  // ENGINE CONTROLS
+  // --------------------------------------------------
+
+  const handleStartEngine = () => {
+    const symbols = selectedSymbols
+      .map(
+        (symbol) =>
+          symbol.broker_symbol ||
+          symbol.name ||
+          symbol.symbol ||
+          symbol.symbol_name,
+      )
+      .filter(Boolean);
+
+    dispatch(
+      startBot({
+        strategy_name: "ema_cross",
+        strategy_version: "1.0.0",
         symbols,
-        loading,
-        error,
-        brokerAccount,
-        lastUpdated,
-    } = useSelector(
-        (state) => state.dashboard
+        timeframe: "M1",
+        risk_percent: 1,
+      }),
     );
-    const bot = useSelector((state) => state.bot);
-    const [liveTicks, setLiveTicks] = useState({});
+  };
 
-    useEffect(() => {
-        dispatch(loadDashboard());
-        dispatch(fetchBotStatus());
-    }, [dispatch]);
+  const handleStopEngine = () => {
+    dispatch(stopBot());
+  };
 
-    useEffect(() => {
-        const sockets = symbols
-            .map((symbol) => symbol.name || symbol.symbol)
-            .filter(Boolean)
-            .map((symbol) => openTickStream(
-                symbol,
-                (payload) => setLiveTicks((current) => ({
-                    ...current,
-                    [symbol]: payload.tick,
-                })),
-                () => undefined,
-            ));
+  // --------------------------------------------------
+  // FORMATTERS
+  // --------------------------------------------------
 
-        return () => sockets.forEach((socket) => socket.close());
-    }, [symbols]);
+  const formatMoney = (value, currency = "USD") => {
+    const number = Number(value);
 
-    useEffect(() => {
-        const refresh = window.setInterval(() => dispatch(loadDashboard()), 30000);
-        return () => window.clearInterval(refresh);
-    }, [dispatch]);
+    if (!Number.isFinite(number)) {
+      return `${currency} 0.00`;
+    }
 
-    // --------------------------------------------------
-    // Refresh
-    // --------------------------------------------------
+    return new Intl.NumberFormat("en-US", {
+      style: "currency",
+      currency: currency || "USD",
+      maximumFractionDigits: 2,
+    }).format(number);
+  };
 
-    const handleRefresh = () => {
-        dispatch(loadDashboard());
-    };
+  const formatNumber = (value) => {
+    const number = Number(value);
 
-    const handleStartBot = () => {
-        dispatch(startBot({
-            strategy_name: "ema_cross",
-            strategy_version: "1.0.0",
-            symbols: ["EURUSD"],
-            timeframe: "M1",
-            risk_percent: 1,
-        }));
-    };
+    if (!Number.isFinite(number)) {
+      return "0";
+    }
 
-    const handleStopBot = () => {
-        dispatch(stopBot());
-    };
+    return new Intl.NumberFormat("en-US", {
+      maximumFractionDigits: 2,
+    }).format(number);
+  };
 
-    // --------------------------------------------------
-    // Helpers
-    // --------------------------------------------------
+  // --------------------------------------------------
+  // ACTIVE ACCOUNT
+  // --------------------------------------------------
 
-    const formatMoney = (value) => {
-        const number = Number(value);
+  const connectedAccounts = useMemo(
+    () =>
+      accountList.filter(
+        (account) => account.status === "CONNECTED" && account.active !== false,
+      ),
+    [accountList],
+  );
 
-        if (!Number.isFinite(number)) {
-            return "$0.00";
-        }
+  const activeAccount = useMemo(() => {
+    if (
+      selectedAccount &&
+      selectedAccount.status === "CONNECTED" &&
+      selectedAccount.active !== false
+    ) {
+      return selectedAccount;
+    }
 
-        return new Intl.NumberFormat("en-US", {
-            style: "currency",
-            currency: "USD",
-            maximumFractionDigits: 2,
-        }).format(number);
-    };
+    if (selectedAccount) {
+      return selectedAccount;
+    }
 
-    const formatNumber = (value) => {
-        const number = Number(value);
+    if (connectedAccounts.length > 0) {
+      return connectedAccounts[0];
+    }
 
-        if (!Number.isFinite(number)) {
-            return "0";
-        }
+    return accountList[0] || null;
+  }, [selectedAccount, connectedAccounts, accountList]);
 
-        return new Intl.NumberFormat("en-US", {
-            maximumFractionDigits: 2,
-        }).format(number);
-    };
+  // --------------------------------------------------
+  // ACCOUNT CURRENCY
+  // --------------------------------------------------
 
-    // --------------------------------------------------
-    // Account statistics
-    // --------------------------------------------------
+  const accountCurrency = activeAccount?.currency || "USD";
 
-    const totalBalance = accounts.reduce(
-        (sum, account) =>
-            sum + Number(account.balance || 0),
-        0
-    );
+  // --------------------------------------------------
+  // BALANCE
+  // --------------------------------------------------
 
-    const totalEquity = accounts.reduce(
-        (sum, account) =>
-            sum + Number(account.equity || 0),
-        0
-    );
+  const totalBalance = useMemo(() => {
+    if (
+      activeAccount?.balance !== undefined &&
+      activeAccount?.balance !== null
+    ) {
+      return Number(activeAccount.balance);
+    }
 
-    const symbolById = useMemo(
-        () => Object.fromEntries(symbols.map((symbol) => [symbol.id, symbol.name || symbol.symbol])),
-        [symbols],
-    );
+    if (
+      brokerAccount?.balance !== undefined &&
+      brokerAccount?.balance !== null
+    ) {
+      return Number(brokerAccount.balance);
+    }
 
-    const livePositions = positions.map((position) => {
-        const symbol = symbolById[position.symbol_id];
-        const tick = symbol ? liveTicks[symbol] : null;
-        const currentPrice = Number(
-            position.direction === "SELL"
-                ? tick?.ask || tick?.last || position.current_price
-                : tick?.bid || tick?.last || position.current_price,
-        );
-        const entryPrice = Number(position.entry_price || 0);
-        const volume = Number(position.current_volume || position.volume || 0);
-        const direction = position.direction === "BUY" ? 1 : -1;
-        const liveProfit = (currentPrice - entryPrice) * volume * direction;
+    return 0;
+  }, [activeAccount, brokerAccount]);
 
-        return {
-            ...position,
-            liveCurrentPrice: currentPrice,
-            liveFloatingProfit: tick ? liveProfit : Number(position.floating_profit || 0),
-        };
+  // --------------------------------------------------
+  // EQUITY
+  // --------------------------------------------------
+
+  const totalEquity = useMemo(() => {
+    if (activeAccount?.equity !== undefined && activeAccount?.equity !== null) {
+      return Number(activeAccount.equity);
+    }
+
+    if (brokerAccount?.equity !== undefined && brokerAccount?.equity !== null) {
+      return Number(brokerAccount.equity);
+    }
+
+    return 0;
+  }, [activeAccount, brokerAccount]);
+
+  // --------------------------------------------------
+  // MARGIN
+  // --------------------------------------------------
+
+  const margin = Number(activeAccount?.margin || brokerAccount?.margin || 0);
+
+  const freeMargin = Number(
+    activeAccount?.free_margin ||
+      brokerAccount?.free_margin ||
+      Math.max(totalEquity - margin, 0),
+  );
+
+  const marginLevel = Number(
+    activeAccount?.margin_level || brokerAccount?.margin_level || 0,
+  );
+
+  // --------------------------------------------------
+  // SELECTED SYMBOLS
+  // --------------------------------------------------
+
+  const activeSymbols = useMemo(() => {
+    return selectedSymbols.filter((symbol) => symbol.enabled === true);
+  }, [selectedSymbols]);
+
+  // --------------------------------------------------
+  // SYMBOL LOOKUP
+  // --------------------------------------------------
+
+  const symbolById = useMemo(() => {
+    const map = {};
+
+    accountSymbols.forEach((symbol) => {
+      const name =
+        symbol.broker_symbol ||
+        symbol.name ||
+        symbol.symbol ||
+        symbol.symbol_name;
+
+      if (symbol.id && name) {
+        map[symbol.id] = name;
+      }
     });
 
-    const floatingProfit = livePositions.reduce(
-        (sum, position) => sum + position.liveFloatingProfit,
+    return map;
+  }, [accountSymbols]);
+
+  // --------------------------------------------------
+  // LIVE POSITIONS
+  // --------------------------------------------------
+
+  const livePositions = useMemo(
+    () =>
+      positions.map((position) => {
+        const symbol =
+          symbolById[position.account_symbol_id] ||
+          symbolById[position.symbol_id] ||
+          position.broker_symbol ||
+          position.symbol_name ||
+          position.symbol;
+
+        const tick = symbol ? liveTicks[symbol] : null;
+
+        const currentPrice = Number(
+          position.direction === "SELL"
+            ? tick?.ask ||
+                tick?.last ||
+                position.current_price ||
+                position.price_current ||
+                0
+            : tick?.bid ||
+                tick?.last ||
+                position.current_price ||
+                position.price_current ||
+                0,
+        );
+
+        const entryPrice = Number(
+          position.entry_price ||
+            position.open_price ||
+            position.price_open ||
+            0,
+        );
+
+        const volume = Number(
+          position.current_volume || position.volume || position.lots || 0,
+        );
+
+        const direction =
+          position.direction === "SELL" || position.type === "SELL" ? -1 : 1;
+
+        const liveProfit =
+          tick && currentPrice && entryPrice
+            ? (currentPrice - entryPrice) * volume * direction
+            : Number(
+                position.floating_profit ||
+                  position.unrealized_pnl ||
+                  position.profit ||
+                  0,
+              );
+
+        return {
+          ...position,
+          displaySymbol: symbol || "—",
+          liveCurrentPrice: currentPrice,
+          liveFloatingProfit: liveProfit,
+        };
+      }),
+    [positions, symbolById, liveTicks],
+  );
+
+  // --------------------------------------------------
+  // OPEN POSITIONS
+  // --------------------------------------------------
+
+  const openPositions = useMemo(
+    () =>
+      livePositions.filter(
+        (position) => position.status === "OPEN" || position.status === "open",
+      ),
+    [livePositions],
+  );
+
+  // --------------------------------------------------
+  // FLOATING PROFIT
+  // --------------------------------------------------
+
+  const floatingProfit = useMemo(
+    () =>
+      livePositions.reduce(
+        (sum, position) => sum + Number(position.liveFloatingProfit || 0),
         0,
-    );
+      ),
+    [livePositions],
+  );
 
-    const openPositions = livePositions.filter(
-        (position) =>
-            position.status === "OPEN"
-    );
+  // --------------------------------------------------
+  // WIN RATE
+  // --------------------------------------------------
 
-    // --------------------------------------------------
-    // Trades
-    // --------------------------------------------------
-
-    const winningTrades = trades.filter(
+  const winningTrades = useMemo(
+    () =>
+      trades.filter(
         (trade) =>
-            trade.result === "WIN"
-    ).length;
-
-    const winRate =
-        trades.length > 0
-            ? (winningTrades / trades.length) * 100
-            : 0;
-
-    return (
-        <main className="dashboard">
-
-            {/* ==========================================
-                HEADER
-            ========================================== */}
-
-            <section className="dashboard-header">
-
-                <div>
-                    <span className="dashboard-eyebrow">
-                        ATHENA QUANT ENGINE
-                    </span>
-
-                    <h1>
-                        Trading Dashboard
-                    </h1>
-
-                    <p>
-                        Monitor your trading infrastructure,
-                        accounts, positions and performance.
-                    </p>
-                </div>
-
-                <button
-                    className="dashboard-refresh"
-                    onClick={handleRefresh}
-                    disabled={loading}
-                >
-                    <FaSyncAlt
-                        className={
-                            loading
-                                ? "spin"
-                                : ""
-                        }
-                    />
-
-                    {loading
-                        ? "Refreshing..."
-                        : "Refresh"}
-                </button>
-
-            </section>
-
-            <section className="bot-control">
-                <div>
-                    <span className="dashboard-eyebrow">AUTOMATION</span>
-                    <h2>Paper trading bot</h2>
-                    <p>
-                        {bot.status?.active
-                            ? `${bot.status.strategy_name} is running at ${bot.status.risk_percent}% risk.`
-                            : "Stopped. Start only after reviewing the configured risk."}
-                    </p>
-                </div>
-                <div className="bot-control__actions">
-                    <span className={bot.status?.active ? "bot-status bot-status--active" : "bot-status"}>
-                        {bot.status?.active ? "RUNNING" : "STOPPED"}
-                    </span>
-                    {bot.status?.active ? (
-                        <button className="bot-button bot-button--stop" onClick={handleStopBot} disabled={bot.loading}>
-                            <FaStop /> Stop bot
-                        </button>
-                    ) : (
-                        <button className="bot-button bot-button--start" onClick={handleStartBot} disabled={bot.loading}>
-                            <FaPlay /> Start paper bot
-                        </button>
-                    )}
-                </div>
-            </section>
-
-            {bot.error && <div className="dashboard-error">{bot.error}</div>}
-
-
-            {/* ==========================================
-                ERROR
-            ========================================== */}
-
-            {error && (
-                <div className="dashboard-error">
-                    {typeof error === "string"
-                        ? error
-                        : JSON.stringify(error)}
-                </div>
-            )}
-
-
-            {/* ==========================================
-                STAT CARDS
-            ========================================== */}
-
-            <section className="dashboard-stats">
-
-                <div className="stat-card">
-
-                    <div className="stat-icon">
-                        <FaWallet />
-                    </div>
-
-                    <div>
-                        <span>
-                            Total Balance
-                        </span>
-
-                        <strong>
-                            {formatMoney(
-                                totalBalance
-                            )}
-                        </strong>
-                    </div>
-
-                </div>
-
-
-                <div className="stat-card">
-
-                    <div className="stat-icon">
-                        <FaChartLine />
-                    </div>
-
-                    <div>
-                        <span>
-                            Total Equity
-                        </span>
-
-                        <strong>
-                            {formatMoney(
-                                totalEquity
-                            )}
-                        </strong>
-                    </div>
-
-                </div>
-
-
-                <div className="stat-card">
-
-                    <div className="stat-icon">
-                        <FaExchangeAlt />
-                    </div>
-
-                    <div>
-                        <span>
-                            Live Floating P&L
-                        </span>
-
-                        <strong
-                            className={
-                                floatingProfit >= 0
-                                    ? "positive"
-                                    : "negative"
-                            }
-                        >
-                            {formatMoney(floatingProfit)}
-                        </strong>
-                    </div>
-
-                </div>
-
-
-                <div className="stat-card">
-
-                    <div className="stat-icon">
-                        <FaPercentage />
-                    </div>
-
-                    <div>
-                        <span>
-                            Win Rate
-                        </span>
-
-                        <strong>
-                            {formatNumber(
-                                winRate
-                            )}%
-                        </strong>
-                    </div>
-
-                </div>
-
-            </section>
-
-
-            {/* ==========================================
-                MAIN GRID
-            ========================================== */}
-
-            <section className="dashboard-grid">
-
-                {/* ======================================
-                    ACCOUNTS
-                ====================================== */}
-
-                <div className="dashboard-card">
-
-                    <div className="card-header">
-
-                        <div>
-                            <span>
-                                ACCOUNTS
-                            </span>
-
-                            <h2>
-                                Trading Accounts
-                            </h2>
-                        </div>
-
-                        <FaWallet />
-
-                    </div>
-
-
-                    <div className="account-list">
-
-                        {accounts.length === 0 ? (
-
-                            <div className="empty-state">
-                                No trading accounts found.
-                            </div>
-
-                        ) : (
-
-                            accounts
-                                .slice(0, 5)
-                                .map((account) => (
-
-                                    <div
-                                        className="account-row"
-                                        key={account.id}
-                                    >
-
-                                        <div>
-
-                                            <strong>
-                                                {account.account_name ||
-                                                    "Trading Account"}
-                                            </strong>
-
-                                            <span>
-                                                {account.broker}
-                                                {" • "}
-                                                {account.is_demo
-                                                    ? "Demo"
-                                                    : "Live"}
-                                            </span>
-
-                                        </div>
-
-                                        <div className="account-values">
-
-                                            <strong>
-                                                {formatMoney(
-                                                    account.equity
-                                                )}
-                                            </strong>
-
-                                            <span
-                                                className={
-                                                    account.status ===
-                                                    "CONNECTED"
-                                                        ? "connected"
-                                                        : "disconnected"
-                                                }
-                                            >
-                                                {account.status}
-                                            </span>
-
-                                        </div>
-
-                                    </div>
-
-                                ))
-                        )}
-
-                    </div>
-
-                </div>
-
-
-                {/* ======================================
-                    RISK
-                ====================================== */}
-
-                <div className="dashboard-card">
-
-                    <div className="card-header">
-
-                        <div>
-                            <span>
-                                RISK ENGINE
-                            </span>
-
-                            <h2>
-                                Risk Overview
-                            </h2>
-                        </div>
-
-                        <FaShieldAlt />
-
-                    </div>
-
-
-                    <div className="risk-content">
-
-                        <div className="risk-item">
-
-                            <span>
-                                Open Positions
-                            </span>
-
-                            <strong>
-                                {openPositions.length}
-                            </strong>
-
-                        </div>
-
-
-                        <div className="risk-item">
-
-                            <span>
-                                Active Symbols
-                            </span>
-
-                            <strong>
-                                {symbols.length}
-                            </strong>
-
-                        </div>
-
-
-                        <div className="risk-item">
-
-                            <span>
-                                Active Accounts
-                            </span>
-
-                            <strong>
-                                {
-                                    accounts.filter(
-                                        (account) =>
-                                            account.active
-                                    ).length
-                                }
-                            </strong>
-
-                        </div>
-
-
-                        <div className="risk-status">
-
-                            <span className="risk-dot" />
-
-                            <strong>
-                                Risk Engine Active
-                            </strong>
-
-                        </div>
-
-                    </div>
-
-                </div>
-
-            </section>
-
-
-            {/* ==========================================
-                OPEN POSITIONS
-            ========================================== */}
-
-            <section className="dashboard-card positions-card">
-
-                <div className="card-header">
-
-                    <div>
-                        <span>
-                            LIVE TRADING
-                        </span>
-
-                        <h2>
-                            Open Positions
-                        </h2>
-                    </div>
-
-                    <span className="live-indicator">
-                        LIVE
-                    </span>
-
-                </div>
-
-
-                {openPositions.length === 0 ? (
-
-                    <div className="empty-state">
-                        No open positions.
-                    </div>
-
-                ) : (
-
-                    <div className="table-wrapper">
-
-                        <table>
-
-                            <thead>
-                                <tr>
-                                    <th>
-                                        Strategy
-                                    </th>
-
-                                    <th>
-                                        Direction
-                                    </th>
-
-                                    <th>
-                                        Volume
-                                    </th>
-
-                                    <th>
-                                        Entry
-                                    </th>
-
-                                    <th>
-                                        Current
-                                    </th>
-
-                                    <th>
-                                        Floating P&L
-                                    </th>
-
-                                    <th>
-                                        Status
-                                    </th>
-                                </tr>
-                            </thead>
-
-                            <tbody>
-
-                                {openPositions
-                                    .slice(0, 10)
-                                    .map(
-                                        (position) => (
-
-                                            <tr
-                                                key={
-                                                    position.id
-                                                }
-                                            >
-
-                                                <td>
-                                                    {position.strategy ||
-                                                        "—"}
-                                                </td>
-
-                                                <td>
-
-                                                    <span
-                                                        className={
-                                                            position.direction ===
-                                                            "BUY"
-                                                                ? "direction buy"
-                                                                : "direction sell"
-                                                        }
-                                                    >
-
-                                                        {position.direction ===
-                                                        "BUY" ? (
-                                                            <FaArrowUp />
-                                                        ) : (
-                                                            <FaArrowDown />
-                                                        )}
-
-                                                        {
-                                                            position.direction
-                                                        }
-
-                                                    </span>
-
-                                                </td>
-
-                                                <td>
-                                                    {formatNumber(
-                                                        position.volume
-                                                    )}
-                                                </td>
-
-                                                <td>
-                                                    {formatNumber(
-                                                        position.entry_price
-                                                    )}
-                                                </td>
-
-                                                <td>
-                                                    {formatNumber(
-                                                        position.liveCurrentPrice
-                                                    )}
-                                                </td>
-
-                                                <td
-                                                    className={
-                                                        Number(
-                                                            position.liveFloatingProfit
-                                                        ) >=
-                                                        0
-                                                            ? "positive"
-                                                            : "negative"
-                                                    }
-                                                >
-                                                    {formatMoney(
-                                                        position.floating_profit
-                                                    )}
-                                                </td>
-
-                                                <td>
-                                                    <span className="status-open">
-                                                        {
-                                                            position.status
-                                                        }
-                                                    </span>
-                                                </td>
-
-                                            </tr>
-
-                                        )
-                                    )}
-
-                            </tbody>
-
-                        </table>
-
-                    </div>
-
-                )}
-
-            </section>
-
-
-            {/* ==========================================
-                BOTTOM GRID
-            ========================================== */}
-
-            <section className="dashboard-bottom-grid">
-
-                {/* Recent Trades */}
-
-                <div className="dashboard-card">
-
-                    <div className="card-header">
-
-                        <div>
-                            <span>
-                                EXECUTION
-                            </span>
-
-                            <h2>
-                                Recent Trades
-                            </h2>
-                        </div>
-
-                    </div>
-
-
-                    <div className="trade-list">
-
-                        {trades.length === 0 ? (
-
-                            <div className="empty-state">
-                                No trades found.
-                            </div>
-
-                        ) : (
-
-                            trades
-                                .slice(0, 6)
-                                .map((trade) => (
-
-                                    <div
-                                        className="trade-row"
-                                        key={trade.id}
-                                    >
-
-                                        <div>
-
-                                            <strong>
-                                                {trade.strategy ||
-                                                    "Strategy"}
-                                            </strong>
-
-                                            <span>
-                                                {
-                                                    trade.direction
-                                                }
-                                            </span>
-
-                                        </div>
-
-                                        <strong
-                                            className={
-                                                Number(
-                                                    trade.net_profit
-                                                ) >= 0
-                                                    ? "positive"
-                                                    : "negative"
-                                            }
-                                        >
-                                            {formatMoney(
-                                                trade.net_profit
-                                            )}
-                                        </strong>
-
-                                    </div>
-
-                                ))
-                        )}
-
-                    </div>
-
-                </div>
-
-
-                {/* Broker */}
-
-                <div className="dashboard-card">
-
-                    <div className="card-header">
-
-                        <div>
-                            <span>
-                                BROKER
-                            </span>
-
-                            <h2>
-                                Broker Account
-                            </h2>
-                        </div>
-
-                    </div>
-
-
-                    {brokerAccount ? (
-
-                        <div className="broker-info">
-
-                            <div>
-                                <span>
-                                    Broker
-                                </span>
-
-                                <strong>
-                                    {
-                                        brokerAccount.broker ||
-                                        "MT5"
-                                    }
-                                </strong>
-                            </div>
-
-                            <div>
-                                <span>
-                                    Account
-                                </span>
-
-                                <strong>
-                                    {
-                                        brokerAccount.account_number ||
-                                        "—"
-                                    }
-                                </strong>
-                            </div>
-
-                            <div>
-                                <span>
-                                    Balance
-                                </span>
-
-                                <strong>
-                                    {formatMoney(
-                                        brokerAccount.balance
-                                    )}
-                                </strong>
-                            </div>
-
-                            <div>
-                                <span>
-                                    Equity
-                                </span>
-
-                                <strong>
-                                    {formatMoney(
-                                        brokerAccount.equity
-                                    )}
-                                </strong>
-                            </div>
-
-                        </div>
-
-                    ) : (
-
-                        <div className="empty-state">
-                            Broker account unavailable.
-                        </div>
-
-                    )}
-
-                </div>
-
-            </section>
-
-
-            {/* ==========================================
-                FOOTER
-            ========================================== */}
-
-            <div className="dashboard-footer">
-
-                <span>
-                    Symbols: {symbols.length}
-                </span>
-
-                <span>
-                    Positions: {positions.length}
-                </span>
-
-                <span>
-                    Trades: {trades.length}
-                </span>
-
-                <span className={Object.keys(liveTicks).length ? "connected" : "disconnected"}>
-                    Live feed: {Object.keys(liveTicks).length ? "CONNECTED" : "CONNECTING"}
-                </span>
-
-                {lastUpdated && (
-                    <span>
-                        Updated{" "}
-                        {new Date(
-                            lastUpdated
-                        ).toLocaleTimeString()}
-                    </span>
-                )}
-
+          trade.result === "WIN" ||
+          trade.result === "win" ||
+          Number(trade.profit || trade.realized_profit || 0) > 0,
+      ).length,
+    [trades],
+  );
+
+  const winRate = trades.length > 0 ? (winningTrades / trades.length) * 100 : 0;
+
+  // --------------------------------------------------
+  // ENGINE STATUS
+  // --------------------------------------------------
+
+  const engineRunning = Boolean(bot.status?.active);
+
+  // --------------------------------------------------
+  // RENDER
+  // --------------------------------------------------
+
+  return (
+    <main className="dashboard">
+      {/* HEADER */}
+      <header className="dashboard-header">
+        <div>
+          <span className="dashboard-eyebrow">Athena Quant Engine</span>
+
+          <h1>Trading Dashboard</h1>
+
+          <p>
+            Monitor your account, trading universe, positions and engine
+            activity.
+          </p>
+        </div>
+
+        <button
+          type="button"
+          className="dashboard-refresh"
+          onClick={handleRefresh}
+          disabled={loading}
+        >
+          <FaSyncAlt className={loading ? "spin" : ""} />
+
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+      </header>
+
+      {/* ENGINE CONTROL */}
+      <section className="engine-control">
+        <div className="engine-control__info">
+          <div className="engine-control__icon">
+            <FaBolt />
+          </div>
+
+          <div>
+            <h2>Trading Engine</h2>
+
+            <p>
+              {selectedAccount
+                ? `Running against ${selectedAccount.account_name || "selected account"}`
+                : "Select a trading account to operate the engine."}
+            </p>
+          </div>
+        </div>
+
+        <div className="engine-control__actions">
+          <span
+            className={`engine-status ${
+              engineRunning ? "engine-status--active" : ""
+            }`}
+          >
+            <span className="engine-status__dot" />
+
+            {engineRunning ? "RUNNING" : "STOPPED"}
+          </span>
+
+          <span className="engine-mode">
+            {activeAccount?.is_demo ? "DEMO" : "LIVE"}
+          </span>
+
+          {!engineRunning ? (
+            <button
+              type="button"
+              className="engine-button engine-button--start"
+              onClick={handleStartEngine}
+              disabled={!selectedAccount || activeSymbols.length === 0}
+            >
+              <FaPlay />
+              Start Engine
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="engine-button engine-button--stop"
+              onClick={handleStopEngine}
+            >
+              <FaStop />
+              Stop Engine
+            </button>
+          )}
+        </div>
+      </section>
+
+      {/* ERROR */}
+      {error && (
+        <div className="dashboard-error">
+          {typeof error === "string"
+            ? error
+            : "Unable to load some dashboard data."}
+        </div>
+      )}
+
+      {/* STAT CARDS */}
+      <section className="dashboard-stats">
+        <article className="stat-card">
+          <div className="stat-icon">
+            <FaWallet />
+          </div>
+
+          <div>
+            <span>Balance</span>
+
+            <strong>{formatMoney(totalBalance, accountCurrency)}</strong>
+          </div>
+        </article>
+
+        <article className="stat-card">
+          <div className="stat-icon">
+            <FaChartLine />
+          </div>
+
+          <div>
+            <span>Equity</span>
+
+            <strong>{formatMoney(totalEquity, accountCurrency)}</strong>
+          </div>
+        </article>
+
+        <article className="stat-card">
+          <div className="stat-icon">
+            <FaExchangeAlt />
+          </div>
+
+          <div>
+            <span>Floating P/L</span>
+
+            <strong
+              className={
+                floatingProfit > 0
+                  ? "positive"
+                  : floatingProfit < 0
+                    ? "negative"
+                    : ""
+              }
+            >
+              {formatMoney(floatingProfit, accountCurrency)}
+            </strong>
+          </div>
+        </article>
+
+        <article className="stat-card">
+          <div className="stat-icon">
+            <FaPercentage />
+          </div>
+
+          <div>
+            <span>Win Rate</span>
+
+            <strong>{winRate.toFixed(1)}%</strong>
+          </div>
+        </article>
+      </section>
+
+      {/* ACCOUNT + RISK */}
+      <section className="dashboard-grid">
+        {/* ACCOUNT */}
+        <article className="dashboard-card">
+          <div className="card-header">
+            <div>
+              <span>TRADING ACCOUNT</span>
+
+              <h2>Active Account</h2>
             </div>
 
-        </main>
-    );
+            <FaWallet />
+          </div>
+
+          {activeAccount ? (
+            <div className="connected-account">
+              <div className="connected-account__identity">
+                <div>
+                  <strong>
+                    {activeAccount.account_name || "Trading Account"}
+                  </strong>
+
+                  <span>
+                    {activeAccount.broker || "MT5"} •{" "}
+                    {activeAccount.is_demo ? "Demo" : "Live"}
+                  </span>
+                </div>
+
+                <span
+                  className={
+                    activeAccount.status === "CONNECTED"
+                      ? "connected"
+                      : "disconnected"
+                  }
+                >
+                  {activeAccount.status || "UNKNOWN"}
+                </span>
+              </div>
+
+              <div className="connected-account__details">
+                <div>
+                  <span>Login</span>
+
+                  <strong>{activeAccount.login || "—"}</strong>
+                </div>
+
+                <div>
+                  <span>Server</span>
+
+                  <strong>{activeAccount.server || "—"}</strong>
+                </div>
+
+                <div>
+                  <span>Currency</span>
+
+                  <strong>{activeAccount.currency || "USD"}</strong>
+                </div>
+
+                <div>
+                  <span>Leverage</span>
+
+                  <strong>1:{activeAccount.leverage || "—"}</strong>
+                </div>
+
+                <div>
+                  <span>Balance</span>
+
+                  <strong>
+                    {formatMoney(activeAccount.balance, activeAccount.currency)}
+                  </strong>
+                </div>
+
+                <div>
+                  <span>Equity</span>
+
+                  <strong>
+                    {formatMoney(activeAccount.equity, activeAccount.currency)}
+                  </strong>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state">No trading account selected.</div>
+          )}
+        </article>
+
+        {/* RISK */}
+        <article className="dashboard-card">
+          <div className="card-header">
+            <div>
+              <span>ACCOUNT RISK</span>
+
+              <h2>Risk Overview</h2>
+            </div>
+
+            <FaShieldAlt />
+          </div>
+
+          <div className="risk-content">
+            <div className="risk-item">
+              <span>Open Positions</span>
+
+              <strong>{openPositions.length}</strong>
+            </div>
+
+            <div className="risk-item">
+              <span>Selected Symbols</span>
+
+              <strong>{activeSymbols.length}</strong>
+            </div>
+
+            <div className="risk-item">
+              <span>Connected Accounts</span>
+
+              <strong>{connectedAccounts.length}</strong>
+            </div>
+
+            <div className="risk-item">
+              <span>Free Margin</span>
+
+              <strong>{formatMoney(freeMargin, accountCurrency)}</strong>
+            </div>
+
+            <div className="risk-item">
+              <span>Margin Used</span>
+
+              <strong>{formatMoney(margin, accountCurrency)}</strong>
+            </div>
+
+            <div className="risk-item">
+              <span>Margin Level</span>
+
+              <strong>
+                {marginLevel > 0 ? `${formatNumber(marginLevel)}%` : "—"}
+              </strong>
+            </div>
+
+            <div className="risk-status">
+              <span className="risk-dot" />
+
+              <strong>Risk monitoring active</strong>
+            </div>
+          </div>
+        </article>
+      </section>
+
+      {/* POSITIONS */}
+      <section className="dashboard-card positions-card">
+        <div className="card-header">
+          <div>
+            <span>LIVE MARKET EXPOSURE</span>
+
+            <h2>Open Positions</h2>
+          </div>
+
+          <FaChartLine />
+        </div>
+
+        {openPositions.length > 0 ? (
+          <div className="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Symbol</th>
+                  <th>Direction</th>
+                  <th>Volume</th>
+                  <th>Entry</th>
+                  <th>Current</th>
+                  <th>Floating P/L</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+
+              <tbody>
+                {openPositions.map((position) => {
+                  const direction = position.direction || position.type || "—";
+
+                  const isBuy = direction === "BUY";
+
+                  return (
+                    <tr key={position.id}>
+                      <td>
+                        <strong>{position.displaySymbol}</strong>
+                      </td>
+
+                      <td>
+                        <span className={`direction ${isBuy ? "buy" : "sell"}`}>
+                          {isBuy ? <FaArrowUp /> : <FaArrowDown />}
+
+                          {direction}
+                        </span>
+                      </td>
+
+                      <td>
+                        {formatNumber(
+                          position.current_volume || position.volume,
+                        )}
+                      </td>
+
+                      <td>
+                        {formatNumber(
+                          position.entry_price ||
+                            position.open_price ||
+                            position.price_open,
+                        )}
+                      </td>
+
+                      <td>{formatNumber(position.liveCurrentPrice)}</td>
+
+                      <td
+                        className={
+                          position.liveFloatingProfit > 0
+                            ? "positive"
+                            : position.liveFloatingProfit < 0
+                              ? "negative"
+                              : ""
+                        }
+                      >
+                        {formatMoney(
+                          position.liveFloatingProfit,
+                          accountCurrency,
+                        )}
+                      </td>
+
+                      <td>
+                        <span className="status-open">OPEN</span>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        ) : (
+          <div className="empty-state">No open positions.</div>
+        )}
+      </section>
+
+      {/* BOTTOM GRID */}
+      <section className="dashboard-bottom-grid">
+        {/* RECENT TRADES */}
+        <article className="dashboard-card">
+          <div className="card-header">
+            <div>
+              <span>EXECUTION HISTORY</span>
+
+              <h2>Recent Trades</h2>
+            </div>
+
+            <FaExchangeAlt />
+          </div>
+
+          {trades.length > 0 ? (
+            <div className="trade-list">
+              {trades.slice(0, 6).map((trade) => {
+                const profit = Number(
+                  trade.profit || trade.realized_profit || trade.pnl || 0,
+                );
+
+                const symbol =
+                  trade.broker_symbol ||
+                  trade.symbol_name ||
+                  trade.symbol ||
+                  "Unknown";
+
+                return (
+                  <div className="trade-row" key={trade.id}>
+                    <div>
+                      <strong>{symbol}</strong>
+
+                      <span>{trade.direction || trade.type || "TRADE"}</span>
+                    </div>
+
+                    <strong
+                      className={
+                        profit > 0 ? "positive" : profit < 0 ? "negative" : ""
+                      }
+                    >
+                      {formatMoney(profit, accountCurrency)}
+                    </strong>
+                  </div>
+                );
+              })}
+            </div>
+          ) : (
+            <div className="empty-state">No recent trades.</div>
+          )}
+        </article>
+
+        {/* BROKER */}
+        <article className="dashboard-card">
+          <div className="card-header">
+            <div>
+              <span>BROKER CONNECTION</span>
+
+              <h2>MT5 Account</h2>
+            </div>
+
+            <FaBolt />
+          </div>
+
+          {brokerAccount || activeAccount ? (
+            <div className="broker-info">
+              <div>
+                <span>Login</span>
+
+                <strong>
+                  {brokerAccount?.login || activeAccount?.login || "—"}
+                </strong>
+              </div>
+
+              <div>
+                <span>Server</span>
+
+                <strong>
+                  {brokerAccount?.server || activeAccount?.server || "—"}
+                </strong>
+              </div>
+
+              <div>
+                <span>Balance</span>
+
+                <strong>
+                  {formatMoney(
+                    brokerAccount?.balance ?? activeAccount?.balance ?? 0,
+                    accountCurrency,
+                  )}
+                </strong>
+              </div>
+
+              <div>
+                <span>Equity</span>
+
+                <strong>
+                  {formatMoney(
+                    brokerAccount?.equity ?? activeAccount?.equity ?? 0,
+                    accountCurrency,
+                  )}
+                </strong>
+              </div>
+
+              <div>
+                <span>Symbols</span>
+
+                <strong>{activeSymbols.length}</strong>
+              </div>
+
+              <div>
+                <span>Engine</span>
+
+                <strong
+                  className={engineRunning ? "connected" : "disconnected"}
+                >
+                  {engineRunning ? "RUNNING" : "STOPPED"}
+                </strong>
+              </div>
+            </div>
+          ) : (
+            <div className="empty-state">
+              No broker account information available.
+            </div>
+          )}
+        </article>
+      </section>
+
+      {/* FOOTER */}
+      <footer className="dashboard-footer">
+        <span>Accounts: {accountList.length}</span>
+
+        <span>Selected Symbols: {activeSymbols.length}</span>
+
+        <span>Positions: {openPositions.length}</span>
+
+        <span>Trades: {trades.length}</span>
+
+        {lastUpdated && (
+          <span>Updated: {new Date(lastUpdated).toLocaleTimeString()}</span>
+        )}
+      </footer>
+    </main>
+  );
 };
 
 export default Dashboard;

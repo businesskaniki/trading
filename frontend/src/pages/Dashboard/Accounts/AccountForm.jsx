@@ -1,801 +1,484 @@
 import { useEffect, useState } from "react";
-import "../../../css/accountsform.css"
-import {
-    FaTimes,
-    FaWallet,
-    FaServer,
-    FaChartLine,
-    FaCog,
-} from "react-icons/fa";
+import "../../../css/accountsform.css";
 
+import { FaTimes, FaWallet, FaServer, FaCog } from "react-icons/fa";
 
 const initialForm = {
-    broker: "MT5",
-    account_number: "",
-    server: "",
-    account_name: "",
-    currency: "USD",
-    leverage: "",
-    balance: "",
-    equity: "",
-    margin: "",
-    free_margin: "",
-    margin_level: "",
-    is_demo: true,
-    status: "DISCONNECTED",
-    active: true,
+  broker: "MT5",
+  login: "",
+  server: "",
+  account_name: "",
+  password: "",
+  bridge_url: "",
+  is_demo: true,
 };
 
-
 const AccountForm = ({
-    isOpen,
-    onClose,
-    onSubmit,
-    account = null,
-    loading = false,
+  isOpen,
+  onClose,
+  onSubmit,
+  account = null,
+  loading = false,
 }) => {
+  const [formData, setFormData] = useState(initialForm);
 
-    const [formData, setFormData] = useState(initialForm);
+  const [errors, setErrors] = useState({});
 
-    const [errors, setErrors] = useState({});
-
-
-    /* ==========================================
+  /* ==========================================
        INITIALIZE FORM
     ========================================== */
 
-    useEffect(() => {
+  useEffect(() => {
+    if (account) {
+      setFormData({
+        broker: account.broker ?? "MT5",
+        login: account.login ?? "",
+        server: account.server ?? "",
+        account_name: account.account_name ?? "",
+        password: "",
+        bridge_url: account.bridge_url ?? "",
+        is_demo: account.is_demo ?? true,
+      });
+    } else {
+      setFormData({
+        ...initialForm,
+      });
+    }
 
-        if (account) {
+    setErrors({});
+  }, [account, isOpen]);
 
-            setFormData({
-                broker: account.broker ?? "MT5",
-                account_number: account.account_number ?? "",
-                server: account.server ?? "",
-                account_name: account.account_name ?? "",
-                currency: account.currency ?? "USD",
-                leverage: account.leverage ?? "",
-                balance: account.balance ?? "",
-                equity: account.equity ?? "",
-                margin: account.margin ?? "",
-                free_margin: account.free_margin ?? "",
-                margin_level: account.margin_level ?? "",
-                is_demo: account.is_demo ?? true,
-                status: account.status ?? "DISCONNECTED",
-                active: account.active ?? true,
-            });
-
-        } else {
-
-            setFormData(initialForm);
-
-        }
-
-        setErrors({});
-
-    }, [account, isOpen]);
-
-
-    /* ==========================================
+  /* ==========================================
        CHANGE HANDLER
     ========================================== */
 
-    const handleChange = (event) => {
+  const handleChange = (event) => {
+    const { name, value, type, checked } = event.target;
 
-        const {
-            name,
-            value,
-            type,
-            checked,
-        } = event.target;
+    setFormData((previous) => ({
+      ...previous,
 
+      [name]: type === "checkbox" ? checked : value,
+    }));
 
-        setFormData((previous) => ({
-            ...previous,
+    if (errors[name]) {
+      setErrors((previous) => ({
+        ...previous,
+        [name]: "",
+      }));
+    }
+  };
 
-            [name]:
-                type === "checkbox"
-                    ? checked
-                    : value,
-        }));
-
-
-        if (errors[name]) {
-
-            setErrors((previous) => ({
-                ...previous,
-                [name]: "",
-            }));
-
-        }
-
-    };
-
-
-    /* ==========================================
+  /* ==========================================
        VALIDATION
     ========================================== */
 
-    const validate = () => {
+  const validate = () => {
+    const newErrors = {};
 
-        const newErrors = {};
+    if (!formData.broker.trim()) {
+      newErrors.broker = "Broker is required.";
+    }
 
+    if (!formData.login) {
+      newErrors.login = "Account login is required.";
+    } else if (Number(formData.login) <= 0) {
+      newErrors.login = "Account login must be greater than zero.";
+    }
 
-        if (!formData.broker.trim()) {
-            newErrors.broker = "Broker is required.";
-        }
+    if (!formData.server.trim()) {
+      newErrors.server = "Server is required.";
+    }
 
+    if (!formData.account_name.trim()) {
+      newErrors.account_name = "Account name is required.";
+    }
 
-        if (!formData.account_number) {
-            newErrors.account_number =
-                "Account number is required.";
-        }
+    /*
+     * Password is required when creating
+     * a new trading account.
+     *
+     * When editing an existing account,
+     * leaving it empty means:
+     * "keep the existing password".
+     */
 
+    if (!account && !formData.password.trim()) {
+      newErrors.password = "Password is required.";
+    }
 
-        if (!formData.server.trim()) {
-            newErrors.server =
-                "Server is required.";
-        }
+    return newErrors;
+  };
 
-
-        if (!formData.account_name.trim()) {
-            newErrors.account_name =
-                "Account name is required.";
-        }
-
-
-        if (!formData.currency.trim()) {
-            newErrors.currency =
-                "Currency is required.";
-        }
-
-
-        if (!formData.leverage) {
-            newErrors.leverage =
-                "Leverage is required.";
-        }
-
-
-        return newErrors;
-
-    };
-
-
-    /* ==========================================
+  /* ==========================================
        SUBMIT
     ========================================== */
 
-    const handleSubmit = (event) => {
+  const handleSubmit = (event) => {
+    event.preventDefault();
 
-        event.preventDefault();
+    const validationErrors = validate();
 
+    if (Object.keys(validationErrors).length > 0) {
+      setErrors(validationErrors);
 
-        const validationErrors = validate();
+      return;
+    }
 
+    const payload = {
+      broker: formData.broker,
 
-        if (Object.keys(validationErrors).length > 0) {
+      login: Number(formData.login),
 
-            setErrors(validationErrors);
+      server: formData.server.trim(),
 
-            return;
-        }
+      account_name: formData.account_name.trim(),
 
+      is_demo: Boolean(formData.is_demo),
 
-        const payload = {
-            ...formData,
-
-            account_number:
-                Number(formData.account_number),
-
-            leverage:
-                Number(formData.leverage),
-
-            balance:
-                Number(formData.balance || 0),
-
-            equity:
-                Number(formData.equity || 0),
-
-            margin:
-                Number(formData.margin || 0),
-
-            free_margin:
-                Number(formData.free_margin || 0),
-
-            margin_level:
-                Number(formData.margin_level || 0),
-
-        };
-
-
-        onSubmit(payload);
-
+      bridge_url: formData.bridge_url.trim() || null,
     };
 
+    /*
+     * Only send password when:
+     *
+     * 1. Creating an account, or
+     * 2. The user explicitly entered a
+     *    new password while editing.
+     */
 
-    /* ==========================================
+    if (formData.password.trim()) {
+      payload.password = formData.password;
+    }
+
+    onSubmit(payload);
+  };
+
+  /* ==========================================
        CLOSE
     ========================================== */
 
-    const handleOverlayClick = (event) => {
-
-        if (
-            event.target === event.currentTarget &&
-            !loading
-        ) {
-            onClose();
-        }
-
-    };
-
-
-    if (!isOpen) {
-        return null;
+  const handleOverlayClick = (event) => {
+    if (event.target === event.currentTarget && !loading) {
+      onClose();
     }
+  };
 
+  /* ==========================================
+       RENDER
+    ========================================== */
 
-    return (
-        <div
-            className="account-modal-overlay"
-            onMouseDown={handleOverlayClick}
-        >
+  if (!isOpen) {
+    return null;
+  }
 
-            <div className="account-modal">
-
-                {/* ======================================
+  return (
+    <div className="account-modal-overlay" onMouseDown={handleOverlayClick}>
+      <div className="account-modal">
+        {/* ======================================
                     HEADER
                 ====================================== */}
 
-                <div className="account-modal__header">
+        <div className="account-modal__header">
+          <div>
+            <span className="account-modal__eyebrow">
+              {account ? "ACCOUNT CONFIGURATION" : "TRADING INFRASTRUCTURE"}
+            </span>
 
-                    <div>
+            <h2>
+              {account ? "Edit Trading Account" : "Create Trading Account"}
+            </h2>
 
-                        <span className="account-modal__eyebrow">
-                            {account
-                                ? "ACCOUNT CONFIGURATION"
-                                : "TRADING INFRASTRUCTURE"}
-                        </span>
+            <p>
+              {account
+                ? "Update the connection details for this trading account."
+                : "Connect a MetaTrader 5 trading account to the AQE trading infrastructure."}
+            </p>
+          </div>
 
-                        <h2>
-                            {account
-                                ? "Edit Trading Account"
-                                : "Create Trading Account"}
-                        </h2>
+          <button
+            type="button"
+            className="account-modal__close"
+            onClick={onClose}
+            disabled={loading}
+            aria-label="Close"
+          >
+            <FaTimes />
+          </button>
+        </div>
 
-                        <p>
-                            {account
-                                ? "Update the configuration of this trading account."
-                                : "Add a new broker account to the AQE trading infrastructure."}
-                        </p>
-
-                    </div>
-
-
-                    <button
-                        type="button"
-                        className="account-modal__close"
-                        onClick={onClose}
-                        disabled={loading}
-                        aria-label="Close"
-                    >
-                        <FaTimes />
-                    </button>
-
-                </div>
-
-
-                <form
-                    className="account-form"
-                    onSubmit={handleSubmit}
-                >
-
-                    {/* ==================================
+        <form className="account-form" onSubmit={handleSubmit}>
+          {/* ==================================
                         BROKER INFORMATION
                     ================================== */}
 
-                    <div className="account-form__section">
+          <div className="account-form__section">
+            <div className="account-form__section-header">
+              <div className="account-form__section-icon">
+                <FaServer />
+              </div>
 
-                        <div className="account-form__section-header">
+              <div>
+                <h3>Broker Information</h3>
 
-                            <div className="account-form__section-icon">
-                                <FaServer />
-                            </div>
+                <p>Connection and account identification.</p>
+              </div>
+            </div>
 
-                            <div>
+            <div className="account-form__grid">
+              {/* Broker */}
 
-                                <h3>
-                                    Broker Information
-                                </h3>
+              <div className="account-field">
+                <label htmlFor="broker">Broker / Platform</label>
 
-                                <p>
-                                    Connection and account identification.
-                                </p>
+                <select
+                  id="broker"
+                  name="broker"
+                  value={formData.broker}
+                  onChange={handleChange}
+                  disabled={loading}
+                >
+                  <option value="MT5">MetaTrader 5</option>
 
-                            </div>
+                  <option value="BINANCE">Binance</option>
 
-                        </div>
+                  <option value="FIX">FIX</option>
+                </select>
 
+                {errors.broker && <small>{errors.broker}</small>}
+              </div>
 
-                        <div className="account-form__grid">
+              {/* Login */}
 
-                            {/* Broker */}
+              <div className="account-field">
+                <label htmlFor="login">Account Login</label>
 
-                            <div className="account-field">
+                <input
+                  id="login"
+                  type="number"
+                  name="login"
+                  value={formData.login}
+                  onChange={handleChange}
+                  placeholder="e.g. 1200122668"
+                  min="1"
+                  disabled={loading}
+                />
 
-                                <label>
-                                    Broker
-                                </label>
+                {errors.login && <small>{errors.login}</small>}
+              </div>
 
-                                <select
-                                    name="broker"
-                                    value={formData.broker}
-                                    onChange={handleChange}
-                                >
-                                    <option value="MT5">
-                                        MetaTrader 5
-                                    </option>
+              {/* Account Name */}
 
-                                    <option value="MT4">
-                                        MetaTrader 4
-                                    </option>
-                                    <option value="JM">
-                                        JustMarkets
-                                    </option>
-                                </select>
+              <div className="account-field">
+                <label htmlFor="account_name">Account Name</label>
 
-                                {errors.broker && (
-                                    <small>
-                                        {errors.broker}
-                                    </small>
-                                )}
+                <input
+                  id="account_name"
+                  type="text"
+                  name="account_name"
+                  value={formData.account_name}
+                  onChange={handleChange}
+                  placeholder="e.g. Main Trading Account"
+                  maxLength={100}
+                  disabled={loading}
+                />
 
-                            </div>
+                {errors.account_name && <small>{errors.account_name}</small>}
+              </div>
 
+              {/* Server */}
 
-                            {/* Account Number */}
+              <div className="account-field">
+                <label htmlFor="server">Trading Server</label>
 
-                            <div className="account-field">
+                <input
+                  id="server"
+                  type="text"
+                  name="server"
+                  value={formData.server}
+                  onChange={handleChange}
+                  placeholder="e.g. JustMarkets-Demo3"
+                  maxLength={100}
+                  disabled={loading}
+                />
 
-                                <label>
-                                    Account Number
-                                </label>
+                {errors.server && <small>{errors.server}</small>}
+              </div>
 
-                                <input
-                                    type="number"
-                                    name="account_number"
-                                    value={formData.account_number}
-                                    onChange={handleChange}
-                                    placeholder="e.g. 1200122668"
-                                />
+              {/* Password */}
 
-                                {errors.account_number && (
-                                    <small>
-                                        {errors.account_number}
-                                    </small>
-                                )}
+              <div className="account-field">
+                <label htmlFor="password">
+                  {account ? "Trading Password" : "Trading Password"}
+                </label>
 
-                            </div>
+                <input
+                  id="password"
+                  type="password"
+                  name="password"
+                  value={formData.password}
+                  onChange={handleChange}
+                  placeholder={
+                    account
+                      ? "Leave blank to keep current password"
+                      : "Enter trading account password"
+                  }
+                  autoComplete="new-password"
+                  disabled={loading}
+                />
 
+                {errors.password && <small>{errors.password}</small>}
+              </div>
 
-                            {/* Account Name */}
+              {/* Bridge URL */}
 
-                            <div className="account-field">
+              <div className="account-field">
+                <label htmlFor="bridge_url">MT5 Bridge URL</label>
 
-                                <label>
-                                    Account Name
-                                </label>
+                <input
+                  id="bridge_url"
+                  type="url"
+                  name="bridge_url"
+                  value={formData.bridge_url}
+                  onChange={handleChange}
+                  placeholder="http://127.0.0.1:9000"
+                  disabled={loading}
+                />
 
-                                <input
-                                    type="text"
-                                    name="account_name"
-                                    value={formData.account_name}
-                                    onChange={handleChange}
-                                    placeholder="e.g. Main Trading Account"
-                                />
+                <small>Address of the AQE MT5 bridge.</small>
+              </div>
+            </div>
+          </div>
 
-                                {errors.account_name && (
-                                    <small>
-                                        {errors.account_name}
-                                    </small>
-                                )}
-
-                            </div>
-
-
-                            {/* Server */}
-
-                            <div className="account-field">
-
-                                <label>
-                                    Server
-                                </label>
-
-                                <input
-                                    type="text"
-                                    name="server"
-                                    value={formData.server}
-                                    onChange={handleChange}
-                                    placeholder="e.g. JustMarkets-Demo3"
-                                />
-
-                                {errors.server && (
-                                    <small>
-                                        {errors.server}
-                                    </small>
-                                )}
-
-                            </div>
-
-
-                            {/* Currency */}
-
-                            <div className="account-field">
-
-                                <label>
-                                    Currency
-                                </label>
-
-                                <select
-                                    name="currency"
-                                    value={formData.currency}
-                                    onChange={handleChange}
-                                >
-
-                                    <option value="USD">
-                                        USD
-                                    </option>
-
-                                    <option value="EUR">
-                                        EUR
-                                    </option>
-
-                                    <option value="GBP">
-                                        GBP
-                                    </option>
-
-                                    <option value="KES">
-                                        KES
-                                    </option>
-
-                                </select>
-
-                                {errors.currency && (
-                                    <small>
-                                        {errors.currency}
-                                    </small>
-                                )}
-
-                            </div>
-
-
-                            {/* Leverage */}
-
-                            <div className="account-field">
-
-                                <label>
-                                    Leverage
-                                </label>
-
-                                <input
-                                    type="number"
-                                    name="leverage"
-                                    value={formData.leverage}
-                                    onChange={handleChange}
-                                    placeholder="e.g. 500"
-                                    min="1"
-                                />
-
-                                {errors.leverage && (
-                                    <small>
-                                        {errors.leverage}
-                                    </small>
-                                )}
-
-                            </div>
-
-                        </div>
-
-                    </div>
-
-
-                    {/* ==================================
-                        ACCOUNT METRICS
+          {/* ==================================
+                        ENVIRONMENT
                     ================================== */}
 
-                    <div className="account-form__section">
+          <div className="account-form__section">
+            <div className="account-form__section-header">
+              <div className="account-form__section-icon">
+                <FaCog />
+              </div>
 
-                        <div className="account-form__section-header">
+              <div>
+                <h3>Environment</h3>
 
-                            <div className="account-form__section-icon">
-                                <FaChartLine />
-                            </div>
+                <p>Choose whether this account is a demo or live account.</p>
+              </div>
+            </div>
 
-                            <div>
+            <div className="account-form__grid">
+              <div className="account-field">
+                <label htmlFor="is_demo">Environment</label>
 
-                                <h3>
-                                    Account Metrics
-                                </h3>
+                <select
+                  id="is_demo"
+                  name="is_demo"
+                  value={formData.is_demo ? "DEMO" : "LIVE"}
+                  onChange={(event) => {
+                    setFormData((previous) => ({
+                      ...previous,
 
-                                <p>
-                                    Current financial account values.
-                                </p>
+                      is_demo: event.target.value === "DEMO",
+                    }));
+                  }}
+                  disabled={loading}
+                >
+                  <option value="DEMO">Demo</option>
 
-                            </div>
+                  <option value="LIVE">Live</option>
+                </select>
+              </div>
 
-                        </div>
+              <div className="account-field account-field--toggle">
+                <label>Account Status</label>
 
+                <label className="account-toggle">
+                  <input
+                    type="checkbox"
+                    name="active"
+                    checked={true}
+                    readOnly
+                  />
 
-                        <div className="account-form__grid">
+                  <span />
 
-                            <div className="account-field">
+                  <strong>Account Active</strong>
+                </label>
+              </div>
+            </div>
+          </div>
 
-                                <label>
-                                    Balance
-                                </label>
-
-                                <input
-                                    type="number"
-                                    step="any"
-                                    name="balance"
-                                    value={formData.balance}
-                                    onChange={handleChange}
-                                    placeholder="0.00"
-                                />
-
-                            </div>
-
-
-                            <div className="account-field">
-
-                                <label>
-                                    Equity
-                                </label>
-
-                                <input
-                                    type="number"
-                                    step="any"
-                                    name="equity"
-                                    value={formData.equity}
-                                    onChange={handleChange}
-                                    placeholder="0.00"
-                                />
-
-                            </div>
-
-
-                            <div className="account-field">
-
-                                <label>
-                                    Margin
-                                </label>
-
-                                <input
-                                    type="number"
-                                    step="any"
-                                    name="margin"
-                                    value={formData.margin}
-                                    onChange={handleChange}
-                                    placeholder="0.00"
-                                />
-
-                            </div>
-
-
-                            <div className="account-field">
-
-                                <label>
-                                    Free Margin
-                                </label>
-
-                                <input
-                                    type="number"
-                                    step="any"
-                                    name="free_margin"
-                                    value={formData.free_margin}
-                                    onChange={handleChange}
-                                    placeholder="0.00"
-                                />
-
-                            </div>
-
-
-                            <div className="account-field account-field--full">
-
-                                <label>
-                                    Margin Level
-                                </label>
-
-                                <input
-                                    type="number"
-                                    step="any"
-                                    name="margin_level"
-                                    value={formData.margin_level}
-                                    onChange={handleChange}
-                                    placeholder="0.00"
-                                />
-
-                            </div>
-
-                        </div>
-
-                    </div>
-
-
-                    {/* ==================================
-                        CONFIGURATION
+          {/* ==================================
+                        INFORMATION
                     ================================== */}
 
-                    <div className="account-form__section">
+          <div className="account-form__section">
+            <div className="account-form__section-header">
+              <div className="account-form__section-icon">
+                <FaWallet />
+              </div>
 
-                        <div className="account-form__section-header">
+              <div>
+                <h3>Account Information</h3>
 
-                            <div className="account-form__section-icon">
-                                <FaCog />
-                            </div>
+                <p>Account financial metrics are synchronized from MT5.</p>
+              </div>
+            </div>
 
-                            <div>
+            <div className="account-form__grid">
+              <div className="account-field account-field--full">
+                <div className="account-info-message">
+                  <strong>Automatic account synchronization</strong>
 
-                                <h3>
-                                    Configuration
-                                </h3>
+                  <p>
+                    Balance, equity, margin, free margin, margin level,
+                    currency, leverage and connection status are obtained from
+                    the connected trading account. They should not be manually
+                    entered here.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
 
-                                <p>
-                                    Account environment and operational status.
-                                </p>
-
-                            </div>
-
-                        </div>
-
-
-                        <div className="account-form__grid">
-
-                            {/* Environment */}
-
-                            <div className="account-field">
-
-                                <label>
-                                    Environment
-                                </label>
-
-                                <select
-                                    name="is_demo"
-                                    value={
-                                        formData.is_demo
-                                            ? "DEMO"
-                                            : "LIVE"
-                                    }
-                                    onChange={(event) => {
-
-                                        setFormData((previous) => ({
-                                            ...previous,
-                                            is_demo:
-                                                event.target.value === "DEMO",
-                                        }));
-
-                                    }}
-                                >
-
-                                    <option value="DEMO">
-                                        Demo
-                                    </option>
-
-                                    <option value="LIVE">
-                                        Live
-                                    </option>
-
-                                </select>
-
-                            </div>
-
-
-                            {/* Status */}
-
-                            <div className="account-field">
-
-                                <label>
-                                    Status
-                                </label>
-
-                                <select
-                                    name="status"
-                                    value={formData.status}
-                                    onChange={handleChange}
-                                >
-
-                                    <option value="DISCONNECTED">
-                                        Disconnected
-                                    </option>
-
-                                    <option value="CONNECTED">
-                                        Connected
-                                    </option>
-
-                                </select>
-
-                            </div>
-
-
-                            {/* Active */}
-
-                            <div className="account-field account-field--toggle">
-
-                                <label>
-                                    Account Status
-                                </label>
-
-                                <label className="account-toggle">
-
-                                    <input
-                                        type="checkbox"
-                                        name="active"
-                                        checked={formData.active}
-                                        onChange={handleChange}
-                                    />
-
-                                    <span />
-
-                                    <strong>
-                                        Account Active
-                                    </strong>
-
-                                </label>
-
-                            </div>
-
-                        </div>
-
-                    </div>
-
-
-                    {/* ==================================
+          {/* ==================================
                         FOOTER
                     ================================== */}
 
-                    <div className="account-modal__footer">
+          <div className="account-modal__footer">
+            <button
+              type="button"
+              className="account-modal__cancel"
+              onClick={onClose}
+              disabled={loading}
+            >
+              Cancel
+            </button>
 
-                        <button
-                            type="button"
-                            className="account-modal__cancel"
-                            onClick={onClose}
-                            disabled={loading}
-                        >
-                            Cancel
-                        </button>
+            <button
+              type="submit"
+              className="account-modal__submit"
+              disabled={loading}
+            >
+              {loading ? (
+                <>
+                  <span className="account-form-spinner" />
+                  Saving...
+                </>
+              ) : (
+                <>
+                  <FaWallet />
 
-
-                        <button
-                            type="submit"
-                            className="account-modal__submit"
-                            disabled={loading}
-                        >
-
-                            {loading ? (
-                                <>
-                                    <span className="account-form-spinner" />
-                                    Saving...
-                                </>
-                            ) : (
-                                <>
-                                    <FaWallet />
-
-                                    {account
-                                        ? "Save Changes"
-                                        : "Create Account"}
-                                </>
-                            )}
-
-                        </button>
-
-                    </div>
-
-                </form>
-
-            </div>
-
-        </div>
-    );
+                  {account ? "Save Changes" : "Create Account"}
+                </>
+              )}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
 };
-
 
 export default AccountForm;

@@ -177,6 +177,42 @@ export const updateTradingAccount = createAsyncThunk(
 );
 
 // =====================================================
+// CONNECT ACCOUNT
+// =====================================================
+
+export const connectTradingAccount = createAsyncThunk(
+  "accounts/connectTradingAccount",
+
+  async (accountId, { rejectWithValue }) => {
+    try {
+      return await accountsAPI.connectAccount(accountId);
+    } catch (error) {
+      return rejectWithValue(
+        getErrorMessage(error, "Failed to connect trading account."),
+      );
+    }
+  },
+);
+
+// =====================================================
+// DISCONNECT ACCOUNT
+// =====================================================
+
+export const disconnectTradingAccount = createAsyncThunk(
+  "accounts/disconnectTradingAccount",
+
+  async (accountId, { rejectWithValue }) => {
+    try {
+      return await accountsAPI.disconnectAccount(accountId);
+    } catch (error) {
+      return rejectWithValue(
+        getErrorMessage(error, "Failed to disconnect trading account."),
+      );
+    }
+  },
+);
+
+// =====================================================
 // DELETE ACCOUNT
 // =====================================================
 

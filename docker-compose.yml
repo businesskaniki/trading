@@ -134,6 +134,11 @@ services:
   #################################################
   # Celery Worker
   #################################################
+  # This worker runs the trading loop, so it needs to see the engine
+  # and strategies packages, not just the backend app. Those two are
+  # sibling folders to backend/ on disk, so they're mounted in
+  # explicitly alongside it, both landing under /app so Python can
+  # import them as top-level packages.
 
   celery_worker:
     build:
@@ -151,10 +156,15 @@ services:
       redis:
         condition: service_healthy
 
-    command: python -m celery -A app.core.celery worker --loglevel=info
+    environment:
+      PYTHONPATH: /app
+
+    command: python -m celery -A app.core.celery:celery_app worker --loglevel=info
 
     volumes:
       - ./backend:/app
+      - ./engine:/app/engine
+      - ./strategies:/app/strategies
 
     networks:
       - aqe_network
@@ -162,6 +172,10 @@ services:
   #################################################
   # Celery Beat
   #################################################
+  # Beat only schedules periodic housekeeping tasks (cleanup, reports,
+  # etc) - it doesn't run trading logic, so it does not need engine/
+  # or strategies/ mounted. Add them later only if a scheduled task
+  # actually needs to import from those packages.
 
   celery_beat:
     build:
@@ -179,7 +193,7 @@ services:
       redis:
         condition: service_healthy
 
-    command: python -m celery -A app.core.celery beat --loglevel=info
+    command: python -m celery -A app.core.celery:celery_app beat --loglevel=info
 
     volumes:
       - ./backend:/app

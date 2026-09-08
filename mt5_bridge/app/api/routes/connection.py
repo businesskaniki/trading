@@ -1,6 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, status
 
-from app.core.mt5_connection import mt5_connection
+from app.schemas.connection import (
+    ConnectRequest,
+    ConnectionStatus,
+    DisconnectResponse,
+)
+from app.services.connection_service import ConnectionService
 
 
 router = APIRouter(
@@ -9,35 +14,46 @@ router = APIRouter(
 )
 
 
-@router.post("/connect")
-def connect():
+connection_service = ConnectionService()
 
-    connected = mt5_connection.connect()
+
+@router.post(
+    "/connect",
+    response_model=ConnectionStatus,
+)
+def connect(data: ConnectRequest):
+
+    connected = connection_service.connect(
+        login=data.login,
+        password=data.password,
+        server=data.server,
+    )
 
     if not connected:
         raise HTTPException(
-            status_code=500,
+            status_code=status.HTTP_502_BAD_GATEWAY,
             detail={
                 "message": "Failed to connect to MetaTrader 5",
-                "status": mt5_connection.status(),
+                "status": connection_service.status(),
             },
         )
 
-    return mt5_connection.status()
+    return connection_service.status()
 
 
-@router.post("/disconnect")
+@router.post(
+    "/disconnect",
+    response_model=DisconnectResponse,
+)
 def disconnect():
 
-    mt5_connection.disconnect()
-
-    return {
-        "connected": False,
-        "message": "Disconnected from MetaTrader 5",
-    }
+    return connection_service.disconnect()
 
 
-@router.get("/status")
+@router.get(
+    "/status",
+    response_model=ConnectionStatus,
+)
 def status():
 
-    return mt5_connection.status()
+    return connection_service.status()

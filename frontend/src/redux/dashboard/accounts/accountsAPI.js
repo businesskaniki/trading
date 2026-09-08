@@ -75,6 +75,28 @@ const accountsAPI = {
   },
 
   // =====================================================
+  // CONNECT ACCOUNT
+  // =====================================================
+
+  connectAccount: async (accountId) => {
+    const response = await api.post(`/trading-accounts/${accountId}/connect`);
+
+    return response.data;
+  },
+
+  // =====================================================
+  // DISCONNECT ACCOUNT
+  // =====================================================
+
+  disconnectAccount: async (accountId) => {
+    const response = await api.post(
+      `/trading-accounts/${accountId}/disconnect`,
+    );
+
+    return response.data;
+  },
+
+  // =====================================================
   // DELETE ACCOUNT
   // =====================================================
 

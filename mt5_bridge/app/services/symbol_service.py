@@ -46,3 +46,39 @@ class SymbolService:
             "symbol": symbol,
             **data,
         }
+
+    def get_candles(
+        self,
+        symbol: str,
+        timeframe: str,
+        count: int,
+    ):
+
+        rates = self.broker.get_candles(
+            symbol,
+            timeframe,
+            count,
+        )
+
+        if rates is None:
+            return None
+
+        # rates is a numpy structured array (from mt5.copy_rates_from_pos) -
+        # fields are accessed by name, not ._asdict() like the namedtuples
+        # tick()/get_symbol() return.
+        candles = []
+
+        for rate in rates:
+            candles.append(
+                {
+                    "time": int(rate["time"]),
+                    "open": float(rate["open"]),
+                    "high": float(rate["high"]),
+                    "low": float(rate["low"]),
+                    "close": float(rate["close"]),
+                    "volume": int(rate["tick_volume"]),
+                    "spread": int(rate["spread"]),
+                }
+            )
+
+        return candles

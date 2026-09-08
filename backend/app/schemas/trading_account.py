@@ -1,69 +1,127 @@
+from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import Field
 
-from app.core.constants import AccountStatus, BrokerType
+from app.core.constants import AccountStatus
+from app.core.constants import BrokerType
+
+# ============================================================
+# Base
+# ============================================================
 
 
 class TradingAccountBase(BaseModel):
     """
-    Shared TradingAccount fields.
+    Common fields shared by trading account schemas.
     """
 
     broker: BrokerType
 
-    account_number: int
+    login: int = Field(
+        ...,
+        gt=0,
+        description="Broker trading account login.",
+    )
 
-    server: str
+    server: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+    )
 
-    account_name: str
-
-    currency: str = "USD"
-
-    leverage: int = 100
-
-    balance: Decimal = Decimal("0")
-
-    equity: Decimal = Decimal("0")
-
-    margin: Decimal = Decimal("0")
-
-    free_margin: Decimal = Decimal("0")
-
-    margin_level: Decimal = Decimal("0")
+    account_name: str = Field(
+        ...,
+        min_length=1,
+        max_length=100,
+    )
 
     is_demo: bool = True
 
-    status: AccountStatus = AccountStatus.DISCONNECTED
 
-    active: bool = True
-
+# ============================================================
+# Create
+# ============================================================
 
 
 class TradingAccountCreate(TradingAccountBase):
     """
-    Schema for creating a trading account.
+    Data required to create a trading account.
+
+    Credentials are accepted here so the backend can encrypt
+    them before storing them.
     """
 
-    pass
+    password: str | None = Field(
+        default=None,
+        min_length=1,
+        description="Trading account password. Never returned by the API.",
+    )
 
+    bridge_url: str | None = Field(
+        default=None,
+        max_length=255,
+        description="MT5 bridge URL used by this account.",
+    )
+
+
+# ============================================================
+# Update
+# ============================================================
 
 
 class TradingAccountUpdate(BaseModel):
     """
-    Fields that can change after account creation.
+    Fields that may be modified after account creation.
     """
 
-    account_name: str | None = None
+    account_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=100,
+    )
 
-    currency: str | None = None
+    password: str | None = Field(
+        default=None,
+        min_length=1,
+        description="New trading account password. Never returned by the API.",
+    )
 
-    leverage: int | None = None
+    is_demo: bool | None = None
 
-    status: AccountStatus | None = None
+    bridge_url: str | None = Field(
+        default=None,
+        max_length=255,
+    )
 
     active: bool | None = None
+
+
+# ============================================================
+# Broker State
+# ============================================================
+
+
+class TradingAccountStateUpdate(BaseModel):
+    """
+    Broker/MT5 synchronized account state.
+
+    These values are produced by the bridge and should not be
+    accepted from normal frontend account-edit requests.
+    """
+
+    currency: str | None = Field(
+        default=None,
+        max_length=10,
+    )
+
+    leverage: int | None = Field(
+        default=None,
+        gt=0,
+    )
 
     balance: Decimal | None = None
 
@@ -75,29 +133,65 @@ class TradingAccountUpdate(BaseModel):
 
     margin_level: Decimal | None = None
 
+    status: AccountStatus | None = None
+
+
+# ============================================================
+# Response
+# ============================================================
 
 
 class TradingAccountResponse(TradingAccountBase):
     """
-    API response schema.
+    Safe representation of a trading account returned to the
+    frontend.
+
+    Credentials are deliberately excluded.
     """
+
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
 
     id: UUID
 
-    created_at: object
-    updated_at: object
+    user_id: UUID
 
-    model_config = ConfigDict(
-        from_attributes=True
-    )
+    currency: str
 
+    leverage: int
+
+    status: AccountStatus
+
+    active: bool
+
+    balance: Decimal
+
+    equity: Decimal
+
+    margin: Decimal
+
+    free_margin: Decimal
+
+    margin_level: Decimal
+
+    bridge_url: str | None
+
+    created_at: datetime
+
+    updated_at: datetime
+
+
+# ============================================================
+# List Response
+# ============================================================
 
 
 class TradingAccountListResponse(BaseModel):
     """
-    Paginated response.
+    Paginated/list representation of trading accounts.
     """
 
-    total: int
-
     items: list[TradingAccountResponse]
+
+    total: int

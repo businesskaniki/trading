@@ -1,61 +1,70 @@
+from __future__ import annotations
+
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 
 from app.api.router import router
-from app.core.mt5_connection import mt5_connection
+from app.infrastructure.redis.client import redis_client
+from app.services.market_data_service import market_data_service
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    """
+    Manage the MT5 Bridge application lifecycle.
 
-    # =========================================================
-    # STARTUP
-    # =========================================================
+    Startup order:
+        1. Connect to Redis.
+        2. Verify Redis connectivity.
+        3. Start market-data service.
+
+    Shutdown order:
+        1. Stop market-data service.
+        2. Disconnect Redis.
+    """
 
     print("Starting MT5 Bridge...")
 
-    connected = mt5_connection.connect()
+    # ---------------------------------------------------------
+    # Startup
+    # ---------------------------------------------------------
 
-    if connected:
+    # Redis must be available before the market-data service
+    # starts publishing ticks.
+    await redis_client.connect()
 
-        print("MT5 connection established.")
+    # Confirm the Redis connection is healthy.
+    await redis_client.ping()
 
-    else:
+    print("Redis connection established.")
 
-        print(
-            "WARNING: MT5 connection failed during startup."
-        )
+    # Start market-data polling only after Redis is ready.
+    market_data_service.start()
 
-    # Start the background connection monitor
-    mt5_connection.start_monitor()
+    print("Market-data service started.")
 
-    print(
-        "MT5 connection monitor started."
-    )
+    try:
+        yield
 
-    # Give control back to FastAPI
-    yield
+    finally:
+        # -----------------------------------------------------
+        # Shutdown
+        # -----------------------------------------------------
 
-    # =========================================================
-    # SHUTDOWN
-    # =========================================================
+        print("Stopping MT5 Bridge...")
 
-    print(
-        "Stopping MT5 connection monitor..."
-    )
+        # Stop market-data polling before closing Redis.
+        await market_data_service.stop()
 
-    await mt5_connection.stop_monitor()
+        print("Market-data service stopped.")
 
-    print(
-        "Disconnecting from MT5..."
-    )
+        # Close the Redis connection after all publishers
+        # have stopped using it.
+        await redis_client.disconnect()
 
-    mt5_connection.disconnect()
-
-    print(
-        "MT5 Bridge shutdown complete."
-    )
+        print("Redis connection closed.")
+        print("MT5 Bridge shutdown complete.")
 
 
 app = FastAPI(
@@ -63,6 +72,5 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
-
 
 app.include_router(router)

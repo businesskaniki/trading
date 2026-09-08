@@ -4,7 +4,9 @@ import hmac
 import json
 import secrets
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 
+from cryptography.fernet import Fernet
 from fastapi.security import OAuth2PasswordBearer
 
 from app.core.config import settings
@@ -119,3 +121,47 @@ def verify_password(plain_password: str, hashed_password: str) -> bool:
         200_000,
     )
     return hmac.compare_digest(_base64url_encode(raw_hash), expected)
+
+
+# =============================================================
+# Broker credential encryption
+# =============================================================
+#
+# get_password_hash() / verify_password() above are one-way - they
+# can never recover the original password, which is correct for
+# login passwords.
+#
+# Broker credentials (an MT5 password, a Binance API secret) are
+# different: the bridge / broker adapter needs the real value back
+# to authenticate with the broker, so these need to be reversibly
+# encrypted rather than hashed. Do not use get_password_hash() for
+# these - it would make the credential permanently unusable.
+
+
+@lru_cache
+def _get_fernet() -> Fernet:
+    """
+    Build a Fernet cipher from the app's SECRET_KEY.
+
+    Reuses the existing SECRET_KEY (via a SHA-256 digest, since Fernet
+    requires a 32-byte urlsafe-base64-encoded key) instead of adding a
+    second secret to manage and rotate.
+    """
+    digest = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
+    return Fernet(base64.urlsafe_b64encode(digest))
+
+
+def encrypt_secret(plain_text: str) -> str:
+    """
+    Encrypt a single string value (e.g. one broker credential) for
+    storage. Reversible - use decrypt_secret() to recover the original
+    value.
+    """
+    return _get_fernet().encrypt(plain_text.encode("utf-8")).decode("utf-8")
+
+
+def decrypt_secret(token: str) -> str:
+    """
+    Decrypt a value previously encrypted with encrypt_secret().
+    """
+    return _get_fernet().decrypt(token.encode("utf-8")).decode("utf-8")

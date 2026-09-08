@@ -12,7 +12,6 @@ import {
 } from "react-icons/fa";
 
 import { useEffect, useMemo, useState } from "react";
-
 import { useDispatch, useSelector } from "react-redux";
 
 import AccountForm from "./AccountForm";
@@ -22,6 +21,8 @@ import {
   fetchAccounts,
   createTradingAccount,
   updateTradingAccount,
+  connectTradingAccount,
+  disconnectTradingAccount,
   removeTradingAccount,
 } from "../../../redux/dashboard/accounts/accountsThunks";
 
@@ -34,19 +35,18 @@ import "../../../css/accounts.css";
 import "../../../css/accountDetails.css";
 
 const Accounts = () => {
-  // =====================================================
-  // REDUX
-  // =====================================================
-
   const dispatch = useDispatch();
 
-  const { accounts, loading, creating, updating, deleting, error } = useSelector(
-    (state) => state.accounts,
-  );
-
-  // =====================================================
-  // LOCAL STATE
-  // =====================================================
+  const {
+    accounts,
+    loading,
+    creating,
+    updating,
+    connecting,
+    disconnecting,
+    deleting,
+    error,
+  } = useSelector((state) => state.accounts);
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState(null);
@@ -54,13 +54,11 @@ const Accounts = () => {
   const [accountToDelete, setAccountToDelete] = useState(null);
 
   const [searchTerm, setSearchTerm] = useState("");
-
   const [environmentFilter, setEnvironmentFilter] = useState("ALL");
-
   const [statusFilter, setStatusFilter] = useState("ALL");
 
   // =====================================================
-  // LOAD ACCOUNTS
+  // FETCH ACCOUNTS
   // =====================================================
 
   useEffect(() => {
@@ -86,44 +84,32 @@ const Accounts = () => {
   ).length;
 
   // =====================================================
-  // FILTERED ACCOUNTS
+  // FILTER ACCOUNTS
   // =====================================================
 
   const filteredAccounts = useMemo(() => {
     return accounts.filter((account) => {
-      // -------------------------------------------------
-      // SEARCH
-      // -------------------------------------------------
-
       const search = searchTerm.trim().toLowerCase();
 
       const matchesSearch =
         !search ||
-        String(account.account_number || "")
+        String(account.login ?? "")
           .toLowerCase()
           .includes(search) ||
-        String(account.account_name || "")
+        String(account.account_name ?? "")
           .toLowerCase()
           .includes(search) ||
-        String(account.broker || "")
+        String(account.broker ?? "")
           .toLowerCase()
           .includes(search) ||
-        String(account.server || "")
+        String(account.server ?? "")
           .toLowerCase()
           .includes(search);
-
-      // -------------------------------------------------
-      // ENVIRONMENT
-      // -------------------------------------------------
 
       const matchesEnvironment =
         environmentFilter === "ALL" ||
         (environmentFilter === "LIVE" && account.is_demo === false) ||
         (environmentFilter === "DEMO" && account.is_demo === true);
-
-      // -------------------------------------------------
-      // STATUS
-      // -------------------------------------------------
 
       const matchesStatus =
         statusFilter === "ALL" ||
@@ -147,39 +133,9 @@ const Accounts = () => {
   // =====================================================
 
   const handleCreateAccount = async (data) => {
-    const payload = {
-      broker: data.broker,
+    console.log("CREATE ACCOUNT PAYLOAD:", data);
 
-      account_number: Number(data.account_number),
-
-      server: data.server,
-
-      account_name: data.account_name,
-
-      currency: data.currency,
-
-      leverage: Number(data.leverage),
-
-      balance: Number(data.balance),
-
-      equity: Number(data.equity),
-
-      margin: Number(data.margin),
-
-      free_margin: Number(data.free_margin),
-
-      margin_level: Number(data.margin_level),
-
-      is_demo: Boolean(data.is_demo),
-
-      status: data.status,
-
-      active: Boolean(data.active),
-    };
-
-    console.log("CREATE ACCOUNT PAYLOAD:", payload);
-
-    const result = await dispatch(createTradingAccount(payload));
+    const result = await dispatch(createTradingAccount(data));
 
     if (createTradingAccount.fulfilled.match(result)) {
       setIsCreateOpen(false);
@@ -188,25 +144,87 @@ const Accounts = () => {
     }
   };
 
-  const handleAccountSubmit = async (data) => {
-    if (!editingAccount) return handleCreateAccount(data);
+  // =====================================================
+  // CREATE / UPDATE ACCOUNT
+  // =====================================================
 
-    const result = await dispatch(updateTradingAccount({
-      accountId: editingAccount.id,
-      accountData: data,
-    }));
+  const handleAccountSubmit = async (data) => {
+    if (!editingAccount) {
+      return handleCreateAccount(data);
+    }
+
+    const result = await dispatch(
+      updateTradingAccount({
+        accountId: editingAccount.id,
+        accountData: data,
+      }),
+    );
 
     if (updateTradingAccount.fulfilled.match(result)) {
       setEditingAccount(null);
+
       dispatch(clearAccountOperationState());
     }
   };
 
+  // =====================================================
+  // CONNECT ACCOUNT
+  // =====================================================
+
+  const handleConnectAccount = async (account) => {
+    if (!account?.id) {
+      return;
+    }
+
+    if (connecting || disconnecting) {
+      return;
+    }
+
+    if (!account.active) {
+      return;
+    }
+
+    const result = await dispatch(connectTradingAccount(account.id));
+
+    if (connectTradingAccount.fulfilled.match(result)) {
+      dispatch(clearAccountOperationState());
+    }
+  };
+
+  // =====================================================
+  // DISCONNECT ACCOUNT
+  // =====================================================
+
+  const handleDisconnectAccount = async (account) => {
+    if (!account?.id) {
+      return;
+    }
+
+    if (connecting || disconnecting) {
+      return;
+    }
+
+    const result = await dispatch(disconnectTradingAccount(account.id));
+
+    if (disconnectTradingAccount.fulfilled.match(result)) {
+      dispatch(clearAccountOperationState());
+    }
+  };
+
+  // =====================================================
+  // DELETE ACCOUNT
+  // =====================================================
+
   const handleDeleteAccount = async () => {
+    if (!accountToDelete?.id) {
+      return;
+    }
+
     const result = await dispatch(removeTradingAccount(accountToDelete.id));
 
     if (removeTradingAccount.fulfilled.match(result)) {
       setAccountToDelete(null);
+
       dispatch(clearAccountOperationState());
     }
   };
@@ -234,9 +252,9 @@ const Accounts = () => {
 
   return (
     <main className="accounts-page">
-      {/* =================================================
-          PAGE HEADER
-      ================================================= */}
+      {/* =====================================================
+          HEADER
+      ===================================================== */}
 
       <section className="accounts-header">
         <div>
@@ -276,6 +294,7 @@ const Accounts = () => {
         {/* ADD ACCOUNT */}
 
         <button
+          type="button"
           className="accounts-primary-button"
           onClick={() => setIsCreateOpen(true)}
           disabled={creating}
@@ -287,13 +306,11 @@ const Accounts = () => {
         </button>
       </section>
 
-      {/* =================================================
+      {/* =====================================================
           STATISTICS
-      ================================================= */}
+      ===================================================== */}
 
       <section className="accounts-stats">
-        {/* TOTAL */}
-
         <div className="account-stat">
           <div className="account-stat-icon">
             <FaWallet />
@@ -305,8 +322,6 @@ const Accounts = () => {
             <strong>{totalAccounts}</strong>
           </div>
         </div>
-
-        {/* ACTIVE */}
 
         <div className="account-stat">
           <div className="account-stat-icon">
@@ -320,8 +335,6 @@ const Accounts = () => {
           </div>
         </div>
 
-        {/* LIVE */}
-
         <div className="account-stat">
           <div className="account-stat-icon">
             <FaGlobe />
@@ -333,8 +346,6 @@ const Accounts = () => {
             <strong>{liveAccounts}</strong>
           </div>
         </div>
-
-        {/* DEMO */}
 
         <div className="account-stat">
           <div className="account-stat-icon">
@@ -349,9 +360,9 @@ const Accounts = () => {
         </div>
       </section>
 
-      {/* =================================================
+      {/* =====================================================
           TOOLBAR
-      ================================================= */}
+      ===================================================== */}
 
       <section className="accounts-toolbar">
         {/* SEARCH */}
@@ -367,9 +378,9 @@ const Accounts = () => {
           />
         </div>
 
-        <div className="accounts-filters">
-          {/* ENVIRONMENT */}
+        {/* FILTERS */}
 
+        <div className="accounts-filters">
           <select
             value={environmentFilter}
             onChange={(event) => setEnvironmentFilter(event.target.value)}
@@ -380,8 +391,6 @@ const Accounts = () => {
 
             <option value="DEMO">Demo</option>
           </select>
-
-          {/* STATUS */}
 
           <select
             value={statusFilter}
@@ -394,9 +403,8 @@ const Accounts = () => {
             <option value="INACTIVE">Inactive</option>
           </select>
 
-          {/* REFRESH */}
-
           <button
+            type="button"
             className="accounts-refresh"
             title="Refresh accounts"
             onClick={handleRefresh}
@@ -407,13 +415,11 @@ const Accounts = () => {
         </div>
       </section>
 
-      {/* =================================================
+      {/* =====================================================
           ACCOUNTS TABLE
-      ================================================= */}
+      ===================================================== */}
 
       <section className="accounts-card">
-        {/* CARD HEADER */}
-
         <div className="accounts-card-header">
           <div>
             <span>ACCOUNT REGISTRY</span>
@@ -426,8 +432,6 @@ const Accounts = () => {
             {filteredAccounts.length === 1 ? "account" : "accounts"}
           </span>
         </div>
-
-        {/* TABLE */}
 
         <div className="accounts-table-wrapper">
           <table className="accounts-table">
@@ -450,9 +454,9 @@ const Accounts = () => {
             </thead>
 
             <tbody>
-              {/* =========================================
+              {/* =================================================
                   LOADING
-              ========================================= */}
+              ================================================= */}
 
               {loading ? (
                 <tr>
@@ -465,9 +469,9 @@ const Accounts = () => {
                   </td>
                 </tr>
               ) : filteredAccounts.length === 0 ? (
-                /* =======================================
+                /* =================================================
                    EMPTY
-                ======================================= */
+                ================================================= */
 
                 <tr>
                   <td colSpan="7" className="accounts-empty">
@@ -486,7 +490,10 @@ const Accounts = () => {
                     </span>
 
                     {accounts.length === 0 && (
-                      <button onClick={() => setIsCreateOpen(true)}>
+                      <button
+                        type="button"
+                        onClick={() => setIsCreateOpen(true)}
+                      >
                         <FaPlus />
                         Add Account
                       </button>
@@ -494,13 +501,15 @@ const Accounts = () => {
                   </td>
                 </tr>
               ) : (
-                /* =======================================
-                   ACCOUNT ROWS
-                ======================================= */
+                /* =================================================
+                   ACCOUNTS
+                ================================================= */
 
                 filteredAccounts.map((account) => (
                   <tr key={account.id}>
-                    {/* ACCOUNT */}
+                    {/* =========================================
+                        ACCOUNT
+                    ========================================= */}
 
                     <td>
                       <div className="account-table-name">
@@ -513,12 +522,14 @@ const Accounts = () => {
                             {account.account_name || "Trading Account"}
                           </strong>
 
-                          <span>#{account.account_number}</span>
+                          <span>#{account.login ?? "—"}</span>
                         </div>
                       </div>
                     </td>
 
-                    {/* BROKER */}
+                    {/* =========================================
+                        BROKER
+                    ========================================= */}
 
                     <td>
                       <div className="account-table-broker">
@@ -528,7 +539,9 @@ const Accounts = () => {
                       </div>
                     </td>
 
-                    {/* ENVIRONMENT */}
+                    {/* =========================================
+                        ENVIRONMENT
+                    ========================================= */}
 
                     <td>
                       <span
@@ -542,7 +555,9 @@ const Accounts = () => {
                       </span>
                     </td>
 
-                    {/* BALANCE */}
+                    {/* =========================================
+                        BALANCE
+                    ========================================= */}
 
                     <td>
                       <strong>
@@ -550,7 +565,9 @@ const Accounts = () => {
                       </strong>
                     </td>
 
-                    {/* EQUITY */}
+                    {/* =========================================
+                        EQUITY
+                    ========================================= */}
 
                     <td>
                       <strong>
@@ -558,10 +575,14 @@ const Accounts = () => {
                       </strong>
                     </td>
 
-                    {/* STATUS */}
+                    {/* =========================================
+                        STATUS
+                    ========================================= */}
 
                     <td>
                       <div className="account-status-cell">
+                        {/* AQE ACTIVE STATUS */}
+
                         <span
                           className={
                             account.active
@@ -574,11 +595,21 @@ const Accounts = () => {
                           {account.active ? "Active" : "Inactive"}
                         </span>
 
-                        <small>{account.status || "DISCONNECTED"}</small>
+                        {/* BROKER CONNECTION STATUS */}
+
+                        <small
+                          className={`account-connection-status ${
+                            account.status?.toLowerCase() || "disconnected"
+                          }`}
+                        >
+                          {account.status || "DISCONNECTED"}
+                        </small>
                       </div>
                     </td>
 
-                    {/* ACTIONS */}
+                    {/* =========================================
+                        ACTIONS
+                    ========================================= */}
 
                     <td>
                       <div className="account-actions">
@@ -588,6 +619,7 @@ const Accounts = () => {
                           type="button"
                           title="View account"
                           onClick={() => setViewingAccount(account)}
+                          disabled={connecting || disconnecting}
                         >
                           <FaEye />
                         </button>
@@ -598,9 +630,46 @@ const Accounts = () => {
                           type="button"
                           title="Edit account"
                           onClick={() => setEditingAccount(account)}
+                          disabled={connecting || disconnecting}
                         >
                           <FaEdit />
                         </button>
+
+                        {/* CONNECT / DISCONNECT */}
+
+                        {account.status === "CONNECTED" ? (
+                          <button
+                            type="button"
+                            title="Disconnect account"
+                            onClick={() => handleDisconnectAccount(account)}
+                            disabled={disconnecting || connecting}
+                          >
+                            {disconnecting ? (
+                              <FaSyncAlt className="accounts-spin" />
+                            ) : (
+                              <FaCheckCircle />
+                            )}
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            title={
+                              account.active
+                                ? "Connect account"
+                                : "Activate account before connecting"
+                            }
+                            onClick={() => handleConnectAccount(account)}
+                            disabled={
+                              connecting || disconnecting || !account.active
+                            }
+                          >
+                            {connecting ? (
+                              <FaSyncAlt className="accounts-spin" />
+                            ) : (
+                              <FaGlobe />
+                            )}
+                          </button>
+                        )}
 
                         {/* DELETE */}
 
@@ -608,7 +677,7 @@ const Accounts = () => {
                           type="button"
                           title="Delete account"
                           onClick={() => setAccountToDelete(account)}
-                          disabled={deleting}
+                          disabled={deleting || connecting || disconnecting}
                         >
                           <FaTrash />
                         </button>
@@ -622,15 +691,16 @@ const Accounts = () => {
         </div>
       </section>
 
-      {/* =================================================
-          CREATE ACCOUNT MODAL
-      ================================================= */}
+      {/* =====================================================
+          CREATE / EDIT ACCOUNT FORM
+      ===================================================== */}
 
       <AccountForm
         isOpen={isCreateOpen || Boolean(editingAccount)}
         onClose={() => {
           if (!creating && !updating) {
             setIsCreateOpen(false);
+
             setEditingAccount(null);
           }
         }}
@@ -638,28 +708,120 @@ const Accounts = () => {
         onSubmit={handleAccountSubmit}
         account={editingAccount}
       />
+
+      {/* =====================================================
+          ACCOUNT DETAILS MODAL
+      ===================================================== */}
+
       {viewingAccount && (
-        <div className="account-detail-overlay" onMouseDown={(event) => event.target === event.currentTarget && setViewingAccount(null)}>
+        <div
+          className="account-detail-overlay"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              setViewingAccount(null);
+            }
+          }}
+        >
           <div className="account-detail-modal" role="dialog" aria-modal="true">
-            <button className="account-detail-close" onClick={() => setViewingAccount(null)} aria-label="Close">×</button>
+            {/* CLOSE */}
+
+            <button
+              type="button"
+              className="account-detail-close"
+              onClick={() => setViewingAccount(null)}
+              aria-label="Close"
+            >
+              ×
+            </button>
+
             <span className="accounts-eyebrow">ACCOUNT PROFILE</span>
+
             <h2>{viewingAccount.account_name || "Trading Account"}</h2>
-            <p className="account-detail-number">#{viewingAccount.account_number} · {viewingAccount.broker || "Unknown broker"}</p>
+
+            <p className="account-detail-number">
+              #{viewingAccount.login ?? "—"} ·{" "}
+              {viewingAccount.broker || "Unknown broker"}
+            </p>
+
             <div className="account-detail-grid">
-              <div><span>Server</span><strong>{viewingAccount.server || "-"}</strong></div>
-              <div><span>Environment</span><strong>{viewingAccount.is_demo ? "DEMO" : "LIVE"}</strong></div>
-              <div><span>Balance</span><strong>{formatMoney(viewingAccount.balance, viewingAccount.currency)}</strong></div>
-              <div><span>Equity</span><strong>{formatMoney(viewingAccount.equity, viewingAccount.currency)}</strong></div>
-              <div><span>Margin</span><strong>{formatMoney(viewingAccount.margin, viewingAccount.currency)}</strong></div>
-              <div><span>Status</span><strong>{viewingAccount.status || "-"}</strong></div>
+              <div>
+                <span>Server</span>
+
+                <strong>{viewingAccount.server || "-"}</strong>
+              </div>
+
+              <div>
+                <span>Environment</span>
+
+                <strong>{viewingAccount.is_demo ? "DEMO" : "LIVE"}</strong>
+              </div>
+
+              <div>
+                <span>Balance</span>
+
+                <strong>
+                  {formatMoney(viewingAccount.balance, viewingAccount.currency)}
+                </strong>
+              </div>
+
+              <div>
+                <span>Equity</span>
+
+                <strong>
+                  {formatMoney(viewingAccount.equity, viewingAccount.currency)}
+                </strong>
+              </div>
+
+              <div>
+                <span>Margin</span>
+
+                <strong>
+                  {formatMoney(viewingAccount.margin, viewingAccount.currency)}
+                </strong>
+              </div>
+
+              <div>
+                <span>Status</span>
+
+                <strong>{viewingAccount.status || "DISCONNECTED"}</strong>
+              </div>
+
+              <div>
+                <span>Currency</span>
+
+                <strong>{viewingAccount.currency || "-"}</strong>
+              </div>
+
+              <div>
+                <span>Leverage</span>
+
+                <strong>
+                  {viewingAccount.leverage
+                    ? `1:${viewingAccount.leverage}`
+                    : "-"}
+                </strong>
+              </div>
+
+              <div>
+                <span>AQE Status</span>
+
+                <strong>{viewingAccount.active ? "ACTIVE" : "INACTIVE"}</strong>
+              </div>
             </div>
           </div>
         </div>
       )}
+
+      {/* =====================================================
+          DELETE CONFIRMATION
+      ===================================================== */}
+
       <ConfirmModal
         isOpen={Boolean(accountToDelete)}
         title="Delete trading account?"
-        message={`${accountToDelete?.account_name || "This account"} will be permanently removed from the account registry.`}
+        message={`${
+          accountToDelete?.account_name || "This account"
+        } will be permanently removed from the account registry.`}
         confirmLabel="Delete Account"
         danger={true}
         loading={deleting}

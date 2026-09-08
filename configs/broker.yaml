@@ -1,6 +1,0 @@
-brokers:
-  default: paper
-  mt5:
-    enabled: true
-  paper:
-    enabled: true

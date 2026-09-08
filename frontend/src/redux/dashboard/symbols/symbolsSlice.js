@@ -1,46 +1,153 @@
 import { createSlice } from "@reduxjs/toolkit";
-import { fetchSymbols, createSymbol, updateSymbol, removeSymbol } from "./symbolsThunks";
+
+import {
+  syncSymbols,
+  fetchAccountSymbols,
+  fetchTradingUniverse,
+  setSymbolSelection,
+} from "./symbolsThunks";
 
 const initialState = {
   symbols: [],
+
+  selectedSymbols: [],
+
   loading: false,
-  saving: false,
-  deleting: false,
+
+  syncing: false,
+
+  selecting: false,
+
   error: null,
+
+  syncResult: null,
 };
 
-const normalize = (payload) =>
-  Array.isArray(payload) ? payload : payload?.items || [];
+const normalizeItems = (payload) => {
+  if (Array.isArray(payload)) {
+    return payload;
+  }
+
+  return payload?.items || [];
+};
 
 const symbolsSlice = createSlice({
   name: "symbols",
+
   initialState,
+
   reducers: {
-    clearSymbolsError: (state) => { state.error = null; },
+    clearSymbolsError: (state) => {
+      state.error = null;
+    },
+
+    clearSyncResult: (state) => {
+      state.syncResult = null;
+    },
   },
+
   extraReducers: (builder) => {
     builder
-      .addCase(fetchSymbols.pending, (state) => { state.loading = true; state.error = null; })
-      .addCase(fetchSymbols.fulfilled, (state, action) => { state.loading = false; state.symbols = normalize(action.payload); })
-      .addCase(fetchSymbols.rejected, (state, action) => { state.loading = false; state.error = action.payload; })
-      .addCase(createSymbol.pending, (state) => { state.saving = true; state.error = null; })
-      .addCase(createSymbol.fulfilled, (state, action) => { state.saving = false; state.symbols.unshift(action.payload); })
-      .addCase(createSymbol.rejected, (state, action) => { state.saving = false; state.error = action.payload; })
-      .addCase(updateSymbol.pending, (state) => { state.saving = true; state.error = null; })
-      .addCase(updateSymbol.fulfilled, (state, action) => {
-        state.saving = false;
-        const index = state.symbols.findIndex((symbol) => symbol.id === action.payload?.id);
-        if (index !== -1) state.symbols[index] = action.payload;
+
+      // --------------------------------------------------
+      // SYNC MT5 SYMBOLS
+      // --------------------------------------------------
+
+      .addCase(syncSymbols.pending, (state) => {
+        state.syncing = true;
+        state.error = null;
+        state.syncResult = null;
       })
-      .addCase(updateSymbol.rejected, (state, action) => { state.saving = false; state.error = action.payload; })
-      .addCase(removeSymbol.pending, (state) => { state.deleting = true; state.error = null; })
-      .addCase(removeSymbol.fulfilled, (state, action) => {
-        state.deleting = false;
-        state.symbols = state.symbols.filter((symbol) => symbol.id !== action.payload);
+
+      .addCase(syncSymbols.fulfilled, (state, action) => {
+        state.syncing = false;
+        state.syncResult = action.payload;
       })
-      .addCase(removeSymbol.rejected, (state, action) => { state.deleting = false; state.error = action.payload; });
+
+      .addCase(syncSymbols.rejected, (state, action) => {
+        state.syncing = false;
+        state.error = action.payload;
+      })
+
+      // --------------------------------------------------
+      // FETCH ACCOUNT SYMBOLS
+      // --------------------------------------------------
+
+      .addCase(fetchAccountSymbols.pending, (state) => {
+        state.loading = true;
+        state.error = null;
+      })
+
+      .addCase(fetchAccountSymbols.fulfilled, (state, action) => {
+        state.loading = false;
+        state.symbols = normalizeItems(action.payload);
+      })
+
+      .addCase(fetchAccountSymbols.rejected, (state, action) => {
+        state.loading = false;
+        state.error = action.payload;
+      })
+
+      // --------------------------------------------------
+      // FETCH TRADING UNIVERSE
+      // --------------------------------------------------
+
+      .addCase(fetchTradingUniverse.pending, (state) => {
+        state.error = null;
+      })
+
+      .addCase(fetchTradingUniverse.fulfilled, (state, action) => {
+        state.selectedSymbols = normalizeItems(action.payload);
+      })
+
+      .addCase(fetchTradingUniverse.rejected, (state, action) => {
+        state.error = action.payload;
+      })
+
+      // --------------------------------------------------
+      // ENABLE / DISABLE SYMBOL
+      // --------------------------------------------------
+
+      .addCase(setSymbolSelection.pending, (state) => {
+        state.selecting = true;
+        state.error = null;
+      })
+
+      .addCase(setSymbolSelection.fulfilled, (state, action) => {
+        state.selecting = false;
+
+        const updatedSymbol = action.payload;
+
+        const index = state.symbols.findIndex(
+          (symbol) => symbol.id === updatedSymbol.id,
+        );
+
+        if (index !== -1) {
+          state.symbols[index] = updatedSymbol;
+        }
+
+        if (updatedSymbol.enabled) {
+          const alreadySelected = state.selectedSymbols.some(
+            (symbol) => symbol.id === updatedSymbol.id,
+          );
+
+          if (!alreadySelected) {
+            state.selectedSymbols.push(updatedSymbol);
+          }
+        } else {
+          state.selectedSymbols = state.selectedSymbols.filter(
+            (symbol) => symbol.id !== updatedSymbol.id,
+          );
+        }
+      })
+
+      .addCase(setSymbolSelection.rejected, (state, action) => {
+        state.selecting = false;
+        state.error = action.payload;
+      });
   },
 });
 
-export const { clearSymbolsError } = symbolsSlice.actions;
+export const { clearSymbolsError, clearSyncResult } = symbolsSlice.actions;
+
 export default symbolsSlice.reducer;

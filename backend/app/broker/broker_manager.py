@@ -265,7 +265,6 @@ class BrokerManager:
                 f"Failed to retrieve deal history: {exc}"
             ) from exc
 
-
     async def get_tick(self, symbol: str):
         """
         Get the current market tick for a symbol.
@@ -277,6 +276,32 @@ class BrokerManager:
         except Exception as exc:
             raise BrokerSymbolError(
                 f"Failed to retrieve tick for '{symbol}': {exc}"
+            ) from exc
+
+    async def get_candles(
+        self,
+        symbol: str,
+        timeframe: str = "M15",
+        count: int = 200,
+    ):
+        """
+        Get recent OHLC candles for a symbol.
+
+        Used by the engine's market feed to build the price history
+        a strategy needs - separate from get_tick(), which only
+        returns the current price.
+        """
+
+        try:
+            return await self.adapter.get_candles(
+                symbol,
+                timeframe=timeframe,
+                count=count,
+            )
+
+        except Exception as exc:
+            raise BrokerSymbolError(
+                f"Failed to retrieve candles for '{symbol}': {exc}"
             ) from exc
 
     async def get_deals_by_position(

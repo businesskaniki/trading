@@ -282,6 +282,37 @@ class MT5Adapter(BrokerAdapter):
                 f"Failed to retrieve tick for " f"{symbol}: {exc}"
             ) from exc
 
+    async def get_candles(
+        self,
+        symbol: str,
+        timeframe: str = "M15",
+        count: int = 200,
+    ):
+        """
+        Retrieve recent OHLC candles for a symbol.
+
+        Used by the market-data layer to build the price history a
+        strategy needs (e.g. EMA calculations) - separate from
+        get_tick(), which only returns the current price.
+        """
+
+        if not symbol:
+            raise BrokerDataError("Symbol cannot be empty.")
+
+        try:
+            return await self.client.get(
+                f"/symbols/{symbol}/candles",
+                params={
+                    "timeframe": timeframe,
+                    "count": count,
+                },
+            )
+
+        except RuntimeError as exc:
+            raise BrokerDataError(
+                f"Failed to retrieve candles for " f"{symbol}: {exc}"
+            ) from exc
+
     # ==========================================================
     # ORDERS
     # ==========================================================

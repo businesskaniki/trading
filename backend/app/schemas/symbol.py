@@ -1,5 +1,5 @@
+
 from datetime import datetime
-from decimal import Decimal
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -9,75 +9,58 @@ from pydantic import Field
 from app.core.constants import AssetClass
 
 
-# ==========================================================
-# Base Schema
-# ==========================================================
+# ============================================================
+# Base
+# ============================================================
+
 
 class SymbolBase(BaseModel):
     """
-    Shared Symbol fields.
+    Common fields for a canonical AQE symbol.
     """
 
     name: str = Field(
         ...,
+        min_length=1,
         max_length=30,
-        examples=["BTCUSD"],
     )
 
     description: str | None = Field(
         default=None,
         max_length=255,
-    )
-
-    broker_symbol: str = Field(
-        ...,
-        max_length=30,
-        examples=["BTCUSD"],
     )
 
     asset_class: AssetClass
 
-    digits: int = Field(
-        default=5,
-        ge=0,
-    )
 
-    tick_size: Decimal
+# ============================================================
+# Create
+# ============================================================
 
-    contract_size: Decimal = Decimal("100000")
 
-    min_volume: Decimal = Decimal("0.01")
+class SymbolCreate(SymbolBase):
+    """
+    Creates a canonical AQE symbol.
 
-    max_volume: Decimal = Decimal("100.00")
-
-    volume_step: Decimal = Decimal("0.01")
+    Canonical symbols are not tied to a specific broker.
+    """
 
     active: bool = True
 
 
-# ==========================================================
-# Create Schema
-# ==========================================================
+# ============================================================
+# Update
+# ============================================================
 
-class SymbolCreate(SymbolBase):
-    """
-    Payload used when creating a symbol.
-    """
-
-    pass
-
-
-# ==========================================================
-# Update Schema
-# ==========================================================
 
 class SymbolUpdate(BaseModel):
     """
-    Payload used when updating a symbol.
+    Fields that may be modified on a canonical symbol.
     """
 
     name: str | None = Field(
         default=None,
+        min_length=1,
         max_length=30,
     )
 
@@ -86,44 +69,45 @@ class SymbolUpdate(BaseModel):
         max_length=255,
     )
 
-    broker_symbol: str | None = Field(
-        default=None,
-        max_length=30,
-    )
-
     asset_class: AssetClass | None = None
-
-    digits: int | None = Field(
-        default=None,
-        ge=0,
-    )
-
-    tick_size: Decimal | None = None
-
-    contract_size: Decimal | None = None
-
-    min_volume: Decimal | None = None
-
-    max_volume: Decimal | None = None
-
-    volume_step: Decimal | None = None
 
     active: bool | None = None
 
 
-# ==========================================================
-# Response Schema
-# ==========================================================
+# ============================================================
+# Response
+# ============================================================
+
 
 class SymbolResponse(SymbolBase):
     """
-    Returned to API clients.
+    Canonical symbol returned by AQE.
     """
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
 
     id: UUID
+
+    active: bool
 
     created_at: datetime
 
     updated_at: datetime
+
+
+# ============================================================
+# List Response
+# ============================================================
+
+
+class SymbolListResponse(BaseModel):
+    """
+    List of canonical symbols.
+    """
+
+    items: list[SymbolResponse]
+
+    total: int
+

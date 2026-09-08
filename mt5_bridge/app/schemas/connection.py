@@ -9,6 +9,10 @@ class ConnectRequest(BaseModel):
 
 class ConnectionStatus(BaseModel):
     connected: bool
+    login: int | None = None
+    server: str | None = None
+    name: str | None = None
+    last_error: str | None = None
 
 
 class VersionResponse(BaseModel):

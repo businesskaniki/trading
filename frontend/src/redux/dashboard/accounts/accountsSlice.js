@@ -8,6 +8,8 @@ import {
   fetchLiveAccounts,
   fetchAccount,
   updateTradingAccount,
+  connectTradingAccount,
+  disconnectTradingAccount,
   removeTradingAccount,
 } from "./accountsThunks";
 
@@ -44,6 +46,10 @@ const initialState = {
 
   updating: false,
 
+  connecting: false,
+
+  disconnecting: false,
+
   deleting: false,
 
   // ----------------------------------------------------------------------
@@ -60,6 +66,10 @@ const initialState = {
 
   updateSuccess: false,
 
+  connectSuccess: false,
+
+  disconnectSuccess: false,
+
   deleteSuccess: false,
 
   // ----------------------------------------------------------------------
@@ -75,6 +85,16 @@ const accountsSlice = createSlice({
   initialState,
 
   reducers: {
+    // ------------------------------------------------------------------
+    // Select trading account
+    // ------------------------------------------------------------------
+
+    selectAccount: (state, action) => {
+      const account = state.accounts.find((item) => item.id === action.payload);
+
+      state.selectedAccount = account || null;
+    },
+
     // ------------------------------------------------------------------
     // Clear error
     // ------------------------------------------------------------------
@@ -99,6 +119,10 @@ const accountsSlice = createSlice({
       state.createSuccess = false;
 
       state.updateSuccess = false;
+
+      state.connectSuccess = false;
+
+      state.disconnectSuccess = false;
 
       state.deleteSuccess = false;
 
@@ -125,6 +149,22 @@ const accountsSlice = createSlice({
         state.accounts = Array.isArray(action.payload)
           ? action.payload
           : action.payload?.items || [];
+
+        // --------------------------------------------------------------
+        // Preserve the current selection when possible.
+        //
+        // If there is no selected account, automatically select
+        // the first available trading account.
+        // --------------------------------------------------------------
+
+        if (
+          !state.selectedAccount ||
+          !state.accounts.some(
+            (account) => account.id === state.selectedAccount.id,
+          )
+        ) {
+          state.selectedAccount = state.accounts[0] || null;
+        }
 
         state.lastUpdated = new Date().toISOString();
       })
@@ -156,6 +196,12 @@ const accountsSlice = createSlice({
 
         if (action.payload) {
           state.accounts.unshift(action.payload);
+
+          // ----------------------------------------------------------
+          // Automatically select the newly created account.
+          // ----------------------------------------------------------
+
+          state.selectedAccount = action.payload;
         }
 
         state.lastUpdated = new Date().toISOString();
@@ -245,6 +291,20 @@ const accountsSlice = createSlice({
         state.loading = false;
 
         state.selectedAccount = action.payload;
+
+        // --------------------------------------------------------------
+        // Keep the account in the main collection synchronized.
+        // --------------------------------------------------------------
+
+        if (action.payload) {
+          const index = state.accounts.findIndex(
+            (account) => account.id === action.payload.id,
+          );
+
+          if (index !== -1) {
+            state.accounts[index] = action.payload;
+          }
+        }
       })
 
       .addCase(fetchAccount.rejected, (state, action) => {
@@ -298,6 +358,94 @@ const accountsSlice = createSlice({
       });
 
     // ==================================================================
+    // CONNECT ACCOUNT
+    // ==================================================================
+
+    builder
+
+      .addCase(connectTradingAccount.pending, (state) => {
+        state.connecting = true;
+
+        state.connectSuccess = false;
+
+        state.error = null;
+      })
+
+      .addCase(connectTradingAccount.fulfilled, (state, action) => {
+        state.connecting = false;
+
+        state.connectSuccess = true;
+
+        const connectedAccount = action.payload;
+
+        const index = state.accounts.findIndex(
+          (account) => account.id === connectedAccount?.id,
+        );
+
+        if (index !== -1) {
+          state.accounts[index] = connectedAccount;
+        }
+
+        if (state.selectedAccount?.id === connectedAccount?.id) {
+          state.selectedAccount = connectedAccount;
+        }
+
+        state.lastUpdated = new Date().toISOString();
+      })
+
+      .addCase(connectTradingAccount.rejected, (state, action) => {
+        state.connecting = false;
+
+        state.connectSuccess = false;
+
+        state.error = action.payload || "Failed to connect trading account.";
+      });
+
+    // ==================================================================
+    // DISCONNECT ACCOUNT
+    // ==================================================================
+
+    builder
+
+      .addCase(disconnectTradingAccount.pending, (state) => {
+        state.disconnecting = true;
+
+        state.disconnectSuccess = false;
+
+        state.error = null;
+      })
+
+      .addCase(disconnectTradingAccount.fulfilled, (state, action) => {
+        state.disconnecting = false;
+
+        state.disconnectSuccess = true;
+
+        const disconnectedAccount = action.payload;
+
+        const index = state.accounts.findIndex(
+          (account) => account.id === disconnectedAccount?.id,
+        );
+
+        if (index !== -1) {
+          state.accounts[index] = disconnectedAccount;
+        }
+
+        if (state.selectedAccount?.id === disconnectedAccount?.id) {
+          state.selectedAccount = disconnectedAccount;
+        }
+
+        state.lastUpdated = new Date().toISOString();
+      })
+
+      .addCase(disconnectTradingAccount.rejected, (state, action) => {
+        state.disconnecting = false;
+
+        state.disconnectSuccess = false;
+
+        state.error = action.payload || "Failed to disconnect trading account.";
+      });
+
+    // ==================================================================
     // DELETE ACCOUNT
     // ==================================================================
 
@@ -316,24 +464,31 @@ const accountsSlice = createSlice({
 
         state.deleteSuccess = true;
 
+        const deletedAccountId = action.payload;
+
         state.accounts = state.accounts.filter(
-          (account) => account.id !== action.payload,
+          (account) => account.id !== deletedAccountId,
         );
 
         state.activeAccounts = state.activeAccounts.filter(
-          (account) => account.id !== action.payload,
+          (account) => account.id !== deletedAccountId,
         );
 
         state.demoAccounts = state.demoAccounts.filter(
-          (account) => account.id !== action.payload,
+          (account) => account.id !== deletedAccountId,
         );
 
         state.liveAccounts = state.liveAccounts.filter(
-          (account) => account.id !== action.payload,
+          (account) => account.id !== deletedAccountId,
         );
 
-        if (state.selectedAccount?.id === action.payload) {
-          state.selectedAccount = null;
+        // ------------------------------------------------------------
+        // If the deleted account was selected, automatically switch
+        // to another available account.
+        // ------------------------------------------------------------
+
+        if (state.selectedAccount?.id === deletedAccountId) {
+          state.selectedAccount = state.accounts[0] || null;
         }
 
         state.lastUpdated = new Date().toISOString();
@@ -350,6 +505,7 @@ const accountsSlice = createSlice({
 });
 
 export const {
+  selectAccount,
   clearAccountsError,
   clearSelectedAccount,
   clearAccountOperationState,

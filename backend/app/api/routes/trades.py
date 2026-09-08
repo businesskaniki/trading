@@ -10,7 +10,6 @@ from app.core.constants import TradeResult
 from app.schemas.trade import TradeResponse
 from app.services.trade_service import TradeService
 
-
 router = APIRouter(
     prefix="/trades",
     tags=["trades"],
@@ -22,47 +21,37 @@ router = APIRouter(
 # LIST TRADES
 # ==========================================================
 
+
 @router.get(
     "/",
     response_model=list[TradeResponse],
 )
 async def list_trades(
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+    service: TradeService = Depends(get_trade_service),
 ):
     return await service.get_trades()
 
 
 # ==========================================================
-# GET TRADE
+# GET LATEST TRADE
+# IMPORTANT: Must be before /{trade_id}
 # ==========================================================
 
-@router.get(
-    "/{trade_id}",
-    response_model=TradeResponse,
-)
-async def get_trade(
-    trade_id: UUID,
-    service: TradeService = Depends(
-        get_trade_service
-    ),
-):
-    try:
-        return await service.get_trade(
-            trade_id
-        )
 
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=str(exc),
-        ) from exc
+@router.get(
+    "/latest",
+    response_model=TradeResponse | None,
+)
+async def get_latest_trade(
+    service: TradeService = Depends(get_trade_service),
+):
+    return await service.get_latest_trade()
 
 
 # ==========================================================
 # LIST TRADES BY RESULT
 # ==========================================================
+
 
 @router.get(
     "/result/{result}",
@@ -70,18 +59,15 @@ async def get_trade(
 )
 async def list_by_result(
     result: TradeResult,
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+    service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_result_trades(
-        result
-    )
+    return await service.get_result_trades(result)
 
 
 # ==========================================================
 # LIST TRADES BY ACCOUNT
 # ==========================================================
+
 
 @router.get(
     "/account/{account_id}",
@@ -89,18 +75,15 @@ async def list_by_result(
 )
 async def list_by_account(
     account_id: UUID,
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+    service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_account_trades(
-        account_id
-    )
+    return await service.get_account_trades(account_id)
 
 
 # ==========================================================
 # LIST TRADES BY SYMBOL
 # ==========================================================
+
 
 @router.get(
     "/symbol/{symbol_id}",
@@ -108,18 +91,15 @@ async def list_by_account(
 )
 async def list_by_symbol(
     symbol_id: UUID,
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+    service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_symbol_trades(
-        symbol_id
-    )
+    return await service.get_symbol_trades(symbol_id)
 
 
 # ==========================================================
 # LIST TRADES BY STRATEGY
 # ==========================================================
+
 
 @router.get(
     "/strategy/{strategy}",
@@ -127,18 +107,15 @@ async def list_by_symbol(
 )
 async def list_by_strategy(
     strategy: str,
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+    service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_strategy_trades(
-        strategy
-    )
+    return await service.get_strategy_trades(strategy)
 
 
 # ==========================================================
 # GET TRADE BY POSITION
 # ==========================================================
+
 
 @router.get(
     "/position/{position_id}",
@@ -146,14 +123,10 @@ async def list_by_strategy(
 )
 async def get_trade_by_position(
     position_id: UUID,
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+    service: TradeService = Depends(get_trade_service),
 ):
     try:
-        return await service.get_trade_by_position(
-            position_id
-        )
+        return await service.get_trade_by_position(position_id)
 
     except ValueError as exc:
         raise HTTPException(
@@ -163,16 +136,24 @@ async def get_trade_by_position(
 
 
 # ==========================================================
-# GET LATEST TRADE
+# GET TRADE
+# IMPORTANT: Dynamic catch-all route must be LAST
 # ==========================================================
 
+
 @router.get(
-    "/latest",
-    response_model=TradeResponse | None,
+    "/{trade_id}",
+    response_model=TradeResponse,
 )
-async def get_latest_trade(
-    service: TradeService = Depends(
-        get_trade_service
-    ),
+async def get_trade(
+    trade_id: UUID,
+    service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_latest_trade()
+    try:
+        return await service.get_trade(trade_id)
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
