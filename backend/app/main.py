@@ -9,6 +9,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.infrastructure.redis import redis_client
 from app.market_data.consumer import market_data_redis_consumer
+from app.market_data.live import live_tick_hub
 from app.market_data.subscription_manager import (
     market_data_subscription_manager,
 )
@@ -40,6 +41,7 @@ async def lifespan(app: FastAPI):
     await redis_client.connect()
 
     await market_data_redis_consumer.start()
+    await live_tick_hub.start()
 
     # --------------------------------------------------------------
     # Reconcile live market-data subscriptions.
@@ -94,6 +96,7 @@ async def lifespan(app: FastAPI):
 
         # Stop the live market-data consumer.
         await market_data_redis_consumer.stop()
+        await live_tick_hub.stop()
 
         # Finally disconnect Redis.
         await redis_client.disconnect()

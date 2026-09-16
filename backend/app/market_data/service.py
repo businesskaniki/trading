@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.events import MarketCandleEvent, MarketTickEvent, event_bus
+from app.events.bus import event_bus
+from app.events.market import MarketCandleEvent, MarketTickEvent
 from app.services.mt5_bridge_service import (
     MT5BridgeError,
     MT5BridgeService,

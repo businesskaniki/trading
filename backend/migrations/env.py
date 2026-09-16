@@ -16,6 +16,7 @@ from app.database.models.trade import Trade
 from app.database.models.strategy_run import StrategyRun
 from app.database.models.performance import Performance
 from app.database.models.risk_snapshot import RiskSnapshot
+from app.database.models.market_candle import MarketCandle
 from app.database.models.historical_candle import HistoricalCandle
 
 config = context.config
