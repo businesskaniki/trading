@@ -19,13 +19,14 @@ class AccountSymbolRepository:
 
     @staticmethod
     def _symbol_load():
-        """
-        Load the canonical Symbol required by AccountSymbol responses,
-        while explicitly preventing SQLAlchemy from loading the Symbol's
-        large reverse relationships.
+        """Load the canonical Symbol required by AccountSymbol responses, while
+
+        explicitly preventing SQLAlchemy from loading the Symbol's large reverse
+        relationships.
 
         This is important for async SQLAlchemy because accidental lazy
-        loading during Pydantic serialization can cause MissingGreenlet.
+        loading during Pydantic serialization can cause
+        MissingGreenlet.
         """
         return selectinload(AccountSymbol.symbol).options(
             noload(Symbol.account_symbols),
@@ -45,7 +46,9 @@ class AccountSymbolRepository:
         result = await self.db.execute(
             select(AccountSymbol)
             .options(self._symbol_load())
-            .where(AccountSymbol.id == account_symbol_id)
+            .where(
+                AccountSymbol.id == account_symbol_id,
+            )
         )
 
         return result.scalar_one_or_none()
@@ -116,7 +119,9 @@ class AccountSymbolRepository:
             .where(
                 AccountSymbol.account_id == account_id,
             )
-            .order_by(AccountSymbol.broker_symbol.asc())
+            .order_by(
+                AccountSymbol.broker_symbol.asc(),
+            )
         )
 
         return list(result.scalars().all())
@@ -132,7 +137,32 @@ class AccountSymbolRepository:
                 AccountSymbol.account_id == account_id,
                 AccountSymbol.enabled.is_(True),
             )
-            .order_by(AccountSymbol.broker_symbol.asc())
+            .order_by(
+                AccountSymbol.broker_symbol.asc(),
+            )
+        )
+
+        return list(result.scalars().all())
+
+    async def list_all_enabled(
+        self,
+    ) -> list[AccountSymbol]:
+        """Return all enabled AccountSymbols across all trading accounts.
+
+        This is used by the global market-data subscription manager
+        to determine which broker symbols are currently required by
+        AQE.
+        """
+
+        result = await self.db.execute(
+            select(AccountSymbol)
+            .options(self._symbol_load())
+            .where(
+                AccountSymbol.enabled.is_(True),
+            )
+            .order_by(
+                AccountSymbol.broker_symbol.asc(),
+            )
         )
 
         return list(result.scalars().all())
@@ -165,8 +195,9 @@ class AccountSymbolRepository:
         account_id: UUID,
     ) -> int:
         result = await self.db.execute(
-            select(func.count(AccountSymbol.id))
-            .where(AccountSymbol.account_id == account_id)
+            select(func.count(AccountSymbol.id)).where(
+                AccountSymbol.account_id == account_id,
+            )
         )
 
         return int(result.scalar_one())
@@ -180,6 +211,7 @@ class AccountSymbolRepository:
         account_symbol: AccountSymbol,
     ) -> AccountSymbol:
         self.db.add(account_symbol)
+
         return account_symbol
 
     def add_many(
@@ -187,6 +219,7 @@ class AccountSymbolRepository:
         account_symbols: list[AccountSymbol],
     ) -> list[AccountSymbol]:
         self.db.add_all(account_symbols)
+
         return account_symbols
 
     def update(
@@ -194,6 +227,7 @@ class AccountSymbolRepository:
         account_symbol: AccountSymbol,
     ) -> AccountSymbol:
         self.db.add(account_symbol)
+
         return account_symbol
 
     async def delete(
@@ -220,7 +254,9 @@ class AccountSymbolRepository:
         result = await self.db.execute(
             select(AccountSymbol)
             .options(self._symbol_load())
-            .where(AccountSymbol.id == account_symbol.id)
+            .where(
+                AccountSymbol.id == account_symbol.id,
+            )
         )
 
         refreshed = result.scalar_one()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -283,7 +284,9 @@ class MT5BridgeService:
         self,
         symbol: str,
         timeframe: str = "M15",
-        count: int = 200,
+        count: int | None = 200,
+        start: datetime | None = None,
+        end: datetime | None = None,
     ) -> list[dict[str, Any]]:
         """
         Retrieve historical candles from the MT5 bridge.
@@ -292,10 +295,31 @@ class MT5BridgeService:
 
             GET /market-data/candles/{symbol}
 
-        Query parameters:
+        Supported query parameters:
 
             timeframe=M15
             count=200
+            start=2026-09-08T10:00:00Z
+            end=2026-09-08T12:00:00Z
+
+        Two retrieval modes are supported:
+
+        1. Initial synchronization:
+
+            count=200
+
+           Retrieves the latest number of candles.
+
+        2. Incremental synchronization:
+
+            start=<timestamp>
+            end=<timestamp>
+
+           Retrieves candles for a specific historical range.
+
+        `start` and `end` take precedence over `count`.
+
+        The broker-specific symbol name is preserved exactly.
         """
 
         symbol = self._validate_symbol(symbol)
@@ -305,17 +329,74 @@ class MT5BridgeService:
         if not timeframe:
             raise MT5BridgeError("Timeframe cannot be empty.")
 
-        if count <= 0:
+        if count is not None and count <= 0:
             raise MT5BridgeError("Candle count must be greater than zero.")
+
+        # --------------------------------------------------------------
+        # Normalize timestamps to UTC.
+        # --------------------------------------------------------------
+
+        start = self._normalize_datetime(
+            start,
+            field_name="start",
+        )
+
+        end = self._normalize_datetime(
+            end,
+            field_name="end",
+        )
+
+        # --------------------------------------------------------------
+        # Validate range.
+        # --------------------------------------------------------------
+
+        if start is not None and end is not None and start > end:
+            raise MT5BridgeError(
+                "Candle start time must be earlier than or equal to " "the end time."
+            )
+
+        # --------------------------------------------------------------
+        # Build query parameters.
+        # --------------------------------------------------------------
+
+        params: dict[str, Any] = {
+            "timeframe": timeframe,
+        }
+
+        if start is not None:
+            params["start"] = start.isoformat()
+
+        if end is not None:
+            params["end"] = end.isoformat()
+
+        # Only send count when no range is being requested.
+        #
+        # This preserves the semantics of:
+        #
+        #     count=200
+        #
+        # for initial synchronization.
+        #
+        # Incremental synchronization instead uses:
+        #
+        #     start=...
+        #     end=...
+        #
+        if start is None and end is None:
+            if count is None:
+                count = 200
+
+            params["count"] = count
 
         response = await self._request(
             method="GET",
             path=f"/market-data/candles/{symbol}",
-            params={
-                "timeframe": timeframe,
-                "count": count,
-            },
+            params=params,
         )
+
+        # --------------------------------------------------------------
+        # Normalize bridge response envelope.
+        # --------------------------------------------------------------
 
         # The bridge returns:
         #
@@ -346,8 +427,11 @@ class MT5BridgeService:
 
             return candles
 
-        # Support a direct list response as well. This makes the
-        # service tolerant of a future bridge response change.
+        # Support a direct list response as well.
+        #
+        # This makes the service tolerant of a future bridge
+        # response change.
+
         if isinstance(response, list):
             for index, candle in enumerate(response):
                 if not isinstance(candle, dict):
@@ -435,6 +519,32 @@ class MT5BridgeService:
             raise MT5BridgeError("Symbol cannot be empty.")
 
         return symbol
+
+    @staticmethod
+    def _normalize_datetime(
+        value: datetime | None,
+        field_name: str,
+    ) -> datetime | None:
+        """
+        Normalize a datetime to timezone-aware UTC.
+
+        Naive datetimes are interpreted as UTC.
+        """
+
+        if value is None:
+            return None
+
+        if not isinstance(value, datetime):
+            raise MT5BridgeError(f"{field_name} must be a datetime.")
+
+        if value.tzinfo is None:
+            return value.replace(
+                tzinfo=timezone.utc,
+            )
+
+        return value.astimezone(
+            timezone.utc,
+        )
 
     @staticmethod
     def _extract_error_detail(

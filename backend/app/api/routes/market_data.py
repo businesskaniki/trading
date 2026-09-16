@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException, Query
 
-from app.market_data import (
+from app.market_data.service import (
     MarketDataError,
     MarketDataService,
 )

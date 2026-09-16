@@ -10,3 +10,4 @@ from .user import User
 from .email_verification import EmailVerification
 from .password_reset import PasswordReset
 from .account_symbol import AccountSymbol
+from .historical_candle import HistoricalCandle

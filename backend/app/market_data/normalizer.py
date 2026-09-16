@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+import math
+from datetime import datetime, timezone
 from typing import Any
 
 from .models import MarketCandle, MarketTick
@@ -8,8 +9,8 @@ from .models import MarketCandle, MarketTick
 
 class MarketDataNormalizationError(Exception):
     """
-    Raised when broker market-data cannot be converted into
-    an AQE-native market-data object.
+    Raised when broker market-data cannot be normalized into
+    an AQE-native MarketTick or MarketCandle.
     """
 
     pass
@@ -17,85 +18,98 @@ class MarketDataNormalizationError(Exception):
 
 class MarketDataNormalizer:
     """
-    Converts raw MT5 Bridge responses into AQE-native market data.
+    Converts raw MT5 Bridge responses into AQE-native market-data models.
 
-    The rest of AQE should not need to know the exact JSON structure
-    returned by the MT5 Bridge.
+    Responsibilities
+    ----------------
+    - Validate broker response structure.
+    - Normalize numeric values.
+    - Normalize timestamps.
+    - Construct MarketTick and MarketCandle objects.
+    - Reject malformed or unsafe market data.
+
+    This class contains no HTTP, Redis, database, or MT5-specific
+    communication logic.
+
+    Input
+    -----
+    Raw data returned by MT5BridgeService.
+
+    Output
+    ------
+    MarketTick / MarketCandle.
     """
 
-    @staticmethod
+    # ==================================================================
+    # TICK
+    # ==================================================================
+
     def tick(
-        data: Mapping[str, Any],
-        symbol: str | None = None,
+        self,
+        *,
+        data: Any,
+        symbol: str,
     ) -> MarketTick:
         """
-        Normalize a bridge tick response.
+        Normalize one broker tick into an AQE MarketTick.
+
+        Expected broker payload:
+
+            {
+                "symbol": "EURUSD",
+                "timestamp": 1234567890,
+                "bid": 1.1000,
+                "ask": 1.1002,
+                "last": 1.1001,
+                "volume": 10,
+                "volume_real": 10.0
+            }
+
+        The symbol supplied by the caller is authoritative because
+        the bridge endpoint was requested for that symbol.
         """
 
-        if not isinstance(data, Mapping):
-            raise MarketDataNormalizationError("Tick response must be a mapping.")
+        normalized_symbol = self._normalize_symbol(symbol)
 
-        resolved_symbol = str(symbol or data.get("symbol", "")).strip()
+        payload = self._normalize_mapping(data)
 
-        if not resolved_symbol:
-            raise MarketDataNormalizationError("Market tick does not contain a symbol.")
+        timestamp = self._extract_timestamp(
+            payload,
+            field_names=("timestamp", "time"),
+        )
 
-        try:
-            timestamp = int(
-                data.get(
-                    "timestamp",
-                    data.get(
-                        "time",
-                        0,
-                    ),
-                )
-            )
+        bid = self._extract_float(
+            payload,
+            field_name="bid",
+            required=True,
+        )
 
-            bid = float(
-                data.get(
-                    "bid",
-                    0.0,
-                )
-            )
+        ask = self._extract_float(
+            payload,
+            field_name="ask",
+            required=True,
+        )
 
-            ask = float(
-                data.get(
-                    "ask",
-                    0.0,
-                )
-            )
+        last = self._extract_float(
+            payload,
+            field_name="last",
+            default=0.0,
+        )
 
-            last = float(
-                data.get(
-                    "last",
-                    0.0,
-                )
-            )
+        volume = self._extract_int(
+            payload,
+            field_name="volume",
+            default=0,
+        )
 
-            volume = int(
-                data.get(
-                    "volume",
-                    0,
-                )
-            )
-
-            volume_real = float(
-                data.get(
-                    "volume_real",
-                    0.0,
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ) as exc:
-            raise MarketDataNormalizationError(
-                f"Invalid tick data for {resolved_symbol}."
-            ) from exc
+        volume_real = self._extract_float(
+            payload,
+            field_name="volume_real",
+            default=0.0,
+        )
 
         tick = MarketTick(
-            symbol=resolved_symbol,
+            symbol=normalized_symbol,
             timestamp=timestamp,
             bid=bid,
             ask=ask,
@@ -104,149 +118,530 @@ class MarketDataNormalizer:
             volume_real=volume_real,
         )
 
-        if not tick.is_valid():
+        errors = tick.validation_errors()
+
+        if errors:
             raise MarketDataNormalizationError(
-                f"Invalid normalized tick for {resolved_symbol}."
+                "Invalid normalized MarketTick for "
+                f"{normalized_symbol!r}: " + "; ".join(errors)
             )
 
         return tick
 
-    @staticmethod
-    def candle(
-        data: Mapping[str, Any],
-        symbol: str,
-        timeframe: str,
-    ) -> MarketCandle:
-        """
-        Normalize a single bridge candle response.
-        """
+    # ==================================================================
+    # CANDLES
+    # ==================================================================
 
-        if not isinstance(data, Mapping):
-            raise MarketDataNormalizationError("Candle response must be a mapping.")
-
-        resolved_symbol = symbol.strip()
-        resolved_timeframe = timeframe.strip().upper()
-
-        if not resolved_symbol:
-            raise MarketDataNormalizationError("Candle symbol cannot be empty.")
-
-        if not resolved_timeframe:
-            raise MarketDataNormalizationError("Candle timeframe cannot be empty.")
-
-        try:
-            timestamp = int(
-                data.get(
-                    "timestamp",
-                    data.get(
-                        "time",
-                        0,
-                    ),
-                )
-            )
-
-            open_price = float(
-                data.get(
-                    "open",
-                    0.0,
-                )
-            )
-
-            high = float(
-                data.get(
-                    "high",
-                    0.0,
-                )
-            )
-
-            low = float(
-                data.get(
-                    "low",
-                    0.0,
-                )
-            )
-
-            close = float(
-                data.get(
-                    "close",
-                    0.0,
-                )
-            )
-
-            volume = int(
-                data.get(
-                    "volume",
-                    data.get(
-                        "tick_volume",
-                        0,
-                    ),
-                )
-            )
-
-            spread = int(
-                data.get(
-                    "spread",
-                    0,
-                )
-            )
-
-        except (
-            TypeError,
-            ValueError,
-        ) as exc:
-            raise MarketDataNormalizationError(
-                f"Invalid candle data for " f"{resolved_symbol} {resolved_timeframe}."
-            ) from exc
-
-        candle = MarketCandle(
-            symbol=resolved_symbol,
-            timeframe=resolved_timeframe,
-            timestamp=timestamp,
-            open=open_price,
-            high=high,
-            low=low,
-            close=close,
-            volume=volume,
-            spread=spread,
-        )
-
-        if not candle.is_valid():
-            raise MarketDataNormalizationError(
-                f"Invalid normalized candle for "
-                f"{resolved_symbol} {resolved_timeframe}."
-            )
-
-        return candle
-
-    @classmethod
     def candles(
-        cls,
+        self,
+        *,
         data: Any,
         symbol: str,
         timeframe: str,
     ) -> list[MarketCandle]:
         """
-        Normalize a list of bridge candle responses.
+        Normalize broker candle data into AQE MarketCandle objects.
+
+        The bridge may return candles as:
+
+            [
+                {
+                    "time": 1234567890,
+                    "open": 1.0,
+                    "high": 1.1,
+                    "low": 0.9,
+                    "close": 1.05,
+                    "volume": 100,
+                    "spread": 2,
+                }
+            ]
+
+        or wrapped inside:
+
+            {
+                "candles": [...]
+            }
+
+        Both forms are supported.
         """
 
-        if not isinstance(data, list):
-            raise MarketDataNormalizationError("Candle response must be a list.")
+        normalized_symbol = self._normalize_symbol(symbol)
+        normalized_timeframe = self._normalize_timeframe(timeframe)
+
+        records = self._normalize_candle_collection(data)
 
         result: list[MarketCandle] = []
 
-        for index, item in enumerate(data):
-
+        for index, record in enumerate(records):
             try:
-                candle = cls.candle(
-                    data=item,
-                    symbol=symbol,
-                    timeframe=timeframe,
+                candle = self._normalize_candle(
+                    record=record,
+                    symbol=normalized_symbol,
+                    timeframe=normalized_timeframe,
                 )
 
             except MarketDataNormalizationError as exc:
                 raise MarketDataNormalizationError(
-                    f"Invalid candle at index {index}: {exc}"
+                    f"Failed to normalize candle at index {index} "
+                    f"for {normalized_symbol!r} "
+                    f"timeframe={normalized_timeframe!r}: {exc}"
                 ) from exc
 
             result.append(candle)
 
         return result
+
+    # ==================================================================
+    # SINGLE CANDLE
+    # ==================================================================
+
+    def _normalize_candle(
+        self,
+        *,
+        record: Any,
+        symbol: str,
+        timeframe: str,
+    ) -> MarketCandle:
+        payload = self._normalize_mapping(record)
+
+        timestamp = self._extract_timestamp(
+            payload,
+            field_names=("timestamp", "time"),
+        )
+
+        open_price = self._extract_float(
+            payload,
+            field_name="open",
+            required=True,
+        )
+
+        high_price = self._extract_float(
+            payload,
+            field_name="high",
+            required=True,
+        )
+
+        low_price = self._extract_float(
+            payload,
+            field_name="low",
+            required=True,
+        )
+
+        close_price = self._extract_float(
+            payload,
+            field_name="close",
+            required=True,
+        )
+
+        volume = self._extract_int(
+            payload,
+            field_name="volume",
+            default=0,
+            aliases=("tick_volume",),
+        )
+
+        spread = self._extract_int(
+            payload,
+            field_name="spread",
+            default=0,
+        )
+
+        candle = MarketCandle(
+            symbol=symbol,
+            timeframe=timeframe,
+            timestamp=timestamp,
+            open=open_price,
+            high=high_price,
+            low=low_price,
+            close=close_price,
+            volume=volume,
+            spread=spread,
+        )
+
+        errors = candle.validation_errors()
+
+        if errors:
+            raise MarketDataNormalizationError(
+                "Invalid normalized MarketCandle: " + "; ".join(errors)
+            )
+
+        return candle
+
+    # ==================================================================
+    # SYMBOL
+    # ==================================================================
+
+    @staticmethod
+    def _normalize_symbol(symbol: Any) -> str:
+        if not isinstance(symbol, str):
+            raise MarketDataNormalizationError("Symbol must be a string.")
+
+        normalized = symbol.strip()
+
+        if not normalized:
+            raise MarketDataNormalizationError("Symbol cannot be empty.")
+
+        return normalized
+
+    @staticmethod
+    def _normalize_timeframe(timeframe: Any) -> str:
+        if not isinstance(timeframe, str):
+            raise MarketDataNormalizationError("Timeframe must be a string.")
+
+        normalized = timeframe.strip().upper()
+
+        if not normalized:
+            raise MarketDataNormalizationError("Timeframe cannot be empty.")
+
+        return normalized
+
+    # ==================================================================
+    # MAPPING
+    # ==================================================================
+
+    @staticmethod
+    def _normalize_mapping(data: Any) -> dict[str, Any]:
+        """
+        Convert a broker response into a dictionary.
+
+        Supports:
+
+        - dict
+        - objects exposing model_dump()
+        - objects exposing _asdict()
+        """
+
+        if isinstance(data, dict):
+            return dict(data)
+
+        model_dump = getattr(data, "model_dump", None)
+
+        if callable(model_dump):
+            try:
+                result = model_dump()
+
+            except Exception as exc:
+                raise MarketDataNormalizationError(
+                    "Failed to convert broker response using model_dump()."
+                ) from exc
+
+            if isinstance(result, dict):
+                return dict(result)
+
+        asdict = getattr(data, "_asdict", None)
+
+        if callable(asdict):
+            try:
+                result = asdict()
+
+            except Exception as exc:
+                raise MarketDataNormalizationError(
+                    "Failed to convert broker response using _asdict()."
+                ) from exc
+
+            if isinstance(result, dict):
+                return dict(result)
+
+        raise MarketDataNormalizationError(
+            "Broker market-data response must be a mapping or "
+            "an object exposing model_dump() or _asdict()."
+        )
+
+    # ==================================================================
+    # CANDLE COLLECTION
+    # ==================================================================
+
+    @classmethod
+    def _normalize_candle_collection(
+        cls,
+        data: Any,
+    ) -> list[Any]:
+        """
+        Normalize the different candle response shapes supported
+        by the Bridge.
+        """
+
+        if isinstance(data, dict):
+            if "candles" in data:
+                data = data["candles"]
+
+            elif "data" in data:
+                data = data["data"]
+
+            else:
+                raise MarketDataNormalizationError(
+                    "Candle response dictionary does not contain "
+                    "'candles' or 'data'."
+                )
+
+        if data is None:
+            raise MarketDataNormalizationError("Candle response is empty.")
+
+        if isinstance(data, (str, bytes, bytearray)):
+            raise MarketDataNormalizationError(
+                "Candle response must be a collection of candle records."
+            )
+
+        try:
+            records = list(data)
+
+        except TypeError as exc:
+            raise MarketDataNormalizationError(
+                "Candle response is not iterable."
+            ) from exc
+
+        return records
+
+    # ==================================================================
+    # TIMESTAMP
+    # ==================================================================
+
+    @classmethod
+    def _extract_timestamp(
+        cls,
+        payload: dict[str, Any],
+        *,
+        field_names: tuple[str, ...],
+    ) -> int:
+        """
+        Extract and normalize a Unix timestamp.
+
+        Supported values:
+
+        - int
+        - float
+        - numeric string
+        - datetime
+        - ISO datetime string
+        """
+
+        value = cls._first_present(
+            payload,
+            field_names,
+        )
+
+        if value is None:
+            raise MarketDataNormalizationError(
+                f"Missing timestamp field. Expected one of: "
+                f"{', '.join(field_names)}."
+            )
+
+        if isinstance(value, bool):
+            raise MarketDataNormalizationError("Timestamp must not be boolean.")
+
+        if isinstance(value, datetime):
+            return cls._datetime_to_timestamp(value)
+
+        if isinstance(value, int):
+            timestamp = value
+
+        elif isinstance(value, float):
+            if not math.isfinite(value):
+                raise MarketDataNormalizationError(
+                    f"Timestamp must be finite, got {value!r}."
+                )
+
+            timestamp = int(value)
+
+        elif isinstance(value, str):
+            raw = value.strip()
+
+            if not raw:
+                raise MarketDataNormalizationError("Timestamp must not be empty.")
+
+            timestamp = cls._parse_timestamp_string(raw)
+
+        else:
+            raise MarketDataNormalizationError(
+                "Timestamp must be an integer-compatible value, "
+                "datetime, or ISO datetime string; "
+                f"got {type(value).__name__}."
+            )
+
+        if timestamp <= 0:
+            raise MarketDataNormalizationError(
+                f"Timestamp must be greater than 0, got {timestamp}."
+            )
+
+        return timestamp
+
+    @staticmethod
+    def _datetime_to_timestamp(value: datetime) -> int:
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        else:
+            value = value.astimezone(timezone.utc)
+
+        timestamp = int(value.timestamp())
+
+        if timestamp <= 0:
+            raise MarketDataNormalizationError(
+                f"Timestamp must be greater than 0, got {timestamp}."
+            )
+
+        return timestamp
+
+    @classmethod
+    def _parse_timestamp_string(
+        cls,
+        value: str,
+    ) -> int:
+        """
+        Parse either a numeric timestamp or an ISO datetime.
+        """
+
+        try:
+            numeric = float(value)
+
+        except ValueError:
+            numeric = None
+
+        if numeric is not None:
+            if not math.isfinite(numeric):
+                raise MarketDataNormalizationError(
+                    f"Timestamp must be finite, got {value!r}."
+                )
+
+            return int(numeric)
+
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+        except ValueError as exc:
+            raise MarketDataNormalizationError(
+                f"Invalid timestamp value: {value!r}."
+            ) from exc
+
+        return cls._datetime_to_timestamp(parsed)
+
+    # ==================================================================
+    # FLOAT
+    # ==================================================================
+
+    @classmethod
+    def _extract_float(
+        cls,
+        payload: dict[str, Any],
+        *,
+        field_name: str,
+        default: float | None = None,
+        required: bool = False,
+    ) -> float:
+        value = payload.get(field_name)
+
+        if value is None:
+            if required:
+                raise MarketDataNormalizationError(
+                    f"Missing required field: {field_name}."
+                )
+
+            if default is None:
+                raise MarketDataNormalizationError(f"Missing field: {field_name}.")
+
+            return default
+
+        if isinstance(value, bool):
+            raise MarketDataNormalizationError(f"{field_name} must not be boolean.")
+
+        try:
+            result = float(value)
+
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise MarketDataNormalizationError(
+                f"{field_name} is not a valid number: {value!r}."
+            ) from exc
+
+        if not math.isfinite(result):
+            raise MarketDataNormalizationError(
+                f"{field_name} must be finite, got {value!r}."
+            )
+
+        return result
+
+    # ==================================================================
+    # INTEGER
+    # ==================================================================
+
+    @classmethod
+    def _extract_int(
+        cls,
+        payload: dict[str, Any],
+        *,
+        field_name: str,
+        default: int | None = None,
+        aliases: tuple[str, ...] = (),
+    ) -> int:
+        value = cls._first_present(
+            payload,
+            (field_name, *aliases),
+        )
+
+        if value is None:
+            if default is None:
+                raise MarketDataNormalizationError(f"Missing field: {field_name}.")
+
+            return default
+
+        if isinstance(value, bool):
+            raise MarketDataNormalizationError(f"{field_name} must not be boolean.")
+
+        if isinstance(value, int):
+            return value
+
+        if isinstance(value, float):
+            if not math.isfinite(value):
+                raise MarketDataNormalizationError(
+                    f"{field_name} must be finite, got {value!r}."
+                )
+
+            if not value.is_integer():
+                raise MarketDataNormalizationError(
+                    f"{field_name} must be an integer, got {value!r}."
+                )
+
+            return int(value)
+
+        if isinstance(value, str):
+            raw = value.strip()
+
+            if not raw:
+                raise MarketDataNormalizationError(f"{field_name} must not be empty.")
+
+            try:
+                numeric = float(raw)
+
+            except ValueError as exc:
+                raise MarketDataNormalizationError(
+                    f"{field_name} is not a valid integer: {value!r}."
+                ) from exc
+
+            if not math.isfinite(numeric):
+                raise MarketDataNormalizationError(
+                    f"{field_name} must be finite, got {value!r}."
+                )
+
+            if not numeric.is_integer():
+                raise MarketDataNormalizationError(
+                    f"{field_name} must be an integer, got {value!r}."
+                )
+
+            return int(numeric)
+
+        raise MarketDataNormalizationError(
+            f"{field_name} must be integer-compatible, " f"got {type(value).__name__}."
+        )
+
+    # ==================================================================
+    # HELPERS
+    # ==================================================================
+
+    @staticmethod
+    def _first_present(
+        payload: dict[str, Any],
+        field_names: tuple[str, ...],
+    ) -> Any:
+        for field_name in field_names:
+            if field_name in payload:
+                return payload[field_name]
+
+        return None

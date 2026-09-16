@@ -33,10 +33,41 @@ class RedisStreamConsumer:
     - Manage a Redis Stream consumer group.
     - Read messages using XREADGROUP.
     - Dispatch messages to an application handler.
-    - ACK messages only after successful processing.
+    - ACK successfully processed messages.
+    - ACK permanently invalid/poison messages so they do not retry forever.
+    - Leave transient processing failures pending for retry.
     - Recover stale pending messages.
     - Handle Redis Stream failures without killing the application.
     - Shut down cleanly.
+
+    Message-processing policy
+    -------------------------
+    There are three possible outcomes when processing a message:
+
+        1. Successful processing
+            handler succeeds
+                ↓
+            XACK
+                ↓
+            message removed from PEL
+
+        2. Permanent message error
+            handler raises RedisMessageError
+                ↓
+            log poison message
+                ↓
+            XACK
+                ↓
+            message removed from PEL
+
+        3. Transient/unexpected processing error
+            handler raises another exception
+                ↓
+            NO XACK
+                ↓
+            message remains pending
+                ↓
+            stale-message recovery retries it
 
     The consumer contains no trading/business logic.
     """
@@ -234,10 +265,11 @@ class RedisStreamConsumer:
         Returns:
             Number of successfully processed messages.
 
-        A timeout resulting from an empty blocking read is not treated
-        as a message-processing failure by this method. The underlying
-        RedisStream abstraction is expected to translate transport
-        errors into RedisStreamError.
+        Permanently invalid messages are acknowledged and removed from
+        the pending entries list, but are not counted as successfully
+        processed.
+
+        Transient processing failures remain pending for recovery.
         """
 
         if self._handler is None:
@@ -286,7 +318,12 @@ class RedisStreamConsumer:
         least ``claim_idle_ms``.
 
         Returns:
-            Number of successfully recovered messages.
+            Number of successfully recovered and processed messages.
+
+        Permanently invalid messages are acknowledged and removed from
+        the pending list but are not counted as successfully processed.
+
+        Transient processing failures remain pending.
         """
 
         if self._handler is None:
@@ -384,9 +421,10 @@ class RedisStreamConsumer:
             ↓
             process
             ↓
-            ACK
+            ACK successful or permanently invalid messages
 
-        Redis failures are retried without terminating the consumer.
+        Redis failures and transient processing failures are retried
+        without terminating the consumer.
         """
 
         recovery_interval_seconds = self.recovery_interval_ms / 1000.0
@@ -487,17 +525,24 @@ class RedisStreamConsumer:
         """
         Process a single Redis Stream message.
 
-        ACK is performed only after the handler completes successfully.
+        Processing outcomes:
 
-        If processing fails:
+        1. Handler succeeds:
+               XACK
+               return True
 
-            handler failure
-                ↓
-            no ACK
-                ↓
-            message remains pending
-                ↓
-            future recovery can retry it
+        2. Handler raises RedisMessageError:
+               message is permanently invalid
+               XACK
+               return False
+
+        3. Handler raises another exception:
+               message may be recoverable
+               NO XACK
+               return False
+
+        Redis infrastructure failures occurring during ACK are allowed
+        to propagate so the outer consumer loop can handle them.
         """
 
         if self._handler is None:
@@ -513,30 +558,62 @@ class RedisStreamConsumer:
             if inspect.isawaitable(result):
                 await result
 
-            await self.stream.acknowledge(
-                self.stream_name,
-                self.group_name,
-                message_id,
-            )
+        except asyncio.CancelledError:
+            raise
 
-            logger.debug(
-                "Redis Stream message processed and acknowledged. "
-                "stream=%s group=%s consumer=%s message_id=%s",
+        except RedisMessageError as exc:
+            # ----------------------------------------------------------
+            # Permanent message failure / poison message
+            # ----------------------------------------------------------
+            #
+            # The message itself is invalid and retrying it will never
+            # make it valid. ACK it so it does not remain permanently
+            # pending.
+            #
+            # Example:
+            #
+            # timestamp=0
+            # bid=0
+            # ask=0
+            #
+            # MarketDataConsumer raises RedisMessageError.
+            # We ACK it here.
+            # ----------------------------------------------------------
+
+            logger.error(
+                "Redis Stream poison message rejected. "
+                "Message will be acknowledged and removed from pending. "
+                "stream=%s group=%s consumer=%s message_id=%s "
+                "error=%s fields=%r",
                 stream_name,
                 self.group_name,
                 self.consumer_name,
                 message_id,
+                exc,
+                fields,
             )
 
-            return True
+            await self._acknowledge_message(
+                stream_name=stream_name,
+                message_id=message_id,
+            )
 
-        except asyncio.CancelledError:
-            raise
+            return False
 
         except Exception:
+            # ----------------------------------------------------------
+            # Transient / unexpected processing failure
+            # ----------------------------------------------------------
+            #
+            # Do NOT ACK.
+            #
+            # The message remains in the Pending Entries List and can
+            # later be claimed by recover_pending().
+            # ----------------------------------------------------------
+
             logger.exception(
                 "Redis Stream message processing failed. "
-                "Message remains pending. "
+                "Message remains pending for retry. "
                 "stream=%s group=%s consumer=%s message_id=%s",
                 stream_name,
                 self.group_name,
@@ -545,6 +622,77 @@ class RedisStreamConsumer:
             )
 
             return False
+
+        # ------------------------------------------------------------------
+        # Successful processing
+        # ------------------------------------------------------------------
+
+        await self._acknowledge_message(
+            stream_name=stream_name,
+            message_id=message_id,
+        )
+
+        logger.debug(
+            "Redis Stream message processed and acknowledged. "
+            "stream=%s group=%s consumer=%s message_id=%s",
+            stream_name,
+            self.group_name,
+            self.consumer_name,
+            message_id,
+        )
+
+        return True
+
+    # ------------------------------------------------------------------
+    # Acknowledgement
+    # ------------------------------------------------------------------
+
+    async def _acknowledge_message(
+        self,
+        *,
+        stream_name: str,
+        message_id: str,
+    ) -> None:
+        """
+        Acknowledge a Redis Stream message.
+
+        ACK failures are deliberately allowed to propagate.
+
+        If Redis cannot acknowledge the message, the message may remain
+        pending. That is preferable to pretending that the message was
+        successfully acknowledged.
+        """
+
+        try:
+            await self.stream.acknowledge(
+                self.stream_name,
+                self.group_name,
+                message_id,
+            )
+
+        except RedisStreamError:
+            logger.exception(
+                "Failed to acknowledge Redis Stream message. "
+                "Message may remain pending. "
+                "stream=%s group=%s consumer=%s message_id=%s",
+                stream_name,
+                self.group_name,
+                self.consumer_name,
+                message_id,
+            )
+            raise
+
+        except Exception:
+            logger.exception(
+                "Unexpected error while acknowledging Redis Stream "
+                "message. Message may remain pending. "
+                "stream=%s group=%s consumer=%s message_id=%s",
+                stream_name,
+                self.group_name,
+                self.consumer_name,
+                message_id,
+            )
+            raise
 
     # ------------------------------------------------------------------
     # Retry handling
@@ -563,6 +711,7 @@ class RedisStreamConsumer:
 
         try:
             await asyncio.sleep(delay_seconds)
+
         except asyncio.CancelledError:
             raise
 

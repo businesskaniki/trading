@@ -100,6 +100,13 @@ class Symbol(UUIDMixin, TimestampMixin, Base):
     # Trading Relationships
     # ==========================================================
 
+    historical_candles: Mapped[list["HistoricalCandle"]] = relationship(
+        "HistoricalCandle",
+        back_populates="symbol",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
     orders: Mapped[list["Order"]] = relationship(
         "Order",
         back_populates="symbol",
