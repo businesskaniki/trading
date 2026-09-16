@@ -3,6 +3,7 @@ from datetime import datetime
 from sqlalchemy import Boolean
 from sqlalchemy import DateTime
 from sqlalchemy import String
+from sqlalchemy import Integer
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import Mapped
 from sqlalchemy.orm import mapped_column
@@ -41,6 +42,14 @@ class User(UUIDMixin, TimestampMixin, Base):
     is_superuser: Mapped[bool] = mapped_column(
         Boolean,
         default=False,
+        nullable=False,
+    )
+
+    # Incrementing this value invalidates every access and refresh token
+    # previously issued to the user.
+    token_version: Mapped[int] = mapped_column(
+        Integer,
+        default=0,
         nullable=False,
     )
 

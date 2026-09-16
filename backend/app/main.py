@@ -9,6 +9,7 @@ from app.api.router import api_router
 from app.core.config import settings
 from app.infrastructure.redis import redis_client
 from app.market_data.consumer import market_data_redis_consumer
+from app.market_data.live import live_tick_hub
 
 
 @asynccontextmanager
@@ -32,6 +33,7 @@ async def lifespan(app: FastAPI):
     await redis_client.connect()
 
     await market_data_redis_consumer.start()
+    await live_tick_hub.start()
 
     try:
         yield
@@ -42,6 +44,7 @@ async def lifespan(app: FastAPI):
         # =====================================================
 
         await market_data_redis_consumer.stop()
+        await live_tick_hub.stop()
 
         await redis_client.disconnect()
 

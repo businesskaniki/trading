@@ -26,3 +26,11 @@ def test_tick_stream_requires_access_token():
 def test_tick_stream_accepts_access_token():
     payload = verify_token(create_access_token("user-1"), expected_type="access")
     assert payload["sub"] == "user-1"
+
+
+def test_tokens_include_the_user_token_version():
+    payload = verify_token(
+        create_access_token("user-1", token_version=4),
+        expected_type="access",
+    )
+    assert payload["ver"] == 4

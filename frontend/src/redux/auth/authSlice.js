@@ -20,11 +20,6 @@ const storedAccessToken =
         "access_token"
     );
 
-const storedRefreshToken =
-    localStorage.getItem(
-        "refresh_token"
-    );
-
 const storedUser =
     localStorage.getItem("user");
 
@@ -50,12 +45,9 @@ const initialState = {
     accessToken:
         storedAccessToken,
 
-    refreshToken:
-        storedRefreshToken,
+    refreshToken: null,
 
-    isAuthenticated:
-        !!storedAccessToken &&
-        !!storedRefreshToken,
+    isAuthenticated: !!storedAccessToken,
 
     // VERY IMPORTANT
     //
