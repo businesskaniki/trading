@@ -1,12 +1,12 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.dependencies import get_user_service
 from app.core.security import (
     create_access_token,
     create_refresh_token,
-    oauth2_scheme,
     verify_token,
 )
+from app.core.config import settings
 from app.schemas.auth import (
     LoginRequest,
     RefreshTokenRequest,
@@ -27,6 +27,21 @@ router = APIRouter(
     prefix="/auth",
     tags=["Authentication"],
 )
+
+
+REFRESH_COOKIE_NAME = "refresh_token"
+
+
+def _set_refresh_cookie(response: Response, token: str) -> None:
+    response.set_cookie(
+        key=REFRESH_COOKIE_NAME,
+        value=token,
+        httponly=True,
+        secure=settings.APP_ENV.lower() == "production",
+        samesite="lax",
+        max_age=60 * 60 * 24 * 7,
+        path="/api/v1/auth",
+    )
 
 
 # ==========================================================
@@ -120,6 +135,7 @@ async def resend_otp(
 @router.post("/login")
 async def login(
     payload: LoginRequest,
+    response: Response,
     service=Depends(get_user_service),
 ):
     try:
@@ -140,20 +156,15 @@ async def login(
             detail="Invalid email or password.",
         )
 
-    access_token = create_access_token(
-        subject=str(user.id),
-    )
+    access_token = create_access_token(subject=str(user.id), token_version=user.token_version)
+    refresh_token = create_refresh_token(subject=str(user.id), token_version=user.token_version)
+    _set_refresh_cookie(response, refresh_token)
 
-    refresh_token = create_refresh_token(
-        subject=str(user.id),
+    return TokenResponse(
+        access_token=access_token,
+        token_type="bearer",
+        user=UserResponse.model_validate(user),
     )
-
-    return {
-        "access_token": access_token,
-        "refresh_token": refresh_token,
-        "token_type": "bearer",
-        "user": UserResponse.model_validate(user),
-    }
 
 
 # ==========================================================
@@ -166,16 +177,20 @@ async def login(
     response_model=TokenResponse,
 )
 async def refresh_token(
-    payload: RefreshTokenRequest,
+    request: Request,
+    response: Response,
+    payload: RefreshTokenRequest | None = None,
     service=Depends(get_user_service),
 ):
     try:
         token_data = verify_token(
-            payload.refresh_token,
+            (payload.refresh_token if payload else request.cookies.get(REFRESH_COOKIE_NAME, "")),
             expected_type="refresh",
         )
 
         user = await service.get_user(token_data["sub"])
+        if token_data.get("ver") != user.token_version:
+            raise ValueError("Token has been revoked")
 
     except ValueError as exc:
         raise HTTPException(
@@ -183,10 +198,13 @@ async def refresh_token(
             detail=str(exc),
         )
 
+    # Rotate the refresh token and invalidate the presented one.
+    user.token_version += 1
+    user = await service.repository.update(user, token_version=user.token_version)
+    new_refresh_token = create_refresh_token(subject=str(user.id), token_version=user.token_version)
+    _set_refresh_cookie(response, new_refresh_token)
     return TokenResponse(
-        access_token=create_access_token(
-            subject=str(user.id),
-        ),
+        access_token=create_access_token(subject=str(user.id), token_version=user.token_version),
         token_type="bearer",
     )
 
@@ -201,8 +219,20 @@ async def refresh_token(
     response_model=MessageResponse,
 )
 async def logout(
-    token: str = Depends(oauth2_scheme),
+    request: Request,
+    response: Response,
+    service=Depends(get_user_service),
 ):
+    token = request.cookies.get(REFRESH_COOKIE_NAME)
+    if token:
+        try:
+            token_data = verify_token(token, expected_type="refresh")
+            user = await service.get_user(token_data["sub"])
+            user.token_version += 1
+            await service.repository.update(user, token_version=user.token_version)
+        except ValueError:
+            pass
+    response.delete_cookie(REFRESH_COOKIE_NAME, path="/api/v1/auth")
     return MessageResponse(message="Logout successful.")
 
 

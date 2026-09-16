@@ -100,6 +100,13 @@ async def get_current_user(
             },
         )
 
+    if payload.get("ver") != user.token_version:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     return user
 
 
