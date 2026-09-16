@@ -69,22 +69,34 @@ def _deserialize(token: str) -> dict:
     return payload
 
 
-def create_access_token(subject: str, expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES) -> str:
+def create_access_token(
+    subject: str,
+    *,
+    token_version: int = 0,
+    expires_minutes: int = ACCESS_TOKEN_EXPIRE_MINUTES,
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
     payload = {
         "sub": subject,
         "exp": expire.timestamp(),
         "type": "access",
+        "ver": token_version,
     }
     return _serialize(payload)
 
 
-def create_refresh_token(subject: str, expires_minutes: int = REFRESH_TOKEN_EXPIRE_MINUTES) -> str:
+def create_refresh_token(
+    subject: str,
+    *,
+    token_version: int = 0,
+    expires_minutes: int = REFRESH_TOKEN_EXPIRE_MINUTES,
+) -> str:
     expire = datetime.now(timezone.utc) + timedelta(minutes=expires_minutes)
     payload = {
         "sub": subject,
         "exp": expire.timestamp(),
         "type": "refresh",
+        "ver": token_version,
     }
     return _serialize(payload)
 
@@ -143,10 +155,13 @@ def _get_fernet() -> Fernet:
     """
     Build a Fernet cipher from the app's SECRET_KEY.
 
-    Reuses the existing SECRET_KEY (via a SHA-256 digest, since Fernet
-    requires a 32-byte urlsafe-base64-encoded key) instead of adding a
-    second secret to manage and rotate.
+    ENCRYPTION_KEY must be a Fernet-compatible, URL-safe base64 key.  The
+    legacy SECRET_KEY-derived fallback is retained only to decrypt existing
+    credentials during migration; production deployments must configure the
+    dedicated key.
     """
+    if settings.ENCRYPTION_KEY:
+        return Fernet(settings.ENCRYPTION_KEY.encode("utf-8"))
     digest = hashlib.sha256(settings.SECRET_KEY.encode("utf-8")).digest()
     return Fernet(base64.urlsafe_b64encode(digest))
 

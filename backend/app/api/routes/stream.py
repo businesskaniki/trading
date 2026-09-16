@@ -19,19 +19,20 @@ async def stream_ticks(
     db: AsyncSession = Depends(get_db),
 ):
     """Stream broker ticks over an authenticated WebSocket connection."""
-    token = websocket.query_params.get("token")
+    protocol = websocket.headers.get("sec-websocket-protocol", "")
+    token = protocol.removeprefix("bearer.") if protocol.startswith("bearer.") else None
     try:
         if token is None:
             raise ValueError("Missing access token")
         payload = verify_token(token, expected_type="access")
         user = await UserRepository(db).get_by_id(payload["sub"])
-        if not user or not user.is_active:
+        if not user or not user.is_active or payload.get("ver") != user.token_version:
             raise ValueError("Invalid user")
     except ValueError:
         await websocket.close(code=1008)
         return
 
-    await websocket.accept()
+    await websocket.accept(subprotocol=protocol)
     broker = get_broker_manager()
     interval = 0.25
 

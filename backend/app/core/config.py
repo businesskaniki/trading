@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     SECRET_KEY: str
+    # Dedicated Fernet key for broker credentials.  Keep this separate from
+    # JWT signing so either secret can be rotated independently.
+    ENCRYPTION_KEY: str | None = None
 
     BROKER: str = "paper"
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
@@ -85,6 +88,8 @@ class Settings(BaseSettings):
             raise ValueError("BROKER must be explicitly set to mt5 in production")
         if self.APP_ENV.lower() == "production" and self.DEBUG:
             raise ValueError("DEBUG must be false in production")
+        if self.APP_ENV.lower() == "production" and not self.ENCRYPTION_KEY:
+            raise ValueError("ENCRYPTION_KEY must be configured in production")
         return self
 
 

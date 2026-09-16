@@ -274,6 +274,7 @@ class UserService:
         await self.repository.update(
             user,
             hashed_password=get_password_hash(new_password),
+            token_version=user.token_version + 1,
         )
 
         await self.password_reset_repository.mark_used(

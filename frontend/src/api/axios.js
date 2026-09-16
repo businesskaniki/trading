@@ -13,6 +13,7 @@ const api = axios.create({
     headers: {
         "Content-Type": "application/json",
     },
+    withCredentials: true,
 });
 
 // ==========================================================
@@ -30,6 +31,7 @@ const refreshClient = axios.create({
     headers: {
         "Content-Type": "application/json",
     },
+    withCredentials: true,
 });
 
 // ==========================================================
@@ -62,7 +64,6 @@ const processQueue = (error, token = null) => {
 
 const clearAuthentication = () => {
     localStorage.removeItem("access_token");
-    localStorage.removeItem("refresh_token");
     localStorage.removeItem("user");
 
     window.dispatchEvent(
@@ -194,17 +195,6 @@ api.interceptors.response.use(
         // Get refresh token
         // --------------------------------------------------
 
-        const refreshToken =
-            localStorage.getItem(
-                "refresh_token"
-            );
-
-        if (!refreshToken) {
-            clearAuthentication();
-
-            return Promise.reject(error);
-        }
-
         // --------------------------------------------------
         // Another request is already refreshing
         // --------------------------------------------------
@@ -238,10 +228,7 @@ api.interceptors.response.use(
             const response =
                 await refreshClient.post(
                     "/auth/refresh",
-                    {
-                        refresh_token:
-                            refreshToken,
-                    }
+                    {}
                 );
 
             const newAccessToken =

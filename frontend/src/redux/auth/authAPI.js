@@ -75,17 +75,6 @@ const login = async (credentials) => {
     }
 
     // ------------------------------------------------------
-    // Store refresh token
-    // ------------------------------------------------------
-
-    if (data.refresh_token) {
-        localStorage.setItem(
-            "refresh_token",
-            data.refresh_token
-        );
-    }
-
-    // ------------------------------------------------------
     // Store user
     // ------------------------------------------------------
 
@@ -108,22 +97,9 @@ const login = async (credentials) => {
 // ==========================================================
 
 const refreshToken = async () => {
-    const refresh_token =
-        localStorage.getItem(
-            "refresh_token"
-        );
-
-    if (!refresh_token) {
-        throw new Error(
-            "No refresh token available."
-        );
-    }
-
     const response = await api.post(
         "/auth/refresh",
-        {
-            refresh_token,
-        }
+        {}
     );
 
     const data = response.data;
@@ -147,27 +123,11 @@ const refreshToken = async () => {
 // ==========================================================
 
 const logout = async () => {
-    const refresh_token =
-        localStorage.getItem(
-            "refresh_token"
-        );
-
     try {
-        if (refresh_token) {
-            await api.post(
-                "/auth/logout",
-                {
-                    refresh_token,
-                }
-            );
-        }
+        await api.post("/auth/logout");
     } finally {
         localStorage.removeItem(
             "access_token"
-        );
-
-        localStorage.removeItem(
-            "refresh_token"
         );
 
         localStorage.removeItem(
