@@ -1,3 +1,5 @@
+"""Market-data domain package."""
+
 from .models import MarketCandle, MarketTick
 from .normalizer import (
     MarketDataNormalizationError,

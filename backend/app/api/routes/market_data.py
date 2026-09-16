@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 
 from app.market_data.service import MarketDataError, MarketDataService
 
+
 router = APIRouter(
     prefix="/market-data",
     tags=["Market Data"],

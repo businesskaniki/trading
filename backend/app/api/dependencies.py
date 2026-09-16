@@ -1,130 +1,53 @@
-from fastapi import Depends
-from fastapi import HTTPException
-from fastapi import status
+from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.database.session import get_db
-
+from app.broker.broker_manager import BrokerManager
+from app.broker.factory import get_broker_adapter
 from app.core.config import settings
-from app.core.security import (
-    oauth2_scheme,
-    verify_token,
+from app.core.security import oauth2_scheme, verify_token
+from app.database.session import get_db
+from app.market_data.subscription_manager import (
+    market_data_subscription_manager,
 )
-
-# ==========================================================
-# REPOSITORIES
-# ==========================================================
-
 from app.repositories.account_symbol_repository import (
     AccountSymbolRepository,
 )
-from app.repositories.analytics_repository import (
-    AnalyticsRepository,
-)
+from app.repositories.analytics_repository import AnalyticsRepository
 from app.repositories.email_verification_repository import (
     EmailVerificationRepository,
 )
-from app.repositories.order_repository import (
-    OrderRepository,
-)
+from app.repositories.order_repository import OrderRepository
 from app.repositories.password_reset_repository import (
     PasswordResetRepository,
 )
-from app.repositories.performance_repository import (
-    PerformanceRepository,
-)
-from app.repositories.position_repository import (
-    PositionRepository,
-)
-from app.repositories.snapshot_repository import (
-    RiskSnapshotRepository,
-)
-from app.repositories.strategy_run_repository import (
-    StrategyRunRepository,
-)
-from app.repositories.symbol_repository import (
-    SymbolRepository,
-)
-from app.repositories.trade_repository import (
-    TradeRepository,
-)
+from app.repositories.performance_repository import PerformanceRepository
+from app.repositories.position_repository import PositionRepository
+from app.repositories.snapshot_repository import RiskSnapshotRepository
+from app.repositories.strategy_run_repository import StrategyRunRepository
+from app.repositories.symbol_repository import SymbolRepository
+from app.repositories.trade_repository import TradeRepository
 from app.repositories.trading_account_repository import (
     TradingAccountRepository,
 )
-from app.repositories.user_repository import (
-    UserRepository,
-)
-
-# ==========================================================
-# SERVICES
-# ==========================================================
-
-from app.services.account_symbol_service import (
-    AccountSymbolService,
-)
-from app.services.analytics_service import (
-    AnalyticsService,
-)
-from app.services.bot_service import (
-    BotService,
-)
-from app.services.email_service import (
-    EmailService,
-)
-from app.services.execution_service import (
-    ExecutionService,
-)
-from app.services.mt5_bridge_service import (
-    MT5BridgeService,
-)
-from app.services.order_execution_service import (
-    OrderExecutionService,
-)
-from app.services.order_service import (
-    OrderService,
-)
-from app.services.performance_service import (
-    PerformanceService,
-)
-from app.services.position_service import (
-    PositionService,
-)
-from app.services.position_sync_service import (
-    PositionSyncService,
-)
-from app.services.risk_snapshot_service import (
-    RiskSnapshotService,
-)
-from app.services.strategy_run_service import (
-    StrategyRunService,
-)
-from app.services.symbol_service import (
-    SymbolService,
-)
-from app.services.symbol_sync_service import (
-    SymbolSyncService,
-)
-from app.services.trade_service import (
-    TradeService,
-)
-from app.services.trading_account_service import (
-    TradingAccountService,
-)
-from app.services.user_service import (
-    UserService,
-)
-
-# ==========================================================
-# BROKER
-# ==========================================================
-
-from app.broker.broker_manager import (
-    BrokerManager,
-)
-from app.broker.factory import (
-    get_broker_adapter,
-)
-
+from app.repositories.user_repository import UserRepository
+from app.services.account_symbol_service import AccountSymbolService
+from app.services.analytics_service import AnalyticsService
+from app.services.bot_service import BotService
+from app.services.email_service import EmailService
+from app.services.execution_service import ExecutionService
+from app.services.mt5_bridge_service import MT5BridgeService
+from app.services.order_execution_service import OrderExecutionService
+from app.services.order_service import OrderService
+from app.services.performance_service import PerformanceService
+from app.services.position_service import PositionService
+from app.services.position_sync_service import PositionSyncService
+from app.services.risk_snapshot_service import RiskSnapshotService
+from app.services.strategy_run_service import StrategyRunService
+from app.services.symbol_service import SymbolService
+from app.services.symbol_sync_service import SymbolSyncService
+from app.services.trade_service import TradeService
+from app.services.trading_account_service import TradingAccountService
+from app.services.user_service import UserService
 
 # ==========================================================
 # DATABASE
@@ -134,9 +57,7 @@ from app.broker.factory import (
 def get_db_session(
     db: AsyncSession = Depends(get_db),
 ) -> AsyncSession:
-    """
-    Return the current database session.
-    """
+    """Return the current database session."""
     return db
 
 
@@ -149,9 +70,7 @@ async def get_current_user(
     token: str = Depends(oauth2_scheme),
     db: AsyncSession = Depends(get_db),
 ):
-    """
-    Validate the access token and return the current user.
-    """
+    """Validate the access token and return the current user."""
 
     try:
         payload = verify_token(
@@ -199,7 +118,6 @@ async def get_current_user(
 def get_user_service(
     db: AsyncSession = Depends(get_db),
 ) -> UserService:
-
     return UserService(
         repository=UserRepository(db),
         email_verification_repository=EmailVerificationRepository(
@@ -220,7 +138,6 @@ def get_user_service(
 def get_symbol_repository(
     db: AsyncSession = Depends(get_db),
 ) -> SymbolRepository:
-
     return SymbolRepository(db)
 
 
@@ -234,7 +151,6 @@ def get_symbol_service(
         get_symbol_repository,
     ),
 ) -> SymbolService:
-
     return SymbolService(
         symbol_repository,
     )
@@ -248,7 +164,6 @@ def get_symbol_service(
 def get_trading_account_repository(
     db: AsyncSession = Depends(get_db),
 ) -> TradingAccountRepository:
-
     return TradingAccountRepository(db)
 
 
@@ -262,7 +177,6 @@ def get_trading_account_service(
         get_trading_account_repository,
     ),
 ) -> TradingAccountService:
-
     return TradingAccountService(
         repository,
     )
@@ -276,7 +190,6 @@ def get_trading_account_service(
 def get_account_symbol_repository(
     db: AsyncSession = Depends(get_db),
 ) -> AccountSymbolRepository:
-
     return AccountSymbolRepository(db)
 
 
@@ -286,17 +199,21 @@ def get_account_symbol_repository(
 
 
 def get_account_symbol_service(
-    account_symbol_repository: AccountSymbolRepository = Depends(
-        get_account_symbol_repository,
-    ),
-    trading_account_repository: TradingAccountRepository = Depends(
-        get_trading_account_repository,
-    ),
+    db: AsyncSession = Depends(get_db),
 ) -> AccountSymbolService:
+    """Provide the AccountSymbolService with the global market-data
+
+    subscription manager.
+
+    The subscription manager reconciles the desired
+    AccountSymbol.enabled state in PostgreSQL with the
+    actual market-data subscriptions on the MT5 Bridge.
+    """
 
     return AccountSymbolService(
-        account_symbol_repository=account_symbol_repository,
-        trading_account_repository=trading_account_repository,
+        account_symbol_repository=AccountSymbolRepository(db),
+        trading_account_repository=TradingAccountRepository(db),
+        subscription_manager=market_data_subscription_manager,
     )
 
 
@@ -308,7 +225,6 @@ def get_account_symbol_service(
 def get_order_repository(
     db: AsyncSession = Depends(get_db),
 ) -> OrderRepository:
-
     return OrderRepository(db)
 
 
@@ -322,7 +238,6 @@ def get_order_service(
         get_order_repository,
     ),
 ) -> OrderService:
-
     return OrderService(
         order_repository,
     )
@@ -336,7 +251,6 @@ def get_order_service(
 def get_position_repository(
     db: AsyncSession = Depends(get_db),
 ) -> PositionRepository:
-
     return PositionRepository(db)
 
 
@@ -350,7 +264,6 @@ def get_position_service(
         get_position_repository,
     ),
 ) -> PositionService:
-
     return PositionService(
         position_repository,
     )
@@ -364,7 +277,6 @@ def get_position_service(
 def get_trade_service(
     db: AsyncSession = Depends(get_db),
 ) -> TradeService:
-
     return TradeService(
         repository=TradeRepository(db),
         position_repository=PositionRepository(db),
@@ -379,7 +291,6 @@ def get_trade_service(
 def get_strategy_run_service(
     db: AsyncSession = Depends(get_db),
 ) -> StrategyRunService:
-
     return StrategyRunService(
         StrategyRunRepository(db),
     )
@@ -393,7 +304,6 @@ def get_strategy_run_service(
 def get_performance_service(
     db: AsyncSession = Depends(get_db),
 ) -> PerformanceService:
-
     return PerformanceService(
         repository=PerformanceRepository(db),
         trade_repository=TradeRepository(db),
@@ -408,7 +318,6 @@ def get_performance_service(
 def get_risk_snapshot_service(
     db: AsyncSession = Depends(get_db),
 ) -> RiskSnapshotService:
-
     return RiskSnapshotService(
         RiskSnapshotRepository(db),
     )
@@ -420,8 +329,7 @@ def get_risk_snapshot_service(
 
 
 def get_broker_manager() -> BrokerManager:
-    """
-    Return the broker manager used by the trading engine.
+    """Return the broker manager used by the trading engine.
 
     The broker implementation is selected from application
     configuration.
@@ -446,7 +354,6 @@ def get_execution_service(
         get_broker_manager,
     ),
 ) -> ExecutionService:
-
     return ExecutionService(
         broker=broker,
     )
@@ -465,7 +372,6 @@ def get_order_execution_service(
         get_execution_service,
     ),
 ) -> OrderExecutionService:
-
     return OrderExecutionService(
         order_repository=order_repository,
         execution_service=execution_service,
@@ -494,7 +400,6 @@ def get_position_sync_service(
         get_trade_service,
     ),
 ) -> PositionSyncService:
-
     return PositionSyncService(
         execution_service=execution_service,
         position_repository=position_repository,
@@ -512,17 +417,12 @@ def get_position_sync_service(
 def get_analytics_service(
     db: AsyncSession = Depends(get_db),
 ) -> AnalyticsService:
-
     return AnalyticsService(
         repository=AnalyticsRepository(db),
     )
 
 
 # ==========================================================
-# RISK SERVICE
-# ==========================================================
-
-# ==================================
 # BOT SERVICE
 # ==========================================================
 
@@ -530,7 +430,6 @@ def get_analytics_service(
 def get_bot_service(
     db: AsyncSession = Depends(get_db),
 ) -> BotService:
-
     return BotService(
         StrategyRunRepository(db),
     )
@@ -542,9 +441,9 @@ def get_bot_service(
 
 
 def get_mt5_bridge_service() -> MT5BridgeService:
-    """
-    Provide the AQE service responsible for communicating
-    with the MT5 bridge.
+    """Provide the AQE service responsible for communicating with the MT5
+
+    Bridge.
     """
     return MT5BridgeService()
 
@@ -568,7 +467,6 @@ def get_symbol_sync_service(
         get_account_symbol_repository,
     ),
 ) -> SymbolSyncService:
-
     return SymbolSyncService(
         bridge_service=bridge_service,
         trading_account_repository=trading_account_repository,

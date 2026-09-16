@@ -1,12 +1,12 @@
-
 import MetaTrader5 as mt5
+
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query
 
 from app.broker.market_data import MarketDataBroker
 from app.schemas.market_data import MarketTick
 from app.services.market_data_service import market_data_service
-
 
 router = APIRouter(
     prefix="/market-data",
@@ -116,10 +116,7 @@ def subscribe_symbol(symbol: str):
         if not selected:
             raise HTTPException(
                 status_code=400,
-                detail=(
-                    f"Unable to select symbol {symbol}: "
-                    f"{mt5.last_error()}"
-                ),
+                detail=(f"Unable to select symbol {symbol}: " f"{mt5.last_error()}"),
             )
 
     market_data_service.subscribe(symbol)
@@ -128,9 +125,7 @@ def subscribe_symbol(symbol: str):
         "success": True,
         "symbol": symbol,
         "subscribed": True,
-        "subscriptions": (
-            market_data_service.subscriptions()
-        ),
+        "subscriptions": (market_data_service.subscriptions()),
     }
 
 
@@ -156,9 +151,7 @@ def unsubscribe_symbol(symbol: str):
         "success": True,
         "symbol": symbol,
         "subscribed": False,
-        "subscriptions": (
-            market_data_service.subscriptions()
-        ),
+        "subscriptions": (market_data_service.subscriptions()),
     }
 
 
@@ -173,9 +166,7 @@ def get_subscriptions():
 
     return {
         "running": market_data_service.running,
-        "subscriptions": (
-            market_data_service.subscriptions()
-        ),
+        "subscriptions": (market_data_service.subscriptions()),
     }
 
 
@@ -202,9 +193,7 @@ def get_latest_tick(symbol: str):
     if tick is None:
         raise HTTPException(
             status_code=404,
-            detail=(
-                f"No streamed tick available for {symbol}."
-            ),
+            detail=(f"No streamed tick available for {symbol}."),
         )
 
     return tick
@@ -217,19 +206,36 @@ def get_candles(
     symbol: str,
     timeframe: str = Query(
         default="M1",
-        description=(
-            "MT5 timeframe: "
-            "M1, M5, M15, M30, H1, H4, D1"
-        ),
+        description=("MT5 timeframe: " "M1, M5, M15, M30, H1, H4, D1"),
     ),
-    count: int = Query(
-        default=100,
+    count: int | None = Query(
+        default=None,
         ge=1,
         le=5000,
+        description=(
+            "Optional maximum number of candles to return. "
+            "When no start/end range is supplied, this controls "
+            "the number of latest candles retrieved."
+        ),
+    ),
+    start: datetime | None = Query(
+        default=None,
+        description=("Inclusive UTC start datetime."),
+    ),
+    end: datetime | None = Query(
+        default=None,
+        description=("Inclusive UTC end datetime."),
     ),
 ):
     """
     Return historical OHLCV candles directly from MT5.
+
+    If start/end are provided, the endpoint performs true
+    range-based historical retrieval using MT5
+    copy_rates_range().
+
+    If neither is provided, the endpoint preserves the
+    existing latest-N candle behavior.
     """
 
     symbol = symbol.strip()
@@ -247,9 +253,7 @@ def get_candles(
         if hasattr(mt5, f"TIMEFRAME_{name}")
     }
 
-    mt5_timeframe = timeframe_map.get(
-        timeframe
-    )
+    mt5_timeframe = timeframe_map.get(timeframe)
 
     if mt5_timeframe is None:
         raise HTTPException(
@@ -257,10 +261,40 @@ def get_candles(
             detail=f"Unsupported timeframe: {timeframe}",
         )
 
+    # --------------------------------------------------------------
+    # Normalize timestamps to UTC.
+    # --------------------------------------------------------------
+
+    if start is not None:
+
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=timezone.utc)
+        else:
+            start = start.astimezone(timezone.utc)
+
+    if end is not None:
+
+        if end.tzinfo is None:
+            end = end.replace(tzinfo=timezone.utc)
+        else:
+            end = end.astimezone(timezone.utc)
+
+    # --------------------------------------------------------------
+    # Validate range.
+    # --------------------------------------------------------------
+
+    if start is not None and end is not None and start > end:
+        raise HTTPException(
+            status_code=400,
+            detail=("start must be earlier than or equal to end"),
+        )
+
     rates = broker.get_candles(
         symbol=symbol,
         timeframe=mt5_timeframe,
         count=count,
+        start=start,
+        end=end,
     )
 
     if rates is None:
@@ -272,29 +306,16 @@ def get_candles(
     candles = []
 
     for rate in rates:
+
         candles.append(
             {
-                "time": int(
-                    rate["time"]
-                ),
-                "open": float(
-                    rate["open"]
-                ),
-                "high": float(
-                    rate["high"]
-                ),
-                "low": float(
-                    rate["low"]
-                ),
-                "close": float(
-                    rate["close"]
-                ),
-                "volume": int(
-                    rate["tick_volume"]
-                ),
-                "spread": int(
-                    rate["spread"]
-                ),
+                "time": int(rate["time"]),
+                "open": float(rate["open"]),
+                "high": float(rate["high"]),
+                "low": float(rate["low"]),
+                "close": float(rate["close"]),
+                "volume": int(rate["tick_volume"]),
+                "spread": int(rate["spread"]),
             }
         )
 
@@ -302,5 +323,7 @@ def get_candles(
         "symbol": symbol,
         "timeframe": timeframe,
         "count": len(candles),
+        "start": (start.isoformat() if start is not None else None),
+        "end": (end.isoformat() if end is not None else None),
         "candles": candles,
     }
