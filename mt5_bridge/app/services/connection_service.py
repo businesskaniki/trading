@@ -148,3 +148,6 @@ class ConnectionService:
 
     def terminal_info(self):
         return self.client.terminal_info()
+
+
+connection_service = ConnectionService()

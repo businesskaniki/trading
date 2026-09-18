@@ -76,6 +76,9 @@ services:
     env_file:
       - .env
 
+    environment:
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
+
     depends_on:
       postgres:
         condition: service_healthy
@@ -154,6 +157,7 @@ services:
 
     environment:
       PYTHONPATH: /app
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
 
     command: python -m celery -A app.core.celery:celery_app worker --loglevel=info
 
@@ -188,6 +192,9 @@ services:
         condition: service_healthy
 
     command: python -m celery -A app.core.celery:celery_app beat --loglevel=info
+
+    environment:
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-true}
 
     volumes:
       - ./backend:/app
