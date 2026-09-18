@@ -28,6 +28,12 @@ def get_tick(symbol: str):
 
     symbol = symbol.strip()
 
+    if not symbol:
+        raise HTTPException(
+            status_code=400,
+            detail="Symbol cannot be empty.",
+        )
+
     tick = broker.get_tick(symbol)
 
     if tick is None:
@@ -89,6 +95,8 @@ def subscribe_symbol(symbol: str):
     Broker symbols are treated as canonical identifiers.
     Their casing is preserved because MT5 broker symbols can
     contain case-sensitive suffixes such as XAUUSD.s.
+
+    MT5 must be connected before a subscription is accepted.
     """
 
     symbol = symbol.strip()
@@ -97,6 +105,22 @@ def subscribe_symbol(symbol: str):
         raise HTTPException(
             status_code=400,
             detail="Symbol cannot be empty.",
+        )
+
+    terminal = mt5.terminal_info()
+
+    if terminal is None or not terminal.connected:
+        raise HTTPException(
+            status_code=503,
+            detail="MetaTrader 5 terminal is not connected.",
+        )
+
+    account = mt5.account_info()
+
+    if account is None:
+        raise HTTPException(
+            status_code=503,
+            detail=("MetaTrader 5 account is not available: " f"{mt5.last_error()}"),
         )
 
     info = mt5.symbol_info(symbol)
@@ -108,6 +132,7 @@ def subscribe_symbol(symbol: str):
         )
 
     if not info.visible:
+
         selected = mt5.symbol_select(
             symbol,
             True,
@@ -125,7 +150,7 @@ def subscribe_symbol(symbol: str):
         "success": True,
         "symbol": symbol,
         "subscribed": True,
-        "subscriptions": (market_data_service.subscriptions()),
+        "subscriptions": market_data_service.subscriptions(),
     }
 
 
@@ -151,7 +176,7 @@ def unsubscribe_symbol(symbol: str):
         "success": True,
         "symbol": symbol,
         "subscribed": False,
-        "subscriptions": (market_data_service.subscriptions()),
+        "subscriptions": market_data_service.subscriptions(),
     }
 
 
@@ -160,13 +185,27 @@ def unsubscribe_symbol(symbol: str):
 )
 def get_subscriptions():
     """
-    Return the current market-data service state
-    and subscribed symbols.
+    Return the current market-data service state, subscribed
+    symbols, and Redis publish health.
+
+    last_publish_success_at staying null while running is true and
+    subscriptions is non-empty means MT5 data is flowing but nothing
+    is actually reaching Redis - check last_publish_error for why.
     """
+
+    last_error_at = market_data_service.last_publish_error_at
+    last_success_at = market_data_service.last_publish_success_at
 
     return {
         "running": market_data_service.running,
-        "subscriptions": (market_data_service.subscriptions()),
+        "subscriptions": market_data_service.subscriptions(),
+        "last_publish_error": market_data_service.last_publish_error,
+        "last_publish_error_at": (
+            last_error_at.isoformat() if last_error_at is not None else None
+        ),
+        "last_publish_success_at": (
+            last_success_at.isoformat() if last_success_at is not None else None
+        ),
     }
 
 
@@ -193,7 +232,7 @@ def get_latest_tick(symbol: str):
     if tick is None:
         raise HTTPException(
             status_code=404,
-            detail=(f"No streamed tick available for {symbol}."),
+            detail=f"No streamed tick available for {symbol}.",
         )
 
     return tick
@@ -206,7 +245,7 @@ def get_candles(
     symbol: str,
     timeframe: str = Query(
         default="M1",
-        description=("MT5 timeframe: " "M1, M5, M15, M30, H1, H4, D1"),
+        description="MT5 timeframe: M1, M5, M15, M30, H1, H4, D1",
     ),
     count: int | None = Query(
         default=None,
@@ -220,11 +259,11 @@ def get_candles(
     ),
     start: datetime | None = Query(
         default=None,
-        description=("Inclusive UTC start datetime."),
+        description="Inclusive UTC start datetime.",
     ),
     end: datetime | None = Query(
         default=None,
-        description=("Inclusive UTC end datetime."),
+        description="Inclusive UTC end datetime.",
     ),
 ):
     """
@@ -249,7 +288,29 @@ def get_candles(
 
     timeframe_map = {
         name: getattr(mt5, f"TIMEFRAME_{name}")
-        for name in ("M1", "M2", "M3", "M4", "M5", "M6", "M10", "M12", "M15", "M20", "M30", "H1", "H2", "H3", "H4", "H6", "H8", "H12", "D1", "W1", "MN1")
+        for name in (
+            "M1",
+            "M2",
+            "M3",
+            "M4",
+            "M5",
+            "M6",
+            "M10",
+            "M12",
+            "M15",
+            "M20",
+            "M30",
+            "H1",
+            "H2",
+            "H3",
+            "H4",
+            "H6",
+            "H8",
+            "H12",
+            "D1",
+            "W1",
+            "MN1",
+        )
         if hasattr(mt5, f"TIMEFRAME_{name}")
     }
 
@@ -268,16 +329,24 @@ def get_candles(
     if start is not None:
 
         if start.tzinfo is None:
-            start = start.replace(tzinfo=timezone.utc)
+            start = start.replace(
+                tzinfo=timezone.utc,
+            )
         else:
-            start = start.astimezone(timezone.utc)
+            start = start.astimezone(
+                timezone.utc,
+            )
 
     if end is not None:
 
         if end.tzinfo is None:
-            end = end.replace(tzinfo=timezone.utc)
+            end = end.replace(
+                tzinfo=timezone.utc,
+            )
         else:
-            end = end.astimezone(timezone.utc)
+            end = end.astimezone(
+                timezone.utc,
+            )
 
     # --------------------------------------------------------------
     # Validate range.
@@ -286,7 +355,7 @@ def get_candles(
     if start is not None and end is not None and start > end:
         raise HTTPException(
             status_code=400,
-            detail=("start must be earlier than or equal to end"),
+            detail="start must be earlier than or equal to end",
         )
 
     rates = broker.get_candles(
