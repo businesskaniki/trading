@@ -1,4 +1,4 @@
-import api from "../../api/axios";
+import api, { clearAccessToken, setAccessToken } from "../../api/axios";
 
 // ==========================================================
 // Register
@@ -67,12 +67,7 @@ const login = async (credentials) => {
     // Store access token
     // ------------------------------------------------------
 
-    if (data.access_token) {
-        localStorage.setItem(
-            "access_token",
-            data.access_token
-        );
-    }
+    setAccessToken(data.access_token);
 
     // ------------------------------------------------------
     // Store user
@@ -97,25 +92,28 @@ const login = async (credentials) => {
 // ==========================================================
 
 const refreshToken = async () => {
-    const response = await api.post(
-        "/auth/refresh",
-        {}
-    );
-
-    const data = response.data;
-
-    if (!data.access_token) {
-        throw new Error(
-            "Refresh endpoint did not return access_token."
+    try {
+        const response = await api.post(
+            "/auth/refresh",
+            {}
         );
+
+        const data = response.data;
+
+        if (!data.access_token) {
+            throw new Error(
+                "Refresh endpoint did not return access_token."
+            );
+        }
+
+        setAccessToken(data.access_token);
+
+        return data;
+    } catch (error) {
+        clearAccessToken();
+        localStorage.removeItem("user");
+        throw error;
     }
-
-    localStorage.setItem(
-        "access_token",
-        data.access_token
-    );
-
-    return data;
 };
 
 // ==========================================================
@@ -126,9 +124,7 @@ const logout = async () => {
     try {
         await api.post("/auth/logout");
     } finally {
-        localStorage.removeItem(
-            "access_token"
-        );
+        clearAccessToken();
 
         localStorage.removeItem(
             "user"

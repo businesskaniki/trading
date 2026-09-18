@@ -1,4 +1,6 @@
-import { Routes, Route } from "react-router-dom";
+import { lazy, Suspense, useEffect } from "react";
+import { Routes, Route, useNavigate } from "react-router-dom";
+import { useDispatch } from "react-redux";
 
 import Navbar from "./components/Navbar";
 
@@ -7,30 +9,48 @@ import PublicRoute from "./components/routing/PublicRoute";
 
 import DashboardLayout from "./components/dashboard/DashboardLayout";
 
-import Login from "./pages/auth/Login";
-import Register from "./pages/auth/Register";
-import VerifyEmail from "./pages/auth/VerifyEmail";
-import ForgotPassword from "./pages/auth/ForgotPassword";
-import ResetPassword from "./pages/auth/ResetPassword";
+const Login = lazy(() => import("./pages/auth/Login"));
+const Register = lazy(() => import("./pages/auth/Register"));
+const VerifyEmail = lazy(() => import("./pages/auth/VerifyEmail"));
+const ForgotPassword = lazy(() => import("./pages/auth/ForgotPassword"));
+const ResetPassword = lazy(() => import("./pages/auth/ResetPassword"));
 
-import Dashboard from "./pages/Dashboard/Dashboard";
-import Landing from "./pages/Landing/Landing";
+const Dashboard = lazy(() => import("./pages/Dashboard/Dashboard"));
+const Landing = lazy(() => import("./pages/Landing/Landing"));
 
-import Accounts from "./pages/Dashboard/Accounts/Accounts";
-import Symbols from "./pages/Dashboard/Symbols/SymbolsPage";
-import Orders from "./pages/Dashboard/Orders/Orders";
-import Positions from "./pages/Dashboard/Positions/Positions";
-import Trades from "./pages/Dashboard/Trades/Trades";
+const Accounts = lazy(() => import("./pages/Dashboard/Accounts/Accounts"));
+const Symbols = lazy(() => import("./pages/Dashboard/Symbols/SymbolsPage"));
+const Orders = lazy(() => import("./pages/Dashboard/Orders/Orders"));
+const Positions = lazy(() => import("./pages/Dashboard/Positions/Positions"));
+const Trades = lazy(() => import("./pages/Dashboard/Trades/Trades"));
 import NotFound from "./pages/NotFound";
-import RiskManagement from "./pages/Dashboard/Risk/RiskManagement";
-import Analytics from "./pages/Dashboard/Analytics/Analytics";
-import StrategyRuns from "./pages/Dashboard/Strategies/StrategyRuns";
+const RiskManagement = lazy(() => import("./pages/Dashboard/Risk/RiskManagement"));
+const Analytics = lazy(() => import("./pages/Dashboard/Analytics/Analytics"));
+const StrategyRuns = lazy(() => import("./pages/Dashboard/Strategies/StrategyRuns"));
+import { clearAuthentication } from "./redux/auth/authSlice";
 
 import "./App.css";
 
 const App = () => {
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
+
+  useEffect(() => {
+    const handleAuthenticationLoss = () => {
+      dispatch(clearAuthentication());
+      navigate("/login", { replace: true });
+    };
+
+    window.addEventListener("auth:logout", handleAuthenticationLoss);
+
+    return () => {
+      window.removeEventListener("auth:logout", handleAuthenticationLoss);
+    };
+  }, [dispatch, navigate]);
+
   return (
-    <Routes>
+    <Suspense fallback={<div className="auth-loading">Loading...</div>}>
+      <Routes>
       {/* ==========================================
                 PUBLIC ROUTES
             ========================================== */}
@@ -125,7 +145,8 @@ const App = () => {
         </Route>
       </Route>
       <Route path="*" element={<NotFound />} />
-    </Routes>
+      </Routes>
+    </Suspense>
   );
 };
 

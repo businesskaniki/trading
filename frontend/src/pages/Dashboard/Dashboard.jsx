@@ -72,7 +72,9 @@ const Dashboard = () => {
     (state) => state.symbols?.selectedSymbols || [],
   );
 
-  const accountSymbols = useSelector((state) => state.symbols?.symbols || []);
+  const accountSymbols = useSelector((state) =>
+    state.symbols?.symbolsByAccount?.[String(selectedAccount?.id)] || [],
+  );
 
   // --------------------------------------------------
   // BOT STATE

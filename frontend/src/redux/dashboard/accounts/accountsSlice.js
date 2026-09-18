@@ -90,7 +90,9 @@ const accountsSlice = createSlice({
     // ------------------------------------------------------------------
 
     selectAccount: (state, action) => {
-      const account = state.accounts.find((item) => item.id === action.payload);
+      const account = state.accounts.find(
+        (item) => String(item.id) === String(action.payload),
+      );
 
       state.selectedAccount = account || null;
     },

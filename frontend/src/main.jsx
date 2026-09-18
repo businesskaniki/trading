@@ -22,21 +22,8 @@ import "./index.css";
 // ==========================================================
 
 const restoreAuthentication = async () => {
-  const accessToken = localStorage.getItem("access_token");
-
-
   // --------------------------------------------------
-  // No session exists
-  // --------------------------------------------------
-
-  if (!accessToken) {
-    store.dispatch(setAuthInitialized());
-
-    return;
-  }
-
-  // --------------------------------------------------
-  // Try to refresh the access token
+  // Try to restore the session from the HttpOnly refresh cookie
   //
   // This happens on EVERY browser reload.
   //

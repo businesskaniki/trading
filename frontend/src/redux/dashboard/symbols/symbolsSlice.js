@@ -8,9 +8,11 @@ import {
 } from "./symbolsThunks";
 
 const initialState = {
-  symbols: [],
+  symbolsByAccount: {},
 
   selectedSymbols: [],
+
+  selectedAccountId: null,
 
   loading: false,
 
@@ -80,7 +82,8 @@ const symbolsSlice = createSlice({
 
       .addCase(fetchAccountSymbols.fulfilled, (state, action) => {
         state.loading = false;
-        state.symbols = normalizeItems(action.payload);
+        const accountId = String(action.meta.arg);
+        state.symbolsByAccount[accountId] = normalizeItems(action.payload);
       })
 
       .addCase(fetchAccountSymbols.rejected, (state, action) => {
@@ -98,6 +101,7 @@ const symbolsSlice = createSlice({
 
       .addCase(fetchTradingUniverse.fulfilled, (state, action) => {
         state.selectedSymbols = normalizeItems(action.payload);
+        state.selectedAccountId = String(action.meta.arg);
       })
 
       .addCase(fetchTradingUniverse.rejected, (state, action) => {
@@ -117,16 +121,21 @@ const symbolsSlice = createSlice({
         state.selecting = false;
 
         const updatedSymbol = action.payload;
+        const accountId = String(action.meta.arg.accountId);
+        const symbols = state.symbolsByAccount[accountId] || [];
 
-        const index = state.symbols.findIndex(
+        const index = symbols.findIndex(
           (symbol) => symbol.id === updatedSymbol.id,
         );
 
         if (index !== -1) {
-          state.symbols[index] = updatedSymbol;
+          symbols[index] = updatedSymbol;
         }
 
-        if (updatedSymbol.enabled) {
+        if (
+          updatedSymbol.enabled &&
+          state.selectedAccountId === accountId
+        ) {
           const alreadySelected = state.selectedSymbols.some(
             (symbol) => symbol.id === updatedSymbol.id,
           );
@@ -134,7 +143,7 @@ const symbolsSlice = createSlice({
           if (!alreadySelected) {
             state.selectedSymbols.push(updatedSymbol);
           }
-        } else {
+        } else if (state.selectedAccountId === accountId) {
           state.selectedSymbols = state.selectedSymbols.filter(
             (symbol) => symbol.id !== updatedSymbol.id,
           );

@@ -43,7 +43,9 @@ const Orders = () => {
 
   const accounts = useSelector((state) => state.accounts?.accounts || []);
 
-  const symbols = useSelector((state) => state.symbols?.symbols || []);
+  const symbolsByAccount = useSelector(
+    (state) => state.symbols?.symbolsByAccount || {},
+  );
 
   /*
    * Account-specific symbols are loaded based on the accounts
@@ -104,8 +106,8 @@ const Orders = () => {
   /*
    * Find a symbol by canonical symbol ID.
    */
-  const symbolName = (id) => {
-    const accountSymbol = symbols.find(
+  const symbolName = (id, accountId) => {
+    const accountSymbol = (symbolsByAccount[String(accountId)] || []).find(
       (item) => item.symbol_id === id || item.symbol?.id === id,
     );
 
@@ -133,7 +135,7 @@ const Orders = () => {
   const filteredOrders = useMemo(
     () =>
       orders.filter((order) => {
-        const symbol = symbols.find(
+        const symbol = (symbolsByAccount[String(order.account_id)] || []).find(
           (item) =>
             item.symbol_id === order.symbol_id ||
             item.symbol?.id === order.symbol_id,
@@ -158,7 +160,7 @@ const Orders = () => {
           (status === "ALL" || order.status === status)
         );
       }),
-    [orders, query, status, symbols],
+    [orders, query, status, symbolsByAccount],
   );
 
   /*
@@ -220,6 +222,7 @@ const Orders = () => {
       title: "Execute order?",
       message: `Submit ${order.side} ${order.volume} ${symbolName(
         order.symbol_id,
+        order.account_id,
       )} to the execution pipeline.`,
       confirmLabel: "Execute Order",
       action: () => dispatch(executeOrder(order.id)),
@@ -544,7 +547,9 @@ const Orders = () => {
 
                     {/* INSTRUMENT */}
                     <td>
-                      <strong>{symbolName(order.symbol_id)}</strong>
+                      <strong>
+                        {symbolName(order.symbol_id, order.account_id)}
+                      </strong>
 
                       <span className="order-subvalue">
                         {order.comment || "No comment"}

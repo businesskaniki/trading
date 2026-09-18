@@ -68,8 +68,6 @@ const SymbolForm = ({
     return Object.values(localSelection).filter(Boolean).length;
   }, [localSelection]);
 
-  const unselectedCount = symbols.length - selectedCount;
-
   // ====================================================================
   // FILTER SYMBOLS
   // ====================================================================

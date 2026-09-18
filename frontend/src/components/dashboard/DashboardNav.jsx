@@ -1,4 +1,6 @@
 import { NavLink } from "react-router-dom";
+import { useDispatch } from "react-redux";
+import { useNavigate } from "react-router-dom";
 
 import {
     FaChartPie,
@@ -10,14 +12,17 @@ import {
     FaRobot,
     FaChartLine,
     FaShieldAlt,
-    FaBolt,
-    FaDatabase,
+    FaSignOutAlt,
 } from "react-icons/fa";
+
+import { logoutUser } from "../../redux/auth/authThunks";
 
 import "../../css/dashboardNav.css";
 
 
 const DashboardNav = () => {
+    const dispatch = useDispatch();
+    const navigate = useNavigate();
 
     const navigation = [
         {
@@ -92,22 +97,6 @@ const DashboardNav = () => {
                     label: "Risk Management",
                     path: "/dashboard/risk",
                     icon: <FaShieldAlt />,
-                },
-                {
-                    label: "Risk Snapshots",
-                    path: "/dashboard/risk-snapshots",
-                    icon: <FaDatabase />,
-                },
-            ],
-        },
-
-        {
-            title: "Execution",
-            items: [
-                {
-                    label: "Execution",
-                    path: "/dashboard/execution",
-                    icon: <FaBolt />,
                 },
             ],
         },
@@ -217,6 +206,18 @@ const DashboardNav = () => {
                     </div>
 
                 </div>
+
+                <button
+                    type="button"
+                    className="dashboard-nav__logout"
+                    onClick={async () => {
+                        await dispatch(logoutUser());
+                        navigate("/login", { replace: true });
+                    }}
+                >
+                    <FaSignOutAlt />
+                    <span>Log out</span>
+                </button>
 
             </div>
 

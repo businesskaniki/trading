@@ -15,11 +15,6 @@ import {
 // Load persisted authentication
 // ==========================================================
 
-const storedAccessToken =
-    localStorage.getItem(
-        "access_token"
-    );
-
 const storedUser =
     localStorage.getItem("user");
 
@@ -42,12 +37,11 @@ if (storedUser) {
 const initialState = {
     user: parsedUser,
 
-    accessToken:
-        storedAccessToken,
+    accessToken: null,
 
     refreshToken: null,
 
-    isAuthenticated: !!storedAccessToken,
+    isAuthenticated: false,
 
     // VERY IMPORTANT
     //

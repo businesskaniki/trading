@@ -263,6 +263,31 @@
 }
 
 
+.dashboard-nav__logout {
+    width: 100%;
+    min-height: 38px;
+    display: flex;
+    align-items: center;
+    justify-content: flex-start;
+    gap: 9px;
+    margin-top: 10px;
+    padding: 0 11px;
+    border: 1px solid #293241;
+    border-radius: 8px;
+    background: transparent;
+    color: #9caabd;
+    font-size: 12px;
+    cursor: pointer;
+}
+
+
+.dashboard-nav__logout:hover {
+    border-color: #475569;
+    background: #151c25;
+    color: #f3f4f6;
+}
+
+
 /* =========================================================
    SCROLLBAR
 ========================================================= */
@@ -344,6 +369,17 @@
 
     .dashboard-nav__status-dot {
         margin: 0;
+    }
+
+
+    .dashboard-nav__logout {
+        justify-content: center;
+        padding: 0;
+    }
+
+
+    .dashboard-nav__logout span {
+        display: none;
     }
 
 }

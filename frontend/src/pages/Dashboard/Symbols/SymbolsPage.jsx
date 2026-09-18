@@ -31,7 +31,7 @@ const SymbolsPage = () => {
   // SYMBOLS
   // ====================================================================
 
-  const { symbols, loading, syncing, selecting, error, syncResult } =
+  const { symbolsByAccount, loading, syncing, selecting, error, syncResult } =
     useSelector((state) => state.symbols);
 
   // ====================================================================
@@ -48,6 +48,10 @@ const SymbolsPage = () => {
   // ====================================================================
 
   const accountId = selectedAccount?.id || null;
+  const symbols = useMemo(
+    () => symbolsByAccount[String(accountId)] || [],
+    [symbolsByAccount, accountId],
+  );
 
   // ====================================================================
   // LOAD ACCOUNTS
@@ -239,7 +243,7 @@ const SymbolsPage = () => {
       setSymbolSelection({
         accountId,
         accountSymbolId: accountSymbol.id,
-        enabled: !Boolean(accountSymbol.enabled),
+        enabled: !accountSymbol.enabled,
       }),
     );
   };

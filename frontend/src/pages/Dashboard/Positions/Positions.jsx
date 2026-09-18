@@ -29,8 +29,8 @@ const Positions = () => {
     (state) => state.accounts?.accounts || [],
   );
 
-  const symbols = useSelector(
-    (state) => state.symbols?.symbols || [],
+  const symbolsByAccount = useSelector(
+    (state) => state.symbols?.symbolsByAccount || {},
   );
 
   const [query, setQuery] = useState("");
@@ -91,55 +91,27 @@ const Positions = () => {
   /*
    * Resolve canonical symbol name from AccountSymbol.
    */
-  const symbolName = (id) => {
-    const accountSymbol = symbols.find(
-      (item) =>
-        item.symbol_id === id ||
-        item.symbol?.id === id,
-    );
-
-    return (
-      accountSymbol?.symbol_name ||
-      accountSymbol?.name ||
-      accountSymbol?.symbol?.name ||
-      accountSymbol?.broker_symbol ||
-      String(id || "-").slice(0, 8)
-    );
-  };
-
-  /*
-   * Resolve broker-native symbol.
-   *
-   * Example:
-   *
-   * EURUSD     -> canonical symbol
-   * EURUSD.s   -> broker symbol
-   */
-  const brokerSymbolName = (position) => {
-    const accountSymbol = symbols.find(
-      (item) =>
-        item.symbol_id === position.symbol_id ||
-        item.symbol?.id === position.symbol_id,
-    );
-
-    return (
-      accountSymbol?.broker_symbol ||
-      ""
-    );
-  };
-
   /*
    * Filter visible positions.
    */
   const visiblePositions = useMemo(
-    () =>
-      positions.filter((position) => {
-        const symbol = symbolName(
-          position.symbol_id,
+    () => {
+      const getAccountSymbol = (position) =>
+        (symbolsByAccount[String(position.account_id)] || []).find(
+          (item) =>
+            item.symbol_id === position.symbol_id ||
+            item.symbol?.id === position.symbol_id,
         );
 
-        const brokerSymbol =
-          brokerSymbolName(position);
+      return positions.filter((position) => {
+        const accountSymbol = getAccountSymbol(position);
+        const symbol =
+          accountSymbol?.symbol_name ||
+          accountSymbol?.name ||
+          accountSymbol?.symbol?.name ||
+          accountSymbol?.broker_symbol ||
+          String(position.symbol_id || "-").slice(0, 8);
+        const brokerSymbol = accountSymbol?.broker_symbol || "";
 
         const text = `
           ${position.strategy || ""}
@@ -150,12 +122,10 @@ const Positions = () => {
           ${position.comment || ""}
         `.toLowerCase();
 
-        return (
-          !query ||
-          text.includes(query.toLowerCase())
-        );
-      }),
-    [positions, query, symbols],
+        return !query || text.includes(query.toLowerCase());
+      });
+    },
+    [positions, query, symbolsByAccount],
   );
 
   /*
@@ -311,15 +281,19 @@ const Positions = () => {
             {/* Positions */}
             {!loading &&
               visiblePositions.map((position) => {
+                const accountSymbol =
+                  (symbolsByAccount[String(position.account_id)] || []).find(
+                    (item) =>
+                      item.symbol_id === position.symbol_id ||
+                      item.symbol?.id === position.symbol_id,
+                  );
                 const symbol =
-                  symbolName(
-                    position.symbol_id,
-                  );
-
-                const brokerSymbol =
-                  brokerSymbolName(
-                    position,
-                  );
+                  accountSymbol?.symbol_name ||
+                  accountSymbol?.name ||
+                  accountSymbol?.symbol?.name ||
+                  accountSymbol?.broker_symbol ||
+                  String(position.symbol_id || "-").slice(0, 8);
+                const brokerSymbol = accountSymbol?.broker_symbol || "";
 
                 const floatingProfit = Number(
                   position.floating_profit ?? 0,

@@ -34,6 +34,18 @@ const refreshClient = axios.create({
     withCredentials: true,
 });
 
+let accessToken = null;
+
+export const setAccessToken = (token) => {
+    accessToken = token || null;
+};
+
+export const clearAccessToken = () => {
+    accessToken = null;
+};
+
+export const getAccessToken = () => accessToken;
+
 // ==========================================================
 // Refresh state
 // ==========================================================
@@ -63,7 +75,7 @@ const processQueue = (error, token = null) => {
 // ==========================================================
 
 const clearAuthentication = () => {
-    localStorage.removeItem("access_token");
+    clearAccessToken();
     localStorage.removeItem("user");
 
     window.dispatchEvent(
@@ -102,11 +114,6 @@ api.interceptors.request.use(
         );
 
         if (!isPublicEndpoint) {
-            const accessToken =
-                localStorage.getItem(
-                    "access_token"
-                );
-
             if (accessToken) {
                 config.headers.Authorization =
                     `Bearer ${accessToken}`;
@@ -244,10 +251,7 @@ api.interceptors.response.use(
             // Save new access token
             // --------------------------------------------------
 
-            localStorage.setItem(
-                "access_token",
-                newAccessToken
-            );
+            setAccessToken(newAccessToken);
 
             // --------------------------------------------------
             // Resolve queued requests

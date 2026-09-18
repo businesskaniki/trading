@@ -5,11 +5,8 @@ import { useNavigate } from "react-router-dom";
 import {
   FaBell,
   FaChevronDown,
-  FaCog,
-  FaShieldAlt,
   FaSignOutAlt,
   FaThLarge,
-  FaUser,
   FaUserCircle,
 } from "react-icons/fa";
 
@@ -236,60 +233,6 @@ const Navbar = () => {
                       <strong>Dashboard</strong>
 
                       <small>Trading overview</small>
-                    </span>
-                  </button>
-
-                  {/* Profile */}
-
-                  <button
-                    type="button"
-                    className="dropdown-item"
-                    onClick={() => handleNavigation("/profile")}
-                  >
-                    <span className="dropdown-item__icon">
-                      <FaUser />
-                    </span>
-
-                    <span className="dropdown-item__content">
-                      <strong>Profile</strong>
-
-                      <small>Account information</small>
-                    </span>
-                  </button>
-
-                  {/* Settings */}
-
-                  <button
-                    type="button"
-                    className="dropdown-item"
-                    onClick={() => handleNavigation("/settings")}
-                  >
-                    <span className="dropdown-item__icon">
-                      <FaCog />
-                    </span>
-
-                    <span className="dropdown-item__content">
-                      <strong>Settings</strong>
-
-                      <small>Application preferences</small>
-                    </span>
-                  </button>
-
-                  {/* Security */}
-
-                  <button
-                    type="button"
-                    className="dropdown-item"
-                    onClick={() => handleNavigation("/security")}
-                  >
-                    <span className="dropdown-item__icon">
-                      <FaShieldAlt />
-                    </span>
-
-                    <span className="dropdown-item__content">
-                      <strong>Security</strong>
-
-                      <small>Password & authentication</small>
                     </span>
                   </button>
 

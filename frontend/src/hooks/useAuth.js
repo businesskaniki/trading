@@ -1,5 +1,9 @@
-import { useSelector, useDispatch } from "react-redux";
-import { login, logout, refreshToken } from "../features/auth/authSlice";
+import { useDispatch, useSelector } from "react-redux";
+import {
+  loginUser,
+  logoutUser,
+  refreshAccessToken,
+} from "../redux/auth/authThunks";
 
 export default function useAuth() {
   const auth = useSelector((s) => s.auth);
@@ -7,8 +11,8 @@ export default function useAuth() {
 
   return {
     ...auth,
-    login: (creds) => dispatch(login(creds)),
-    logout: () => dispatch(logout()),
-    refresh: () => dispatch(refreshToken()),
+    login: (creds) => dispatch(loginUser(creds)),
+    logout: () => dispatch(logoutUser()),
+    refresh: () => dispatch(refreshAccessToken()),
   };
 }
