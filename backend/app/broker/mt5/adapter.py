@@ -17,6 +17,7 @@ from app.schemas.execution import (
     OrderSide,
     OrderType,
 )
+from app.core.config import settings
 
 from .client import MT5Client
 
@@ -156,6 +157,7 @@ class MT5Adapter(BrokerAdapter):
     ):
         self.client = MT5Client(
             bridge_url=bridge_url,
+            bridge_token=settings.MT5_BRIDGE_TOKEN,
             timeout=timeout,
         )
 
