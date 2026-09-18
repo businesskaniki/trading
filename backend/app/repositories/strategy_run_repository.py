@@ -53,13 +53,13 @@ class StrategyRunRepository:
     async def get_by_id(
         self,
         strategy_run_id: UUID,
+        user_id: UUID | None = None,
     ) -> StrategyRun | None:
 
         result = await self.db.execute(
             select(StrategyRun)
-            .where(
-                StrategyRun.id == strategy_run_id
-            )
+            .where(StrategyRun.id == strategy_run_id)
+            .where(StrategyRun.user_id == user_id if user_id is not None else True)
         )
 
         return result.scalar_one_or_none()
@@ -164,10 +164,12 @@ class StrategyRunRepository:
 
     async def get_all(
         self,
+        user_id: UUID | None = None,
     ) -> list[StrategyRun]:
 
         result = await self.db.execute(
             select(StrategyRun)
+            .where(StrategyRun.user_id == user_id if user_id is not None else True)
             .order_by(
                 StrategyRun.started_at.desc()
             )

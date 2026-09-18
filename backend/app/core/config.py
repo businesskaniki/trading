@@ -60,6 +60,7 @@ class Settings(BaseSettings):
 
     SMTP_USE_TLS: bool = True
     MT5_BRIDGE_URL: str = "http://host.docker.internal:9000"
+    MT5_BRIDGE_TOKEN: str = ""
     
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -90,6 +91,8 @@ class Settings(BaseSettings):
             raise ValueError("DEBUG must be false in production")
         if self.APP_ENV.lower() == "production" and not self.ENCRYPTION_KEY:
             raise ValueError("ENCRYPTION_KEY must be configured in production")
+        if self.APP_ENV.lower() == "production" and not self.MT5_BRIDGE_TOKEN:
+            raise ValueError("MT5_BRIDGE_TOKEN must be configured in production")
         return self
 
 

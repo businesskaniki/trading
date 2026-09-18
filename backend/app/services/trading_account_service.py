@@ -103,6 +103,40 @@ class TradingAccountService:
 
         return await self.repository.list_by_user(user_id=user_id)
 
+    async def reconcile_bridge_state(
+        self,
+        user_id: UUID,
+        bridge_status: dict | None,
+    ) -> list[TradingAccount]:
+        """Synchronize persisted account status with the live bridge session."""
+        accounts = await self.repository.list_by_user(user_id=user_id)
+        bridge_connected = bool(bridge_status and bridge_status.get("connected"))
+        bridge_login = bridge_status.get("login") if bridge_status else None
+        bridge_server = bridge_status.get("server") if bridge_status else None
+
+        for account in accounts:
+            if account.status == AccountStatus.ARCHIVED:
+                continue
+
+            if not bridge_status:
+                next_status = AccountStatus.ERROR if account.status == AccountStatus.CONNECTED else account.status
+            elif not bridge_connected:
+                next_status = AccountStatus.DISCONNECTED
+            else:
+                matches = (
+                    bridge_login is not None
+                    and int(bridge_login) == account.login
+                    and (bridge_server is None or bridge_server == account.server)
+                )
+                next_status = AccountStatus.CONNECTED if matches else AccountStatus.DISCONNECTED
+
+            if account.status != next_status:
+                account.status = next_status
+                self.repository.update(account)
+
+        await self.repository.commit()
+        return accounts
+
     async def update_account(
         self,
         account_id: UUID,

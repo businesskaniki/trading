@@ -13,6 +13,7 @@ from fastapi import (
 from app.api.dependencies import (
     get_analytics_service,
     get_current_user,
+    get_owned_account,
 )
 from app.schemas.analytics import (
     AccountPerformanceSummary,
@@ -44,6 +45,7 @@ router = APIRouter(
     tags=["analytics"],
     dependencies=[
         Depends(get_current_user),
+        Depends(get_owned_account),
     ],
 )
 

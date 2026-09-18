@@ -36,6 +36,7 @@ class OrderExecutionService:
     async def execute_order(
         self,
         order_id: UUID,
+        user_id: UUID | None = None,
     ):
         """
         Execute an existing database Order.
@@ -53,11 +54,12 @@ class OrderExecutionService:
         # 1. Retrieve order
         # ------------------------------------------------------
 
-        order = await self.order_repository.get_by_id(
-            order_id
-        )
+        order = await self.order_repository.get_by_id_for_update(order_id)
 
         if not order:
+            raise ValueError("Order not found")
+
+        if user_id is not None and order.account.user_id != user_id:
             raise ValueError("Order not found")
 
         # ------------------------------------------------------
@@ -73,6 +75,9 @@ class OrderExecutionService:
             raise ValueError(
                 "Cancelled orders cannot be executed"
             )
+
+        order.status = OrderStatus.EXECUTING
+        await self.order_repository.db.flush()
 
         # ------------------------------------------------------
         # 3. Resolve broker symbol

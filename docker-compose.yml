@@ -134,11 +134,7 @@ services:
   #################################################
   # Celery Worker
   #################################################
-  # This worker runs the trading loop, so it needs to see the engine
-  # and strategies packages, not just the backend app. Those two are
-  # sibling folders to backend/ on disk, so they're mounted in
-  # explicitly alongside it, both landing under /app so Python can
-  # import them as top-level packages.
+  # The backend image contains the backend strategies package and app.
 
   celery_worker:
     build:
@@ -163,8 +159,6 @@ services:
 
     volumes:
       - ./backend:/app
-      - ./engine:/app/engine
-      - ./strategies:/app/strategies
 
     networks:
       - aqe_network

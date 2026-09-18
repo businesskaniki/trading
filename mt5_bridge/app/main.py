@@ -5,6 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.api.router import router
+from app.core.logging import logger
+from app.services.connection_service import connection_service
 from app.infrastructure.redis.client import redis_client
 from app.services.market_data_service import market_data_service
 
@@ -24,7 +26,7 @@ async def lifespan(app: FastAPI):
         2. Disconnect Redis.
     """
 
-    print("Starting MT5 Bridge...")
+    logger.info("Starting MT5 Bridge")
 
     # ---------------------------------------------------------
     # Startup
@@ -37,12 +39,14 @@ async def lifespan(app: FastAPI):
     # Confirm the Redis connection is healthy.
     await redis_client.ping()
 
-    print("Redis connection established.")
+    await connection_service.start_monitor()
+
+    logger.info("Redis connection established")
 
     # Start market-data polling only after Redis is ready.
     market_data_service.start()
 
-    print("Market-data service started.")
+    logger.info("Market-data service started")
 
     try:
         yield
@@ -52,19 +56,20 @@ async def lifespan(app: FastAPI):
         # Shutdown
         # -----------------------------------------------------
 
-        print("Stopping MT5 Bridge...")
+        logger.info("Stopping MT5 Bridge")
 
         # Stop market-data polling before closing Redis.
         await market_data_service.stop()
+        await connection_service.stop_monitor()
 
-        print("Market-data service stopped.")
+        logger.info("Market-data service stopped")
 
         # Close the Redis connection after all publishers
         # have stopped using it.
         await redis_client.disconnect()
 
-        print("Redis connection closed.")
-        print("MT5 Bridge shutdown complete.")
+        logger.info("Redis connection closed")
+        logger.info("MT5 Bridge shutdown complete")
 
 
 app = FastAPI(

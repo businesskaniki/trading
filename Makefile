@@ -1,4 +1,4 @@
-.PHONY: help backend-test frontend-build compile smoke check docker-config
+.PHONY: help backend-test bridge-test frontend-build compile smoke check docker-config
 
 PYTHON ?= python
 
@@ -12,13 +12,16 @@ help:
 	@echo "  make docker-config   Validate Docker Compose config when Docker is installed"
 
 backend-test:
-	cd backend && pytest -q
+	cd backend && PYTHONPATH=. pytest -q
+
+bridge-test:
+	cd mt5_bridge && MT5_BRIDGE_TOKEN=$${MT5_BRIDGE_TOKEN:-test-token} PYTHONPATH=. pytest -q
 
 frontend-build:
 	cd frontend && npm run build
 
 compile:
-	SECRET_KEY=x POSTGRES_HOST=localhost POSTGRES_DB=db POSTGRES_USER=user POSTGRES_PASSWORD=pass REDIS_HOST=localhost SMTP_HOST=localhost SMTP_USERNAME=u SMTP_PASSWORD=p SMTP_FROM_EMAIL=test@example.com $(PYTHON) -m py_compile $$(find backend/app engine services scripts strategies -name '*.py' | sort)
+	SECRET_KEY=x POSTGRES_HOST=localhost POSTGRES_DB=db POSTGRES_USER=user POSTGRES_PASSWORD=pass REDIS_HOST=localhost SMTP_HOST=localhost SMTP_USERNAME=u SMTP_PASSWORD=p SMTP_FROM_EMAIL=test@example.com $(PYTHON) -m py_compile $$(find backend/app backend/risk backend/strategies services scripts -name '*.py' | sort)
 
 smoke:
 	$(PYTHON) scripts/smoke_test.py

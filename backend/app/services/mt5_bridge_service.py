@@ -31,6 +31,7 @@ class MT5BridgeService:
         timeout: float = 10.0,
     ) -> None:
         self.bridge_url = (bridge_url or settings.MT5_BRIDGE_URL).rstrip("/")
+        self.bridge_token = settings.MT5_BRIDGE_TOKEN
 
         self.timeout = timeout
 
@@ -471,6 +472,7 @@ class MT5BridgeService:
                 response = await client.request(
                     method=method,
                     url=url,
+                    headers={"X-Bridge-Token": self.bridge_token},
                     **kwargs,
                 )
 

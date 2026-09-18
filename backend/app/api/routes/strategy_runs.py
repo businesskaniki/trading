@@ -57,9 +57,10 @@ async def create_strategy_run(
     response_model=list[StrategyRunResponse],
 )
 async def list_strategy_runs(
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
-    return await service.get_strategy_runs()
+    return await service.get_strategy_runs(user_id=current_user.id)
 
 
 # ==========================================================
@@ -72,10 +73,12 @@ async def list_strategy_runs(
 )
 async def list_by_name(
     strategy_name: str,
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
     return await service.get_by_name(
-        strategy_name
+        strategy_name,
+        user_id=current_user.id,
     )
 
 
@@ -89,10 +92,12 @@ async def list_by_name(
 )
 async def list_by_status(
     status: StrategyRunStatus,
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
     return await service.get_by_status(
-        status
+        status,
+        user_id=current_user.id,
     )
 
 
@@ -106,10 +111,12 @@ async def list_by_status(
 )
 async def list_by_type(
     run_type: StrategyRunType,
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
     return await service.get_by_type(
-        run_type
+        run_type,
+        user_id=current_user.id,
     )
 
 
@@ -123,11 +130,13 @@ async def list_by_type(
 )
 async def get_strategy_run(
     strategy_run_id: UUID,
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
     try:
         return await service.get_strategy_run(
-            strategy_run_id
+            strategy_run_id,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -148,12 +157,14 @@ async def get_strategy_run(
 async def update_strategy_run(
     strategy_run_id: UUID,
     payload: StrategyRunUpdate,
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
     try:
         return await service.update_strategy_run(
             strategy_run_id,
             payload,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -173,11 +184,13 @@ async def update_strategy_run(
 )
 async def delete_strategy_run(
     strategy_run_id: UUID,
+    current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
     try:
         await service.delete_strategy_run(
-            strategy_run_id
+            strategy_run_id,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:

@@ -2,6 +2,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.database.models.risk_snapshot import RiskSnapshot
 
@@ -25,7 +26,7 @@ class RiskSnapshotRepository:
 
     async def get_by_id(self, snapshot_id: UUID) -> RiskSnapshot | None:
         result = await self.db.execute(
-            select(RiskSnapshot).where(RiskSnapshot.id == snapshot_id)
+            select(RiskSnapshot).options(selectinload(RiskSnapshot.account)).where(RiskSnapshot.id == snapshot_id)
         )
         return result.scalar_one_or_none()
 
@@ -39,7 +40,7 @@ class RiskSnapshotRepository:
 
     async def get_all(self) -> list[RiskSnapshot]:
         result = await self.db.execute(
-            select(RiskSnapshot).order_by(RiskSnapshot.snapshot_time.desc()))
+            select(RiskSnapshot).options(selectinload(RiskSnapshot.account)).order_by(RiskSnapshot.snapshot_time.desc()))
         return result.scalars().all()
 
     async def update(self, snapshot: RiskSnapshot, **data) -> RiskSnapshot:

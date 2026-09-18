@@ -20,49 +20,6 @@ class PositionBroker:
 
         positions = mt5.positions_get(ticket=ticket)
 
-        if not positions:
-            return None
-
-        position = positions[0]
-
-        tick = mt5.symbol_info_tick(position.symbol)
-
-        if tick is None:
-            raise Exception(
-                f"Unable to retrieve tick for {position.symbol}. "
-                f"MT5 error: {mt5.last_error()}"
-            )
-
-        if position.type == mt5.POSITION_TYPE_BUY:
-
-            order_type = mt5.ORDER_TYPE_SELL
-            price = tick.bid
-
-        elif position.type == mt5.POSITION_TYPE_SELL:
-
-            order_type = mt5.ORDER_TYPE_BUY
-            price = tick.ask
-
-        else:
-
-            raise Exception(
-                f"Unsupported position type: {position.type}"
-            )
-
-        request = {
-            "action": mt5.TRADE_ACTION_DEAL,
-            "symbol": position.symbol,
-            "volume": position.volume,
-            "type": order_type,
-            "position": position.ticket,
-            "price": price,
-            "deviation": 20,
-            "magic": position.magic,
-            "comment": "AQE CLOSE",
-        }
-
-        result = mt5.order_send(request)
-
         if result is None:
 
             raise Exception(

@@ -44,10 +44,12 @@ class StrategyRunService:
     async def get_strategy_run(
         self,
         strategy_run_id: UUID,
+        user_id: UUID | None = None,
     ):
 
         strategy_run = await self.repository.get_by_id(
-            strategy_run_id
+            strategy_run_id,
+            user_id=user_id,
         )
 
         if not strategy_run:
@@ -59,36 +61,37 @@ class StrategyRunService:
 
     async def get_strategy_runs(
         self,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_all()
+        return await self.repository.get_all(user_id=user_id)
 
     async def get_by_name(
         self,
         strategy_name: str,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_name(
-            strategy_name
-        )
+        runs = await self.repository.get_by_name(strategy_name)
+        return [run for run in runs if user_id is None or run.user_id == user_id]
 
     async def get_by_status(
         self,
         status: StrategyRunStatus,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_status(
-            status
-        )
+        runs = await self.repository.get_by_status(status)
+        return [run for run in runs if user_id is None or run.user_id == user_id]
 
     async def get_by_type(
         self,
         run_type: StrategyRunType,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_type(
-            run_type
-        )
+        runs = await self.repository.get_by_type(run_type)
+        return [run for run in runs if user_id is None or run.user_id == user_id]
 
     # ==========================================================
     # UPDATE
@@ -98,10 +101,12 @@ class StrategyRunService:
         self,
         strategy_run_id: UUID,
         data: StrategyRunUpdate,
+        user_id: UUID | None = None,
     ):
 
         strategy_run = await self.get_strategy_run(
-            strategy_run_id
+            strategy_run_id,
+            user_id=user_id,
         )
 
         return await self.repository.update(
@@ -118,10 +123,12 @@ class StrategyRunService:
     async def delete_strategy_run(
         self,
         strategy_run_id: UUID,
+        user_id: UUID | None = None,
     ):
 
         strategy_run = await self.get_strategy_run(
-            strategy_run_id
+            strategy_run_id,
+            user_id=user_id,
         )
 
         await self.repository.delete(

@@ -38,10 +38,11 @@ router = APIRouter(
 )
 async def create_order(
     payload: OrderCreate,
+    current_user=Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
     try:
-        return await service.create_order(payload)
+        return await service.create_order(payload, user_id=current_user.id)
 
     except ValueError as exc:
         raise HTTPException(
@@ -59,9 +60,10 @@ async def create_order(
     response_model=list[OrderResponse],
 )
 async def list_orders(
+    current_user=Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
-    return await service.get_orders()
+    return await service.get_orders(user_id=current_user.id)
 
 
 # ==========================================================
@@ -74,10 +76,11 @@ async def list_orders(
 )
 async def get_order(
     order_id: UUID,
+    current_user=Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
     try:
-        return await service.get_order(order_id)
+        return await service.get_order(order_id, user_id=current_user.id)
 
     except ValueError as exc:
         raise HTTPException(
@@ -97,12 +100,14 @@ async def get_order(
 async def update_order(
     order_id: UUID,
     payload: OrderUpdate,
+    current_user=Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
     try:
         return await service.update_order(
             order_id,
             payload,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -131,12 +136,14 @@ async def update_order(
 async def update_order_status(
     order_id: UUID,
     status_value: OrderStatus,
+    current_user=Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
     try:
         return await service.update_order_status(
             order_id,
             status_value,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -164,12 +171,13 @@ async def update_order_status(
 )
 async def execute_order(
     order_id: UUID,
+    current_user=Depends(get_current_user),
     service: OrderExecutionService = Depends(
         get_order_execution_service
     ),
 ):
     try:
-        return await service.execute_order(order_id)
+        return await service.execute_order(order_id, user_id=current_user.id)
 
     except ValueError as exc:
         message = str(exc)
@@ -196,10 +204,11 @@ async def execute_order(
 )
 async def delete_order(
     order_id: UUID,
+    current_user=Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
     try:
-        await service.delete_order(order_id)
+        await service.delete_order(order_id, user_id=current_user.id)
 
     except ValueError as exc:
         message = str(exc)

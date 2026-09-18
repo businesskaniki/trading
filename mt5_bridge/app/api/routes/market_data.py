@@ -39,7 +39,7 @@ def get_tick(symbol: str):
     if tick is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No market tick available for {symbol}.",
+            detail="No market tick available.",
         )
 
     data = tick._asdict()
@@ -232,7 +232,7 @@ def get_latest_tick(symbol: str):
     if tick is None:
         raise HTTPException(
             status_code=404,
-            detail=f"No streamed tick available for {symbol}.",
+            detail="No streamed tick available.",
         )
 
     return tick

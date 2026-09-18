@@ -82,13 +82,20 @@ async def create_trading_account(
 async def list_trading_accounts(
     current_user: User = Depends(get_current_user),
     service: TradingAccountService = Depends(get_trading_account_service),
+    bridge_service: MT5BridgeService = Depends(get_mt5_bridge_service),
 ):
     """
     Return all trading accounts belonging to the authenticated user.
     """
 
-    accounts = await service.list_accounts(
+    try:
+        bridge_status = await bridge_service.status()
+    except MT5BridgeError:
+        bridge_status = None
+
+    accounts = await service.reconcile_bridge_state(
         user_id=current_user.id,
+        bridge_status=bridge_status,
     )
 
     return TradingAccountListResponse(
@@ -108,12 +115,19 @@ async def list_trading_accounts(
 async def get_active_trading_account(
     current_user: User = Depends(get_current_user),
     service: TradingAccountService = Depends(get_trading_account_service),
+    bridge_service: MT5BridgeService = Depends(get_mt5_bridge_service),
 ):
     """
     Return the authenticated user's active connected trading account.
     """
 
     try:
+        try:
+            bridge_status = await bridge_service.status()
+        except MT5BridgeError:
+            bridge_status = None
+
+        await service.reconcile_bridge_state(current_user.id, bridge_status)
         return await service.get_active_account(
             user_id=current_user.id,
         )

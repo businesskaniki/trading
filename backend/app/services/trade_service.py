@@ -99,10 +99,14 @@ class TradeService:
     async def get_trade(
         self,
         trade_id: UUID,
+        user_id: UUID | None = None,
     ):
         trade = await self.repository.get_by_id(trade_id)
 
         if not trade:
+            raise ValueError("Trade not found")
+
+        if user_id is not None and trade.account.user_id != user_id:
             raise ValueError("Trade not found")
 
         return trade
@@ -111,9 +115,12 @@ class TradeService:
     # ALL TRADES
     # ----------------------------------------------------------
 
-    async def get_trades(self):
+    async def get_trades(self, user_id: UUID | None = None):
 
-        return await self.repository.get_all()
+        trades = await self.repository.get_all()
+        if user_id is not None:
+            return [trade for trade in trades if trade.account.user_id == user_id]
+        return trades
 
     # ----------------------------------------------------------
     # ACCOUNT
@@ -122,9 +129,11 @@ class TradeService:
     async def get_account_trades(
         self,
         account_id: UUID,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_account(account_id)
+        trades = await self.repository.get_by_account(account_id)
+        return [trade for trade in trades if user_id is None or trade.account.user_id == user_id]
 
     # ----------------------------------------------------------
     # SYMBOL
@@ -133,9 +142,11 @@ class TradeService:
     async def get_symbol_trades(
         self,
         symbol_id: UUID,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_symbol(symbol_id)
+        trades = await self.repository.get_by_symbol(symbol_id)
+        return [trade for trade in trades if user_id is None or trade.account.user_id == user_id]
 
     # ----------------------------------------------------------
     # STRATEGY
@@ -144,9 +155,11 @@ class TradeService:
     async def get_strategy_trades(
         self,
         strategy: str,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_strategy(strategy)
+        trades = await self.repository.get_by_strategy(strategy)
+        return [trade for trade in trades if user_id is None or trade.account.user_id == user_id]
 
     # ----------------------------------------------------------
     # RESULT
@@ -155,9 +168,11 @@ class TradeService:
     async def get_result_trades(
         self,
         result_type: TradeResult,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_result(result_type)
+        trades = await self.repository.get_by_result(result_type)
+        return [trade for trade in trades if user_id is None or trade.account.user_id == user_id]
 
     # ----------------------------------------------------------
     # LATEST
@@ -174,11 +189,15 @@ class TradeService:
     async def get_trade_by_position(
         self,
         position_id: UUID,
+        user_id: UUID | None = None,
     ):
 
         trade = await self.repository.get_by_position(position_id)
 
         if not trade:
+            raise ValueError("Trade not found")
+
+        if user_id is not None and trade.account.user_id != user_id:
             raise ValueError("Trade not found")
 
         return trade

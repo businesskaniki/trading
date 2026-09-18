@@ -2,6 +2,7 @@ from uuid import UUID
 
 from app.core.constants import OrderStatus, OrderType
 from app.repositories.order_repository import OrderRepository
+from app.repositories.trading_account_repository import TradingAccountRepository
 from app.schemas.order import OrderCreate, OrderUpdate
 
 
@@ -16,8 +17,10 @@ class OrderService:
     def __init__(
         self,
         repository: OrderRepository,
+        account_repository: TradingAccountRepository | None = None,
     ):
         self.repository = repository
+        self.account_repository = account_repository
 
     # ==========================================================
     # CREATE
@@ -26,7 +29,13 @@ class OrderService:
     async def create_order(
         self,
         data: OrderCreate,
+        user_id: UUID | None = None,
     ):
+
+        if user_id is not None and self.account_repository is not None:
+            account = await self.account_repository.get_by_id_and_user(data.account_id, user_id)
+            if account is None:
+                raise ValueError("Trading account not found")
 
         # ------------------------------------------------------
         # Validate LIMIT / STOP price
@@ -61,6 +70,7 @@ class OrderService:
     async def get_order(
         self,
         order_id: UUID,
+        user_id: UUID | None = None,
     ):
 
         order = await self.repository.get_by_id(
@@ -72,15 +82,21 @@ class OrderService:
                 "Order not found"
             )
 
+        if user_id is not None and order.account.user_id != user_id:
+            raise ValueError("Order not found")
+
         return order
 
     # ----------------------------------------------------------
     # All orders
     # ----------------------------------------------------------
 
-    async def get_orders(self):
+    async def get_orders(self, user_id: UUID | None = None):
 
-        return await self.repository.get_all()
+        orders = await self.repository.get_all()
+        if user_id is not None:
+            return [order for order in orders if order.account.user_id == user_id]
+        return orders
 
     # ----------------------------------------------------------
     # Account orders
@@ -137,11 +153,10 @@ class OrderService:
         self,
         order_id: UUID,
         data: OrderUpdate,
+        user_id: UUID | None = None,
     ):
 
-        order = await self.get_order(
-            order_id
-        )
+        order = await self.get_order(order_id, user_id=user_id)
 
         # ------------------------------------------------------
         # Filled orders cannot be modified
@@ -204,11 +219,10 @@ class OrderService:
         self,
         order_id: UUID,
         status: OrderStatus,
+        user_id: UUID | None = None,
     ):
 
-        order = await self.get_order(
-            order_id
-        )
+        order = await self.get_order(order_id, user_id=user_id)
 
         # ------------------------------------------------------
         # Terminal states
@@ -238,11 +252,10 @@ class OrderService:
     async def delete_order(
         self,
         order_id: UUID,
+        user_id: UUID | None = None,
     ):
 
-        order = await self.get_order(
-            order_id
-        )
+        order = await self.get_order(order_id, user_id=user_id)
 
         # ------------------------------------------------------
         # Filled orders

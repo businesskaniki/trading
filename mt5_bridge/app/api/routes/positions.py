@@ -73,11 +73,11 @@ def close_position(ticket: int):
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Position close failed.",
         )
 
 @router.patch(
@@ -112,9 +112,9 @@ def modify_position(
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Position modification failed.",
         )

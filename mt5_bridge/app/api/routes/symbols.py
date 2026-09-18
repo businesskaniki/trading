@@ -28,10 +28,10 @@ def list_symbols():
     try:
         return service.list_symbols()
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Unable to retrieve symbols.",
         )
 
 
@@ -56,10 +56,10 @@ def get_symbol(symbol: str):
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Unable to retrieve symbol.",
         )
 
 
@@ -84,10 +84,10 @@ def get_tick(symbol: str):
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Unable to retrieve tick.",
         )
 
 
@@ -127,8 +127,8 @@ def get_candles(
     except HTTPException:
         raise
 
-    except Exception as exc:
+    except Exception:
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Unable to retrieve candles.",
         )

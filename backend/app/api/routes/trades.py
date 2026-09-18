@@ -27,9 +27,10 @@ router = APIRouter(
     response_model=list[TradeResponse],
 )
 async def list_trades(
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_trades()
+    return await service.get_trades(user_id=current_user.id)
 
 
 # ==========================================================
@@ -43,9 +44,13 @@ async def list_trades(
     response_model=TradeResponse | None,
 )
 async def get_latest_trade(
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_latest_trade()
+    trade = await service.get_latest_trade()
+    if trade is not None and trade.account.user_id != current_user.id:
+        return None
+    return trade
 
 
 # ==========================================================
@@ -59,9 +64,10 @@ async def get_latest_trade(
 )
 async def list_by_result(
     result: TradeResult,
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_result_trades(result)
+    return await service.get_result_trades(result, user_id=current_user.id)
 
 
 # ==========================================================
@@ -75,9 +81,10 @@ async def list_by_result(
 )
 async def list_by_account(
     account_id: UUID,
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_account_trades(account_id)
+    return await service.get_account_trades(account_id, user_id=current_user.id)
 
 
 # ==========================================================
@@ -91,9 +98,10 @@ async def list_by_account(
 )
 async def list_by_symbol(
     symbol_id: UUID,
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_symbol_trades(symbol_id)
+    return await service.get_symbol_trades(symbol_id, user_id=current_user.id)
 
 
 # ==========================================================
@@ -107,9 +115,10 @@ async def list_by_symbol(
 )
 async def list_by_strategy(
     strategy: str,
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_strategy_trades(strategy)
+    return await service.get_strategy_trades(strategy, user_id=current_user.id)
 
 
 # ==========================================================
@@ -123,10 +132,11 @@ async def list_by_strategy(
 )
 async def get_trade_by_position(
     position_id: UUID,
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
     try:
-        return await service.get_trade_by_position(position_id)
+        return await service.get_trade_by_position(position_id, user_id=current_user.id)
 
     except ValueError as exc:
         raise HTTPException(
@@ -147,10 +157,11 @@ async def get_trade_by_position(
 )
 async def get_trade(
     trade_id: UUID,
+    current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
     try:
-        return await service.get_trade(trade_id)
+        return await service.get_trade(trade_id, user_id=current_user.id)
 
     except ValueError as exc:
         raise HTTPException(

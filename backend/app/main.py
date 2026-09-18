@@ -24,10 +24,10 @@ from app.market_data.historical_synchronizer import (
 # whole app - including MarketDataConsumer's diagnostic logging -
 # was silently going nowhere. This must run before anything else
 # below produces a single log line.
-# logging.basicConfig(
-#     level=logging.INFO,
-#     format="%(asctime)s %(levelname)s %(name)s %(message)s",
-# )
+logging.basicConfig(
+    level=logging.INFO if settings.DEBUG else logging.WARNING,
+    format="%(asctime)s %(levelname)s %(name)s %(message)s",
+)
 
 logger = logging.getLogger(__name__)
 

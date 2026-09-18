@@ -74,7 +74,7 @@ class TradeRepository:
     ) -> Trade | None:
 
         result = await self.db.execute(
-            select(Trade).where(
+            select(Trade).options(selectinload(Trade.account)).where(
                 Trade.ticket == ticket
             )
         )
@@ -87,7 +87,7 @@ class TradeRepository:
     ) -> Trade | None:
 
         result = await self.db.execute(
-            select(Trade).where(
+            select(Trade).options(selectinload(Trade.account)).where(
                 Trade.position_id == position_id
             )
         )
@@ -100,7 +100,7 @@ class TradeRepository:
     ) -> list[Trade]:
 
         result = await self.db.execute(
-            select(Trade)
+            select(Trade).options(selectinload(Trade.account))
             .where(
                 Trade.account_id == account_id
             )
@@ -119,7 +119,7 @@ class TradeRepository:
     ) -> list[Trade]:
 
         result = await self.db.execute(
-            select(Trade)
+            select(Trade).options(selectinload(Trade.account))
             .where(
                 Trade.symbol_id == symbol_id
             )
@@ -138,7 +138,7 @@ class TradeRepository:
     ) -> list[Trade]:
 
         result = await self.db.execute(
-            select(Trade)
+            select(Trade).options(selectinload(Trade.account))
             .where(
                 Trade.strategy == strategy
             )
@@ -157,7 +157,7 @@ class TradeRepository:
     ) -> list[Trade]:
 
         result = await self.db.execute(
-            select(Trade)
+            select(Trade).options(selectinload(Trade.account))
             .where(
                 Trade.result == result_type
             )
@@ -175,7 +175,7 @@ class TradeRepository:
     ) -> Trade | None:
 
         result = await self.db.execute(
-            select(Trade)
+            select(Trade).options(selectinload(Trade.account))
             .order_by(
                 Trade.closed_at.desc()
             )
@@ -189,7 +189,7 @@ class TradeRepository:
     ) -> list[Trade]:
 
         result = await self.db.execute(
-            select(Trade)
+            select(Trade).options(selectinload(Trade.account))
             .order_by(
                 Trade.closed_at.asc()
             )

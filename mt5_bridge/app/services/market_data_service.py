@@ -363,7 +363,7 @@ class MarketDataService:
                 await asyncio.sleep(self.poll_interval)
                 continue
 
-            if not self._mt5_ready():
+            if not await asyncio.to_thread(self._mt5_ready):
 
                 if not connection_warning_logged:
                     logger.warning(
@@ -387,7 +387,7 @@ class MarketDataService:
                     break
 
                 try:
-                    tick = self.get_tick(symbol)
+                    tick = await asyncio.to_thread(self.get_tick, symbol)
 
                     if tick is None:
                         continue

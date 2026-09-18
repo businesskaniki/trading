@@ -1,3 +1,5 @@
+from uuid import UUID
+
 from fastapi import Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -108,6 +110,23 @@ async def get_current_user(
         )
 
     return user
+
+
+async def get_owned_account(
+    account_id: UUID,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    account = await TradingAccountRepository(db).get_by_id_and_user(
+        account_id=account_id,
+        user_id=current_user.id,
+    )
+    if account is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trading account not found.",
+        )
+    return account
 
 
 # ==========================================================
@@ -240,6 +259,7 @@ def get_order_service(
 ) -> OrderService:
     return OrderService(
         order_repository,
+        account_repository=TradingAccountRepository(order_repository.db),
     )
 
 
@@ -266,6 +286,7 @@ def get_position_service(
 ) -> PositionService:
     return PositionService(
         position_repository,
+        account_repository=TradingAccountRepository(position_repository.db),
     )
 
 
@@ -307,6 +328,7 @@ def get_performance_service(
     return PerformanceService(
         repository=PerformanceRepository(db),
         trade_repository=TradeRepository(db),
+        strategy_run_repository=StrategyRunRepository(db),
     )
 
 
@@ -320,6 +342,7 @@ def get_risk_snapshot_service(
 ) -> RiskSnapshotService:
     return RiskSnapshotService(
         RiskSnapshotRepository(db),
+        TradingAccountRepository(db),
     )
 
 

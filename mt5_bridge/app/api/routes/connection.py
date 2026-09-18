@@ -5,16 +5,13 @@ from app.schemas.connection import (
     ConnectionStatus,
     DisconnectResponse,
 )
-from app.services.connection_service import ConnectionService
+from app.services.connection_service import connection_service
 
 
 router = APIRouter(
     prefix="/connection",
     tags=["Connection"],
 )
-
-
-connection_service = ConnectionService()
 
 
 @router.post(
@@ -32,10 +29,7 @@ def connect(data: ConnectRequest):
     if not connected:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail={
-                "message": "Failed to connect to MetaTrader 5",
-                "status": connection_service.status(),
-            },
+            detail="Failed to connect to MetaTrader 5.",
         )
 
     return connection_service.status()

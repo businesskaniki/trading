@@ -35,6 +35,7 @@ router = APIRouter(
 )
 async def generate_performance(
     payload: PerformanceGenerateRequest,
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
@@ -59,6 +60,7 @@ async def generate_performance(
             generated_at=payload.generated_at,
             starting_balance=payload.starting_balance,
             ending_balance=payload.ending_balance,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -77,11 +79,12 @@ async def generate_performance(
     response_model=list[PerformanceResponse],
 )
 async def list_performance(
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
 ):
-    return await service.get_all_performance()
+    return await service.get_all_performance(user_id=current_user.id)
 
 
 # ==========================================================
@@ -93,11 +96,12 @@ async def list_performance(
     response_model=PerformanceResponse | None,
 )
 async def get_latest_performance(
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
 ):
-    return await service.get_latest()
+    return await service.get_latest(user_id=current_user.id)
 
 
 # ==========================================================
@@ -110,12 +114,14 @@ async def get_latest_performance(
 )
 async def get_strategy_performance(
     strategy_run_id: UUID,
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
 ):
     return await service.get_strategy_performance(
-        strategy_run_id
+        strategy_run_id,
+        user_id=current_user.id,
     )
 
 
@@ -129,12 +135,14 @@ async def get_strategy_performance(
 )
 async def get_by_period(
     period: PerformancePeriod,
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
 ):
     return await service.get_by_period(
-        period
+        period,
+        user_id=current_user.id,
     )
 
 
@@ -148,13 +156,15 @@ async def get_by_period(
 )
 async def get_performance(
     performance_id: UUID,
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
 ):
     try:
         return await service.get_performance(
-            performance_id
+            performance_id,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -175,6 +185,7 @@ async def get_performance(
 async def update_performance(
     performance_id: UUID,
     payload: PerformanceUpdate,
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
@@ -183,6 +194,7 @@ async def update_performance(
         return await service.update_performance(
             performance_id,
             payload,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -202,13 +214,15 @@ async def update_performance(
 )
 async def delete_performance(
     performance_id: UUID,
+    current_user=Depends(get_current_user),
     service: PerformanceService = Depends(
         get_performance_service
     ),
 ):
     try:
         await service.delete_performance(
-            performance_id
+            performance_id,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:

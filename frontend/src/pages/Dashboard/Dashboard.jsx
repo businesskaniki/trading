@@ -22,6 +22,7 @@ import {
   stopBot,
 } from "../../redux/dashboard/botThunks";
 import { fetchTradingUniverse } from "../../redux/dashboard/symbols/symbolsThunks";
+import { fetchAccounts } from "../../redux/dashboard/accounts/accountsThunks";
 
 import { openTickStream } from "../../api/tickStream";
 
@@ -95,6 +96,7 @@ const Dashboard = () => {
   useEffect(() => {
     dispatch(loadDashboard());
     dispatch(fetchBotStatus());
+    dispatch(fetchAccounts());
   }, [dispatch]);
 
   // --------------------------------------------------
@@ -116,6 +118,7 @@ const Dashboard = () => {
   useEffect(() => {
     const refresh = window.setInterval(() => {
       dispatch(loadDashboard());
+      dispatch(fetchAccounts());
 
       if (selectedAccount?.id) {
         dispatch(fetchTradingUniverse(selectedAccount.id));
@@ -170,6 +173,7 @@ const Dashboard = () => {
   const handleRefresh = () => {
     dispatch(loadDashboard());
     dispatch(fetchBotStatus());
+    dispatch(fetchAccounts());
 
     if (selectedAccount?.id) {
       dispatch(fetchTradingUniverse(selectedAccount.id));

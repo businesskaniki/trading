@@ -23,9 +23,9 @@ def get_account():
 
         return AccountResponse(**account)
 
-    except Exception as exc:
+    except Exception:
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Unable to retrieve account information.",
         )

@@ -29,11 +29,11 @@ def create_order(request: OrderRequest):
             request.model_dump()
         )
 
-    except Exception as exc:
+    except Exception:
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Order submission failed.",
         )
 
 
@@ -67,9 +67,9 @@ def create_pending_order(request: OrderRequest):
             comment=request.comment,
         )
 
-    except Exception as exc:
+    except Exception:
 
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
+            detail="Pending order submission failed.",
         )

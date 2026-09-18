@@ -1,5 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
+from uuid import UUID
 
 from app.core.constants import (
     PositionDirection,
@@ -49,7 +50,7 @@ class PositionSyncService:
     # SYNC ALL POSITIONS
     # ==========================================================
 
-    async def sync_positions(self):
+    async def sync_positions(self, user_id: UUID | None = None):
         """
         Synchronize broker positions with AQE positions.
         """
@@ -73,7 +74,8 @@ class PositionSyncService:
         for broker_position in broker_positions:
 
             position = await self._sync_position(
-                broker_position
+                broker_position,
+                user_id=user_id,
             )
 
             if position is not None:
@@ -85,7 +87,8 @@ class PositionSyncService:
 
         closed_positions = (
             await self._reconcile_closed_positions(
-                broker_tickets
+                broker_tickets,
+                user_id=user_id,
             )
         )
 
@@ -102,6 +105,7 @@ class PositionSyncService:
     async def _sync_position(
         self,
         broker_position: dict,
+        user_id: UUID | None = None,
     ):
         ticket = broker_position.get("ticket")
 
@@ -119,13 +123,16 @@ class PositionSyncService:
         )
 
         if existing:
+            if user_id is not None and existing.account.user_id != user_id:
+                return None
             return await self._update_existing_position(
                 existing,
                 broker_position,
             )
 
         return await self._create_position(
-            broker_position
+            broker_position,
+            user_id=user_id,
         )
 
     # ==========================================================
@@ -135,6 +142,7 @@ class PositionSyncService:
     async def _create_position(
         self,
         broker_position: dict,
+        user_id: UUID | None = None,
     ):
         """
         Create an AQE Position from a broker position.
@@ -164,6 +172,9 @@ class PositionSyncService:
         )
 
         if not order:
+            return None
+
+        if user_id is not None and order.account.user_id != user_id:
             return None
 
         # ------------------------------------------------------
@@ -316,6 +327,7 @@ class PositionSyncService:
     async def _reconcile_closed_positions(
         self,
         broker_tickets: set[int],
+        user_id: UUID | None = None,
     ):
         """
         Find AQE positions that are OPEN in PostgreSQL but no longer
@@ -330,6 +342,13 @@ class PositionSyncService:
         open_positions = (
             await self.position_repository.get_open_positions()
         )
+
+        if user_id is not None:
+            open_positions = [
+                position
+                for position in open_positions
+                if position.account.user_id == user_id
+            ]
 
         closed_positions = []
 

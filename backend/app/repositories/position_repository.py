@@ -78,7 +78,7 @@ class PositionRepository:
     ) -> Position | None:
 
         result = await self.db.execute(
-            select(Position).where(Position.ticket == ticket)
+            select(Position).options(selectinload(Position.account)).where(Position.ticket == ticket)
         )
 
         return result.scalar_one_or_none()

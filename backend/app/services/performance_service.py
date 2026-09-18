@@ -5,6 +5,7 @@ from uuid import UUID
 from app.core.constants import PerformancePeriod, TradeResult
 from app.repositories.performance_repository import PerformanceRepository
 from app.repositories.trade_repository import TradeRepository
+from app.repositories.strategy_run_repository import StrategyRunRepository
 from app.schemas.performance import (
     PerformanceCreate,
     PerformanceUpdate,
@@ -21,9 +22,11 @@ class PerformanceService:
         self,
         repository: PerformanceRepository,
         trade_repository: TradeRepository,
+        strategy_run_repository: StrategyRunRepository | None = None,
     ):
         self.repository = repository
         self.trade_repository = trade_repository
+        self.strategy_run_repository = strategy_run_repository
 
     # ==========================================================
     # CALCULATE PERFORMANCE
@@ -37,6 +40,7 @@ class PerformanceService:
         generated_at: datetime,
         starting_balance: Decimal,
         ending_balance: Decimal,
+        user_id: UUID | None = None,
     ):
         """
         Calculate a Performance snapshot from completed trades.
@@ -284,6 +288,11 @@ class PerformanceService:
         ending_balance: Decimal,
     ):
 
+        if user_id is not None and self.strategy_run_repository is not None:
+            strategy_run = await self.strategy_run_repository.get_by_id(strategy_run_id, user_id=user_id)
+            if strategy_run is None:
+                raise ValueError("Strategy run not found")
+
         trades = await self.trade_repository.get_by_account_and_period(
             account_id,
             start,
@@ -332,11 +341,14 @@ class PerformanceService:
     async def get_performance(
         self,
         performance_id: UUID,
+        user_id: UUID | None = None,
     ):
 
         performance = await self.repository.get_by_id(performance_id)
 
         if not performance:
+            raise ValueError("Performance record not found")
+        if user_id is not None and performance.strategy_run.user_id != user_id:
             raise ValueError("Performance record not found")
 
         return performance
@@ -344,32 +356,47 @@ class PerformanceService:
     async def get_strategy_performance(
         self,
         strategy_run_id: UUID,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_strategy_run(strategy_run_id)
+        performance = await self.repository.get_by_strategy_run(strategy_run_id)
+        if performance is not None and user_id is not None and performance.strategy_run.user_id != user_id:
+            return None
+        return performance
 
-    async def get_all_performance(self):
+    async def get_all_performance(self, user_id: UUID | None = None):
 
-        return await self.repository.get_all()
+        records = await self.repository.get_all()
+        if user_id is not None:
+            return [record for record in records if record.strategy_run.user_id == user_id]
+        return records
 
     async def get_by_period(
         self,
         period: PerformancePeriod,
+        user_id: UUID | None = None,
     ):
 
-        return await self.repository.get_by_period(period)
+        records = await self.repository.get_by_period(period)
+        if user_id is not None:
+            return [record for record in records if record.strategy_run.user_id == user_id]
+        return records
 
-    async def get_latest(self):
+    async def get_latest(self, user_id: UUID | None = None):
 
-        return await self.repository.get_latest()
+        record = await self.repository.get_latest()
+        if record is not None and user_id is not None and record.strategy_run.user_id != user_id:
+            return None
+        return record
 
     async def update_performance(
         self,
         performance_id: UUID,
         data: PerformanceUpdate,
+        user_id: UUID | None = None,
     ):
 
-        performance = await self.get_performance(performance_id)
+        performance = await self.get_performance(performance_id, user_id=user_id)
 
         return await self.repository.update(
             performance,
@@ -379,9 +406,10 @@ class PerformanceService:
     async def delete_performance(
         self,
         performance_id: UUID,
+        user_id: UUID | None = None,
     ):
 
-        performance = await self.get_performance(performance_id)
+        performance = await self.get_performance(performance_id, user_id=user_id)
 
         await self.repository.delete(performance)
 

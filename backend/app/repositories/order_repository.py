@@ -49,9 +49,22 @@ class OrderRepository:
 
         return result.scalar_one_or_none()
 
-    async def get_by_ticket(self, ticket: int) -> Order | None:
+    async def get_by_id_for_update(self, order_id: UUID) -> Order | None:
         result = await self.db.execute(
             select(Order)
+            .options(
+                selectinload(Order.account),
+                selectinload(Order.symbol),
+                selectinload(Order.position),
+            )
+            .where(Order.id == order_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_ticket(self, ticket: int) -> Order | None:
+        result = await self.db.execute(
+            select(Order).options(selectinload(Order.account))
             .where(Order.ticket == ticket)
         )
 

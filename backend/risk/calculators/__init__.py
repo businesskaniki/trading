@@ -1,4 +1,3 @@
-```python
 """Pure calculation utilities for the AQE Risk Engine."""
 
 from .exposure import (
@@ -30,4 +29,3 @@ __all__ = [
     "calculate_total_exposure",
     "normalize_position_size",
 ]
-```

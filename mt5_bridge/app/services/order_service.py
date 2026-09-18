@@ -19,9 +19,7 @@ class OrderService:
             "price": request["price"],
             "deviation": request.get("deviation", 20),
             "magic": request.get("magic", 0),
-            "comment": " ".join(
-    str(request.get("comment", "AQE")).split()
-)[:31],
+            "comment": str(request.get("comment", "AQE"))[:31],
         }
 
         # Only add SL when an actual value was supplied
@@ -31,9 +29,6 @@ class OrderService:
         # Only add TP when an actual value was supplied
         if request.get("tp") is not None:
             mt5_request["tp"] = request["tp"]
-
-            
-            print("MT5 REQUEST:", repr(mt5_request))
 
         result = self.broker.send(mt5_request)
 

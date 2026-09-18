@@ -42,7 +42,7 @@ class PerformanceRepository:
     ) -> Performance | None:
 
         result = await self.db.execute(
-            select(Performance)
+            select(Performance).options(selectinload(Performance.strategy_run))
             .options(
                 selectinload(Performance.strategy_run),
             )
@@ -57,7 +57,7 @@ class PerformanceRepository:
     ) -> Performance | None:
 
         result = await self.db.execute(
-            select(Performance)
+            select(Performance).options(selectinload(Performance.strategy_run))
             .where(
                 Performance.strategy_run_id == strategy_run_id
             )
@@ -68,7 +68,7 @@ class PerformanceRepository:
     async def get_all(self) -> list[Performance]:
 
         result = await self.db.execute(
-            select(Performance)
+            select(Performance).options(selectinload(Performance.strategy_run))
             .options(
                 selectinload(Performance.strategy_run),
             )
@@ -85,7 +85,7 @@ class PerformanceRepository:
     ) -> list[Performance]:
 
         result = await self.db.execute(
-            select(Performance)
+            select(Performance).options(selectinload(Performance.strategy_run))
             .where(
                 Performance.period == period
             )
@@ -99,7 +99,7 @@ class PerformanceRepository:
     async def get_latest(self) -> Performance | None:
 
         result = await self.db.execute(
-            select(Performance)
+            select(Performance).options(selectinload(Performance.strategy_run))
             .order_by(
                 Performance.generated_at.desc()
             )

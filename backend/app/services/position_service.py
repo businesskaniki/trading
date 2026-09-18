@@ -4,6 +4,7 @@ from uuid import UUID
 
 from app.core.constants import PositionStatus
 from app.repositories.position_repository import PositionRepository
+from app.repositories.trading_account_repository import TradingAccountRepository
 from app.schemas.position import PositionCreate, PositionUpdate
 
 
@@ -18,8 +19,10 @@ class PositionService:
     def __init__(
         self,
         repository: PositionRepository,
+        account_repository: TradingAccountRepository | None = None,
     ):
         self.repository = repository
+        self.account_repository = account_repository
 
     # ==========================================================
     # CREATE
@@ -28,6 +31,7 @@ class PositionService:
     async def create_position(
         self,
         data: PositionCreate,
+        user_id: UUID | None = None,
     ):
         """
         Create a new AQE Position.
@@ -63,6 +67,11 @@ class PositionService:
                 "Position must be associated with an order"
             )
 
+        if user_id is not None and self.account_repository is not None:
+            account = await self.account_repository.get_by_id_and_user(data.account_id, user_id)
+            if account is None:
+                raise ValueError("Trading account not found")
+
         return await self.repository.create(
             **data.model_dump()
         )
@@ -74,6 +83,7 @@ class PositionService:
     async def get_position(
         self,
         position_id: UUID,
+        user_id: UUID | None = None,
     ):
         """
         Get a Position by AQE UUID.
@@ -88,15 +98,21 @@ class PositionService:
                 "Position not found"
             )
 
+        if user_id is not None and position.account.user_id != user_id:
+            raise ValueError("Position not found")
+
         return position
 
     # ----------------------------------------------------------
     # ALL POSITIONS
     # ----------------------------------------------------------
 
-    async def get_positions(self):
+    async def get_positions(self, user_id: UUID | None = None):
 
-        return await self.repository.get_all()
+        positions = await self.repository.get_all()
+        if user_id is not None:
+            return [position for position in positions if position.account.user_id == user_id]
+        return positions
 
     # ----------------------------------------------------------
     # OPEN POSITIONS
@@ -194,11 +210,10 @@ class PositionService:
         position_id: UUID,
         data: PositionUpdate,
         commit: bool = True,
+        user_id: UUID | None = None,
     ):
 
-        position = await self.get_position(
-            position_id
-        )
+        position = await self.get_position(position_id, user_id=user_id)
 
         # ------------------------------------------------------
         # Closed positions
@@ -274,10 +289,9 @@ class PositionService:
         position_id: UUID,
         new_status: PositionStatus,
         commit: bool = True,
+        user_id: UUID | None = None,
     ):
-        position = await self.get_position(
-            position_id
-        )
+        position = await self.get_position(position_id, user_id=user_id)
 
         current_status = position.status
 
@@ -321,11 +335,10 @@ class PositionService:
     async def delete_position(
         self,
         position_id: UUID,
+        user_id: UUID | None = None,
     ):
 
-        position = await self.get_position(
-            position_id
-        )
+        position = await self.get_position(position_id, user_id=user_id)
 
         if position.status == PositionStatus.OPEN:
             raise ValueError(

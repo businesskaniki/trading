@@ -63,6 +63,12 @@ const Accounts = () => {
 
   useEffect(() => {
     dispatch(fetchAccounts());
+
+    const refreshTimer = window.setInterval(() => {
+      dispatch(fetchAccounts());
+    }, 10000);
+
+    return () => window.clearInterval(refreshTimer);
   }, [dispatch]);
 
   // =====================================================

@@ -35,12 +35,13 @@ router = APIRouter(
 )
 async def create_position(
     payload: PositionCreate,
+    current_user=Depends(get_current_user),
     service: PositionService = Depends(
         get_position_service
     ),
 ):
     try:
-        return await service.create_position(payload)
+        return await service.create_position(payload, user_id=current_user.id)
 
     except ValueError as exc:
         raise HTTPException(
@@ -58,11 +59,12 @@ async def create_position(
     response_model=list[PositionResponse],
 )
 async def list_positions(
+    current_user=Depends(get_current_user),
     service: PositionService = Depends(
         get_position_service
     ),
 ):
-    return await service.get_positions()
+    return await service.get_positions(user_id=current_user.id)
 
 
 # ==========================================================
@@ -75,13 +77,15 @@ async def list_positions(
 )
 async def get_position(
     position_id: UUID,
+    current_user=Depends(get_current_user),
     service: PositionService = Depends(
         get_position_service
     ),
 ):
     try:
         return await service.get_position(
-            position_id
+            position_id,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -102,6 +106,7 @@ async def get_position(
 async def update_position(
     position_id: UUID,
     payload: PositionUpdate,
+    current_user=Depends(get_current_user),
     service: PositionService = Depends(
         get_position_service
     ),
@@ -110,6 +115,7 @@ async def update_position(
         return await service.update_position(
             position_id,
             payload,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -138,6 +144,7 @@ async def update_position(
 async def update_position_status(
     position_id: UUID,
     status_value: PositionStatus,
+    current_user=Depends(get_current_user),
     service: PositionService = Depends(
         get_position_service
     ),
@@ -146,6 +153,7 @@ async def update_position_status(
         return await service.update_position_status(
             position_id,
             status_value,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -173,13 +181,15 @@ async def update_position_status(
 )
 async def delete_position(
     position_id: UUID,
+    current_user=Depends(get_current_user),
     service: PositionService = Depends(
         get_position_service
     ),
 ):
     try:
         await service.delete_position(
-            position_id
+            position_id,
+            user_id=current_user.id,
         )
 
     except ValueError as exc:
@@ -209,12 +219,13 @@ async def delete_position(
     response_model=list[PositionResponse],
 )
 async def sync_positions(
+    current_user=Depends(get_current_user),
     service: PositionSyncService = Depends(
         get_position_sync_service
     ),
 ):
     try:
-        return await service.sync_positions()
+        return await service.sync_positions(user_id=current_user.id)
 
     except ValueError as exc:
         raise HTTPException(

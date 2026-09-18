@@ -1,5 +1,6 @@
 from decimal import Decimal
 from enum import Enum
+from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -25,6 +26,8 @@ class ExecutionOrder(BaseModel):
         min_length=1,
         max_length=32,
     )
+
+    account_id: UUID | None = None
 
     side: OrderSide
 
