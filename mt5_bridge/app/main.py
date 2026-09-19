@@ -2,11 +2,10 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import Depends, FastAPI
 
 from app.api.router import router
-from app.core.logging import logger
-from app.services.connection_service import connection_service
+from app.core.bridge_auth import verify_bridge_key
 from app.infrastructure.redis.client import redis_client
 from app.services.market_data_service import market_data_service
 
@@ -26,7 +25,7 @@ async def lifespan(app: FastAPI):
         2. Disconnect Redis.
     """
 
-    logger.info("Starting MT5 Bridge")
+    print("Starting MT5 Bridge...")
 
     # ---------------------------------------------------------
     # Startup
@@ -39,14 +38,12 @@ async def lifespan(app: FastAPI):
     # Confirm the Redis connection is healthy.
     await redis_client.ping()
 
-    await connection_service.start_monitor()
-
-    logger.info("Redis connection established")
+    print("Redis connection established.")
 
     # Start market-data polling only after Redis is ready.
     market_data_service.start()
 
-    logger.info("Market-data service started")
+    print("Market-data service started.")
 
     try:
         yield
@@ -56,20 +53,19 @@ async def lifespan(app: FastAPI):
         # Shutdown
         # -----------------------------------------------------
 
-        logger.info("Stopping MT5 Bridge")
+        print("Stopping MT5 Bridge...")
 
         # Stop market-data polling before closing Redis.
         await market_data_service.stop()
-        await connection_service.stop_monitor()
 
-        logger.info("Market-data service stopped")
+        print("Market-data service stopped.")
 
         # Close the Redis connection after all publishers
         # have stopped using it.
         await redis_client.disconnect()
 
-        logger.info("Redis connection closed")
-        logger.info("MT5 Bridge shutdown complete")
+        print("Redis connection closed.")
+        print("MT5 Bridge shutdown complete.")
 
 
 app = FastAPI(
@@ -78,4 +74,12 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-app.include_router(router)
+# Every route mounted under `router` (symbols, orders, positions,
+# connection, history, market-data, account) now requires a valid
+# X-Bridge-Key header. Applied once here rather than per-route or
+# per-sub-router, so nothing added later can accidentally ship
+# unprotected.
+app.include_router(
+    router,
+    dependencies=[Depends(verify_bridge_key)],
+)

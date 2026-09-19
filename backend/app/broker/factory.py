@@ -4,7 +4,10 @@ from app.broker.mt5.adapter import MT5Adapter
 from app.broker.paper.adapter import PaperBroker
 
 
-def get_broker_adapter(broker: str) -> BrokerAdapter:
+def get_broker_adapter(
+    broker: str,
+    bridge_url: str | None = None,
+) -> BrokerAdapter:
     """
     Create and return the appropriate broker adapter.
     """
@@ -13,7 +16,7 @@ def get_broker_adapter(broker: str) -> BrokerAdapter:
 
     if broker == "mt5":
         return MT5Adapter(
-            bridge_url=settings.MT5_BRIDGE_URL
+            bridge_url=bridge_url or settings.MT5_BRIDGE_URL
         )
 
     if broker == "paper":

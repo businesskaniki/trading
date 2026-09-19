@@ -19,13 +19,10 @@ class Settings(BaseSettings):
     DEBUG: bool = True
 
     SECRET_KEY: str
-    # Dedicated Fernet key for broker credentials.  Keep this separate from
-    # JWT signing so either secret can be rotated independently.
     ENCRYPTION_KEY: str | None = None
 
     BROKER: str = "paper"
     CORS_ORIGINS: str = "http://localhost:5173,http://127.0.0.1:5173"
-
     API_PREFIX: str = "/api/v1"
 
     # ==========================
@@ -50,26 +47,39 @@ class Settings(BaseSettings):
     MT5_PASSWORD: str = ""
     MT5_SERVER: str = ""
 
+    # ==========================
+    # SMTP
+    # ==========================
     SMTP_HOST: str
     SMTP_PORT: int = 587
-
     SMTP_USERNAME: str
     SMTP_PASSWORD: str
-
     SMTP_FROM_EMAIL: str
-
     SMTP_USE_TLS: bool = True
+
+    # ==========================
+    # MT5 Bridge
+    # ==========================
     MT5_BRIDGE_URL: str = "http://host.docker.internal:9000"
-    MT5_BRIDGE_TOKEN: str = ""
-    
+
+    # Shared secret sent on every request to the MT5 bridge.
+    # The same value must be configured in the bridge as BRIDGE_API_KEY.
+    BRIDGE_API_KEY: str
+
+    # ==========================
+    # Pydantic Settings
+    # ==========================
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=True,
         extra="ignore",
     )
 
+    # ==========================
+    # Database URL
+    # ==========================
     @property
-    def DATABASE_URL(self):
+    def DATABASE_URL(self) -> str:
         return (
             f"postgresql+psycopg://"
             f"{self.POSTGRES_USER}:"
@@ -79,25 +89,29 @@ class Settings(BaseSettings):
             f"{self.POSTGRES_DB}"
         )
 
+    # ==========================
+    # Redis URL
+    # ==========================
     @property
-    def REDIS_URL(self):
-        return f"redis://" f"{self.REDIS_HOST}:" f"{self.REDIS_PORT}"
+    def REDIS_URL(self) -> str:
+        return f"redis://{self.REDIS_HOST}:{self.REDIS_PORT}"
 
+    # ==========================
+    # Production Safety
+    # ==========================
     @model_validator(mode="after")
     def validate_production_safety(self):
         if self.APP_ENV.lower() == "production" and self.BROKER.lower() == "paper":
             raise ValueError("BROKER must be explicitly set to mt5 in production")
+
         if self.APP_ENV.lower() == "production" and self.DEBUG:
             raise ValueError("DEBUG must be false in production")
-        if self.APP_ENV.lower() == "production" and not self.ENCRYPTION_KEY:
-            raise ValueError("ENCRYPTION_KEY must be configured in production")
-        if self.APP_ENV.lower() == "production" and not self.MT5_BRIDGE_TOKEN:
-            raise ValueError("MT5_BRIDGE_TOKEN must be configured in production")
+
         return self
 
 
 @lru_cache
-def get_settings():
+def get_settings() -> Settings:
     return Settings()
 
 

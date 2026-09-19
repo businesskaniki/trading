@@ -23,6 +23,10 @@ class MT5BridgeService:
 
     The bridge owns the MT5 connection and broker interaction.
     AQE owns the application-level market-data abstraction.
+
+    Every request includes the shared X-Bridge-Key header (see
+    app.core.config.settings.BRIDGE_API_KEY) so the bridge can
+    verify the request actually came from this backend.
     """
 
     def __init__(
@@ -31,7 +35,6 @@ class MT5BridgeService:
         timeout: float = 10.0,
     ) -> None:
         self.bridge_url = (bridge_url or settings.MT5_BRIDGE_URL).rstrip("/")
-        self.bridge_token = settings.MT5_BRIDGE_TOKEN
 
         self.timeout = timeout
 
@@ -462,17 +465,23 @@ class MT5BridgeService:
 
         All bridge communication passes through this method so that
         timeout, connection, HTTP, and response parsing errors are
-        handled consistently.
+        handled consistently - and so the bridge key is guaranteed to
+        be attached to every single request without each call site
+        needing to remember to add it.
         """
 
         url = f"{self.bridge_url}{path}"
+
+        headers = {
+            "X-Bridge-Key": settings.BRIDGE_API_KEY,
+        }
 
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 response = await client.request(
                     method=method,
                     url=url,
-                    headers={"X-Bridge-Token": self.bridge_token},
+                    headers=headers,
                     **kwargs,
                 )
 
