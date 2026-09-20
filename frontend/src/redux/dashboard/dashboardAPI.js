@@ -89,8 +89,10 @@ const dashboardAPI = {
   // BROKER
   // =====================================================
 
-  getBrokerAccount: async () => {
-    const response = await api.get("/broker/account");
+  getBrokerAccount: async (accountId) => {
+    const response = await api.get("/broker/account", {
+      params: accountId ? { account_id: accountId } : undefined,
+    });
 
     return response.data;
   },

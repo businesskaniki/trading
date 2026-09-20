@@ -11,9 +11,14 @@ export const loadDashboard = createAsyncThunk(
 
   async (_, thunkAPI) => {
     try {
+      const activeAccounts = await dashboardAPI.getActiveAccounts();
+      const activeAccountList = Array.isArray(activeAccounts)
+        ? activeAccounts
+        : activeAccounts?.items || [];
+      const activeAccountId = activeAccountList[0]?.id;
+
       const [
         accounts,
-        activeAccounts,
         positions,
         trades,
         latestTrade,
@@ -23,14 +28,15 @@ export const loadDashboard = createAsyncThunk(
         brokerAccount,
       ] = await Promise.all([
         dashboardAPI.getAccounts(),
-        dashboardAPI.getActiveAccounts(),
         dashboardAPI.getPositions(),
         dashboardAPI.getTrades(),
         dashboardAPI.getLatestTrade(),
         dashboardAPI.getSymbols(),
         dashboardAPI.getStrategyRuns(),
         dashboardAPI.getLatestPerformance(),
-        dashboardAPI.getBrokerAccount(),
+        activeAccountId
+          ? dashboardAPI.getBrokerAccount(activeAccountId)
+          : Promise.resolve(null),
       ]);
 
       return {
@@ -230,9 +236,23 @@ export const fetchLatestPerformance = createAsyncThunk(
 export const fetchBrokerAccount = createAsyncThunk(
   "dashboard/fetchBrokerAccount",
 
-  async (_, thunkAPI) => {
+  async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getBrokerAccount();
+      let resolvedAccountId = accountId;
+
+      if (!resolvedAccountId) {
+        const activeAccounts = await dashboardAPI.getActiveAccounts();
+        const activeAccountList = Array.isArray(activeAccounts)
+          ? activeAccounts
+          : activeAccounts?.items || [];
+        resolvedAccountId = activeAccountList[0]?.id;
+      }
+
+      if (!resolvedAccountId) {
+        return null;
+      }
+
+      return await dashboardAPI.getBrokerAccount(resolvedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         error.response?.data?.detail ||
