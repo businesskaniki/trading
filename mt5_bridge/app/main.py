@@ -2,10 +2,9 @@ from __future__ import annotations
 
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI
+from fastapi import FastAPI
 
 from app.api.router import router
-from app.core.bridge_auth import verify_bridge_key
 from app.infrastructure.redis.client import redis_client
 from app.services.market_data_service import market_data_service
 
@@ -74,12 +73,10 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Every route mounted under `router` (symbols, orders, positions,
-# connection, history, market-data, account) now requires a valid
-# X-Bridge-Key header. Applied once here rather than per-route or
-# per-sub-router, so nothing added later can accidentally ship
-# unprotected.
-app.include_router(
-    router,
-    dependencies=[Depends(verify_bridge_key)],
-)
+# Auth is already handled inside app.api.router - `router` carries
+# its own require_bridge_token dependency (checking X-Bridge-Token
+# against MT5_BRIDGE_TOKEN) applied to every route it includes.
+# No additional dependency needed here - a second one was previously
+# stacked on top of this by mistake, requiring two different headers
+# to both be present for any request to succeed.
+app.include_router(router)

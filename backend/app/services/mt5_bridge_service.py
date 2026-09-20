@@ -24,7 +24,7 @@ class MT5BridgeService:
     The bridge owns the MT5 connection and broker interaction.
     AQE owns the application-level market-data abstraction.
 
-    Every request includes the shared X-Bridge-Key header (see
+    Every request includes the shared X-Bridge-Token header (see
     app.core.config.settings.BRIDGE_API_KEY) so the bridge can
     verify the request actually came from this backend.
     """
@@ -473,7 +473,7 @@ class MT5BridgeService:
         url = f"{self.bridge_url}{path}"
 
         headers = {
-            "X-Bridge-Key": settings.BRIDGE_API_KEY,
+            "X-Bridge-Token": settings.BRIDGE_API_KEY,
         }
 
         try:
