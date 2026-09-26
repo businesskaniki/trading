@@ -5,7 +5,7 @@ from __future__ import annotations
 from decimal import Decimal
 
 from ..calculators.exposure import (
-    calculate_position_exposure,
+    calculate_position_risk_exposure,
     calculate_symbol_exposure,
     calculate_total_exposure,
 )
@@ -46,16 +46,24 @@ class ExposureRiskRule(RiskRule):
 
         current_portfolio_exposure = calculate_total_exposure(
             context.positions,
+            context.constraints_by_symbol,
         )
 
         current_symbol_exposure = calculate_symbol_exposure(
             context.positions,
             signal.symbol,
+            constraints,
         )
 
         current_strategy_exposure = sum(
             (
-                calculate_position_exposure(position)
+                calculate_position_risk_exposure(
+                    position,
+                    context.constraints_by_symbol.get(
+                        position.symbol,
+                        constraints,
+                    ),
+                )
                 for position in context.positions
                 if position.strategy_id == signal.strategy_id
             ),

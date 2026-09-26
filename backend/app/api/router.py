@@ -17,7 +17,9 @@ from app.api.routes import (
     stream,
     account_symbols,
     market_data,
-    historical_data
+    historical_data,
+    engine,
+    backtests,
 )
 
 api_router = APIRouter()
@@ -39,4 +41,5 @@ api_router.include_router(bot.router)
 api_router.include_router(stream.router)
 api_router.include_router(market_data.router)
 api_router.include_router(historical_data.router)
-
+api_router.include_router(engine.router)
+api_router.include_router(backtests.router)

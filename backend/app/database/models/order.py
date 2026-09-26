@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from decimal import Decimal
 from uuid import UUID
 
@@ -10,34 +12,71 @@ from app.database.base import Base, TimestampMixin, UUIDMixin
 
 class Order(UUIDMixin, TimestampMixin, Base):
     """
-    Represents an order submitted through AQE.
+    Persisted AQE order.
 
-    The Order model stores the persistent AQE representation
-    of an order and its broker execution information.
+    Broker identifiers are intentionally stored separately:
+
+        broker_order_id
+            Broker order/ticket created by order submission.
+
+        broker_deal_id
+            Broker execution/deal identifier.
+
+        broker_position_id
+            Broker position created by the execution, when applicable.
+
+    execution_correlation_id
+        AQE-generated deterministic identifier linking the persisted
+        order to the execution decision that created it.
+
+        This identifier is independent of broker-facing identifiers
+        and must be used as the primary AQE execution correlation key.
     """
 
     __tablename__ = "orders"
 
     __table_args__ = (
-        Index("ix_orders_ticket", "ticket"),
+        Index("ix_orders_execution_correlation_id", "execution_correlation_id"),
+        Index("ix_orders_broker_order_id", "broker_order_id"),
+        Index("ix_orders_broker_deal_id", "broker_deal_id"),
+        Index("ix_orders_broker_position_id", "broker_position_id"),
         Index("ix_orders_status", "status"),
         Index("ix_orders_strategy", "strategy"),
         Index("ix_orders_account_id", "account_id"),
         Index("ix_orders_symbol_id", "symbol_id"),
     )
 
-    # ==========================================================
-    # BROKER INFORMATION
-    # ==========================================================
+    # ------------------------------------------------------------------
+    # Execution correlation
+    # ------------------------------------------------------------------
 
-    ticket: Mapped[int | None] = mapped_column(
+    execution_correlation_id: Mapped[UUID] = mapped_column(
+        nullable=False,
+        unique=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Broker identifiers
+    # ------------------------------------------------------------------
+
+    broker_order_id: Mapped[int | None] = mapped_column(
         nullable=True,
         unique=True,
     )
 
-    # ==========================================================
-    # ORDER OWNERSHIP / SOURCE
-    # ==========================================================
+    broker_deal_id: Mapped[int | None] = mapped_column(
+        nullable=True,
+        unique=True,
+    )
+
+    broker_position_id: Mapped[int | None] = mapped_column(
+        nullable=True,
+        unique=True,
+    )
+
+    # ------------------------------------------------------------------
+    # Order ownership / strategy
+    # ------------------------------------------------------------------
 
     strategy: Mapped[str] = mapped_column(
         String(100),
@@ -49,10 +88,6 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=True,
     )
 
-    # ==========================================================
-    # ACCOUNT / SYMBOL
-    # ==========================================================
-
     account_id: Mapped[UUID] = mapped_column(
         ForeignKey("trading_accounts.id"),
         nullable=False,
@@ -62,6 +97,10 @@ class Order(UUIDMixin, TimestampMixin, Base):
         ForeignKey("symbols.id"),
         nullable=False,
     )
+
+    # ------------------------------------------------------------------
+    # Relationships
+    # ------------------------------------------------------------------
 
     account = relationship(
         "TradingAccount",
@@ -79,9 +118,9 @@ class Order(UUIDMixin, TimestampMixin, Base):
         uselist=False,
     )
 
-    # ==========================================================
-    # ORDER DETAILS
-    # ==========================================================
+    # ------------------------------------------------------------------
+    # Order definition
+    # ------------------------------------------------------------------
 
     order_type: Mapped[OrderType] = mapped_column(
         Enum(
@@ -104,33 +143,19 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-    # ----------------------------------------------------------
-    # Requested price
-    # ----------------------------------------------------------
-    #
-    # MARKET orders do not necessarily have a requested price.
-    #
-    # LIMIT / STOP orders require one.
-    #
-    # ----------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Pricing
+    # ------------------------------------------------------------------
 
     requested_price: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8),
         nullable=True,
     )
 
-    # ----------------------------------------------------------
-    # Actual broker execution price
-    # ----------------------------------------------------------
-
     executed_price: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8),
         nullable=True,
     )
-
-    # ----------------------------------------------------------
-    # Risk parameters
-    # ----------------------------------------------------------
 
     stop_loss: Mapped[Decimal | None] = mapped_column(
         Numeric(18, 8),
@@ -142,9 +167,9 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=True,
     )
 
-    # ==========================================================
-    # STATUS
-    # ==========================================================
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     status: Mapped[OrderStatus] = mapped_column(
         Enum(
@@ -154,18 +179,3 @@ class Order(UUIDMixin, TimestampMixin, Base):
         default=OrderStatus.CREATED,
         nullable=False,
     )
-
-    # ==========================================================
-    # REPRESENTATION
-    # ==========================================================
-
-    def __repr__(self) -> str:
-        return (
-            f"<Order("
-            f"id={self.id}, "
-            f"ticket={self.ticket}, "
-            f"symbol={self.symbol_id}, "
-            f"side={self.side}, "
-            f"volume={self.volume}, "
-            f"status={self.status})>"
-        )

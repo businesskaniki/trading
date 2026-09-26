@@ -6,7 +6,13 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """
-    Loads configuration from environment variables and .env file.
+    Application configuration loaded from environment variables and .env.
+
+    MT5 account credentials are intentionally not used from this settings
+    object by the execution runtime. They are resolved from the selected
+    TradingAccount at runtime.
+
+    The bridge itself is authenticated using BRIDGE_API_KEY.
     """
 
     # ==========================
@@ -41,8 +47,25 @@ class Settings(BaseSettings):
     REDIS_PORT: int = 6379
 
     # ==========================
-    # MT5
+    # Legacy MT5 Configuration
     # ==========================
+    #
+    # These fields are retained for backward compatibility with older
+    # components. The current runtime account architecture does NOT use
+    # these values to authenticate the selected TradingAccount.
+    #
+    # Runtime MT5 credentials come from:
+    #
+    #     TradingAccount
+    #         ↓
+    #     RuntimeAccountResolver
+    #         ↓
+    #     BrokerManager
+    #         ↓
+    #     MT5Adapter
+    #         ↓
+    #     MT5BridgeService
+    #
     MT5_LOGIN: int = 0
     MT5_PASSWORD: str = ""
     MT5_SERVER: str = ""
@@ -62,8 +85,9 @@ class Settings(BaseSettings):
     # ==========================
     MT5_BRIDGE_URL: str = "http://host.docker.internal:9000"
 
-    # Shared secret sent on every request to the MT5 bridge.
-    # The same value must be configured in the bridge as BRIDGE_API_KEY.
+    # Shared secret used by AQE when communicating with the MT5 bridge.
+    #
+    # The bridge must have the matching value configured as BRIDGE_API_KEY.
     BRIDGE_API_KEY: str
 
     # ==========================
@@ -74,6 +98,18 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    # ==========================
+    # Bridge Compatibility Alias
+    # ==========================
+    @property
+    def MT5_BRIDGE_TOKEN(self) -> str:
+        """
+        Compatibility alias for components that expect MT5_BRIDGE_TOKEN.
+
+        BRIDGE_API_KEY remains the canonical configuration variable.
+        """
+        return self.BRIDGE_API_KEY
 
     # ==========================
     # Database URL
@@ -100,9 +136,14 @@ class Settings(BaseSettings):
     # Production Safety
     # ==========================
     @model_validator(mode="after")
-    def validate_production_safety(self):
-        if self.APP_ENV.lower() == "production" and self.BROKER.lower() == "paper":
-            raise ValueError("BROKER must be explicitly set to mt5 in production")
+    def validate_production_safety(self) -> "Settings":
+        if (
+            self.APP_ENV.lower() == "production"
+            and self.BROKER.lower() == "paper"
+        ):
+            raise ValueError(
+                "BROKER must be explicitly set to mt5 in production"
+            )
 
         if self.APP_ENV.lower() == "production" and self.DEBUG:
             raise ValueError("DEBUG must be false in production")

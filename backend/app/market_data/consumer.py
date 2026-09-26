@@ -23,6 +23,10 @@ class MarketDataConsumer:
     Invalid broker payloads are rejected with detailed diagnostics
     so the underlying Redis message remains pending and can be
     inspected/reprocessed rather than silently discarded.
+
+    Tracks last successful/failed event handling (see status()) so
+    the health of the backend's receiving side can be checked on
+    demand, rather than only by watching logs live.
     """
 
     STREAM_NAME = "aqe:market-data"
@@ -48,6 +52,13 @@ class MarketDataConsumer:
         )
 
         self._started = False
+
+        # Stream-health tracking, exposed via status().
+        self._event_count = 0
+        self._last_event_at: datetime | None = None
+        self._last_event_symbol: str | None = None
+        self._last_error: str | None = None
+        self._last_error_at: datetime | None = None
 
     async def start(self) -> None:
         """
@@ -93,6 +104,36 @@ class MarketDataConsumer:
             self.group_name,
             self.consumer_name,
         )
+
+    def status(self) -> dict[str, Any]:
+        """
+        Return a snapshot of the consumer's current health.
+
+        running: whether the consumer is subscribed at all.
+        last_event_at staying null (or going stale) while running is
+        true means the bridge isn't sending anything this backend is
+        receiving - check the bridge's own /market-data/subscriptions
+        status next, since that tells you whether the problem is
+        upstream (bridge not publishing) or specifically the
+        bridge -> Redis -> backend hop.
+        """
+
+        return {
+            "running": self._started,
+            "event_count": self._event_count,
+            "last_event_at": (
+                self._last_event_at.isoformat()
+                if self._last_event_at is not None
+                else None
+            ),
+            "last_event_symbol": self._last_event_symbol,
+            "last_error": self._last_error,
+            "last_error_at": (
+                self._last_error_at.isoformat()
+                if self._last_error_at is not None
+                else None
+            ),
+        }
 
     async def _handle_message(
         self,
@@ -476,6 +517,14 @@ class MarketDataConsumer:
             await event_bus.publish(event)
 
             # =========================================================
+            # Record success for status()
+            # =========================================================
+
+            self._event_count += 1
+            self._last_event_at = datetime.now(timezone.utc)
+            self._last_event_symbol = tick.symbol
+
+            # =========================================================
             # DEBUG: SUCCESSFULLY ENTERED AQE EVENT BUS
             # =========================================================
 
@@ -510,7 +559,9 @@ class MarketDataConsumer:
                 tick.volume_real,
             )
 
-        except RedisMessageError:
+        except RedisMessageError as exc:
+            self._last_error = str(exc)
+            self._last_error_at = datetime.now(timezone.utc)
             raise
 
         except Exception as exc:
@@ -520,6 +571,9 @@ class MarketDataConsumer:
                 stream_name,
                 message_id,
             )
+
+            self._last_error = str(exc)
+            self._last_error_at = datetime.now(timezone.utc)
 
             raise RedisMessageError(
                 "Market-data Redis message could not be processed."

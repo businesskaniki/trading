@@ -106,7 +106,9 @@ async def get_current_user(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has been revoked",
-            headers={"WWW-Authenticate": "Bearer"},
+            headers={
+                "WWW-Authenticate": "Bearer",
+            },
         )
 
     return user
@@ -117,15 +119,19 @@ async def get_owned_account(
     current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
+    """Return an account owned by the authenticated user."""
+
     account = await TradingAccountRepository(db).get_by_id_and_user(
         account_id=account_id,
         user_id=current_user.id,
     )
+
     if account is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Trading account not found.",
         )
+
     return account
 
 
@@ -220,8 +226,7 @@ def get_account_symbol_repository(
 def get_account_symbol_service(
     db: AsyncSession = Depends(get_db),
 ) -> AccountSymbolService:
-    """Provide the AccountSymbolService with the global market-data
-
+    """Provide AccountSymbolService with the global market-data
     subscription manager.
 
     The subscription manager reconciles the desired
@@ -244,6 +249,7 @@ def get_account_symbol_service(
 def get_order_repository(
     db: AsyncSession = Depends(get_db),
 ) -> OrderRepository:
+    """Provide the order repository for the current DB session."""
     return OrderRepository(db)
 
 
@@ -257,9 +263,13 @@ def get_order_service(
         get_order_repository,
     ),
 ) -> OrderService:
+    """Provide the CRUD/order-management service."""
+
     return OrderService(
-        order_repository,
-        account_repository=TradingAccountRepository(order_repository.db),
+        order_repository=order_repository,
+        account_repository=TradingAccountRepository(
+            order_repository.db,
+        ),
     )
 
 
@@ -286,7 +296,9 @@ def get_position_service(
 ) -> PositionService:
     return PositionService(
         position_repository,
-        account_repository=TradingAccountRepository(position_repository.db),
+        account_repository=TradingAccountRepository(
+            position_repository.db,
+        ),
     )
 
 
@@ -352,10 +364,9 @@ def get_risk_snapshot_service(
 
 
 def get_broker_manager() -> BrokerManager:
-    """Return the broker manager used by the trading engine.
+    """Create the broker manager used by the execution engine.
 
-    The broker implementation is selected from application
-    configuration.
+    The concrete broker adapter is selected from AQE configuration.
     """
 
     adapter = get_broker_adapter(
@@ -377,6 +388,8 @@ def get_execution_service(
         get_broker_manager,
     ),
 ) -> ExecutionService:
+    """Provide the broker-agnostic execution service."""
+
     return ExecutionService(
         broker=broker,
     )
@@ -395,6 +408,24 @@ def get_order_execution_service(
         get_execution_service,
     ),
 ) -> OrderExecutionService:
+    """Provide the order lifecycle/execution orchestration service.
+
+    Dependency chain:
+
+        OrderExecutionService
+                |
+                +-- OrderRepository
+                |
+                +-- ExecutionService
+                        |
+                        +-- BrokerManager
+                                |
+                                +-- BrokerAdapter
+
+    OrderExecutionService owns the AQE order lifecycle while
+    ExecutionService handles broker execution.
+    """
+
     return OrderExecutionService(
         order_repository=order_repository,
         execution_service=execution_service,
@@ -464,10 +495,10 @@ def get_bot_service(
 
 
 def get_mt5_bridge_service() -> MT5BridgeService:
-    """Provide the AQE service responsible for communicating with the MT5
-
-    Bridge.
+    """Provide the AQE service responsible for communicating
+    with the MT5 Bridge.
     """
+
     return MT5BridgeService()
 
 

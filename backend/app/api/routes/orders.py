@@ -1,35 +1,35 @@
+from __future__ import annotations
+
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 
 from app.api.dependencies import (
     get_current_user,
-    get_order_service,
     get_order_execution_service,
+    get_order_service,
 )
-
 from app.core.constants import OrderStatus
-
+from app.database.models.user import User
 from app.schemas.order import (
     OrderCreate,
     OrderResponse,
+    OrderStatusUpdate,
     OrderUpdate,
 )
-
-from app.services.order_service import OrderService
 from app.services.order_execution_service import OrderExecutionService
-
+from app.services.order_service import OrderService
 
 router = APIRouter(
     prefix="/orders",
-    tags=["orders"],
-    dependencies=[Depends(get_current_user)],
+    tags=["Orders"],
 )
 
 
-# ==========================================================
-# CREATE ORDER
-# ==========================================================
+# ----------------------------------------------------------------------
+# Create
+# ----------------------------------------------------------------------
+
 
 @router.post(
     "/",
@@ -37,38 +37,75 @@ router = APIRouter(
     status_code=status.HTTP_201_CREATED,
 )
 async def create_order(
-    payload: OrderCreate,
-    current_user=Depends(get_current_user),
+    data: OrderCreate,
+    current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
+    """
+    Create an order in AQE.
+
+    Creation does not submit anything to the broker.
+    The new order starts in CREATED state.
+    """
+
     try:
-        return await service.create_order(payload, user_id=current_user.id)
+        return await service.create_order(
+            data=data,
+            user_id=current_user.id,
+        )
 
     except ValueError as exc:
+        message = str(exc)
+
+        if "not found" in message.lower():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=message,
+            ) from exc
+
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(exc),
+            detail=message,
         ) from exc
 
 
-# ==========================================================
-# LIST ORDERS
-# ==========================================================
+# ----------------------------------------------------------------------
+# List
+# ----------------------------------------------------------------------
+
 
 @router.get(
     "/",
     response_model=list[OrderResponse],
 )
 async def list_orders(
-    current_user=Depends(get_current_user),
+    skip: int = Query(
+        default=0,
+        ge=0,
+    ),
+    limit: int = Query(
+        default=100,
+        ge=1,
+        le=500,
+    ),
+    current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
-    return await service.get_orders(user_id=current_user.id)
+    """
+    List orders belonging to the current user.
+    """
+
+    return await service.get_orders(
+        skip=skip,
+        limit=limit,
+        user_id=current_user.id,
+    )
 
 
-# ==========================================================
-# GET ORDER
-# ==========================================================
+# ----------------------------------------------------------------------
+# Get
+# ----------------------------------------------------------------------
+
 
 @router.get(
     "/{order_id}",
@@ -76,11 +113,18 @@ async def list_orders(
 )
 async def get_order(
     order_id: UUID,
-    current_user=Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
+    """
+    Retrieve one order.
+    """
+
     try:
-        return await service.get_order(order_id, user_id=current_user.id)
+        return await service.get_order(
+            order_id=order_id,
+            user_id=current_user.id,
+        )
 
     except ValueError as exc:
         raise HTTPException(
@@ -89,9 +133,10 @@ async def get_order(
         ) from exc
 
 
-# ==========================================================
-# UPDATE ORDER
-# ==========================================================
+# ----------------------------------------------------------------------
+# Update
+# ----------------------------------------------------------------------
+
 
 @router.patch(
     "/{order_id}",
@@ -99,21 +144,28 @@ async def get_order(
 )
 async def update_order(
     order_id: UUID,
-    payload: OrderUpdate,
-    current_user=Depends(get_current_user),
+    data: OrderUpdate,
+    current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
+    """
+    Update a local CREATED order.
+
+    Orders already submitted to the broker cannot be modified through
+    this CRUD endpoint.
+    """
+
     try:
         return await service.update_order(
-            order_id,
-            payload,
+            order_id=order_id,
+            data=data,
             user_id=current_user.id,
         )
 
     except ValueError as exc:
         message = str(exc)
 
-        if message == "Order not found":
+        if "not found" in message.lower():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=message,
@@ -125,9 +177,10 @@ async def update_order(
         ) from exc
 
 
-# ==========================================================
-# UPDATE ORDER STATUS
-# ==========================================================
+# ----------------------------------------------------------------------
+# Status
+# ----------------------------------------------------------------------
+
 
 @router.patch(
     "/{order_id}/status",
@@ -135,21 +188,28 @@ async def update_order(
 )
 async def update_order_status(
     order_id: UUID,
-    status_value: OrderStatus,
-    current_user=Depends(get_current_user),
+    data: OrderStatusUpdate,
+    current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
+    """
+    Administrative/internal status update.
+
+    Normal broker-driven lifecycle transitions should use /execute or
+    broker reconciliation instead.
+    """
+
     try:
-        return await service.update_order_status(
-            order_id,
-            status_value,
+        return await service.update_status(
+            order_id=order_id,
+            data=data,
             user_id=current_user.id,
         )
 
     except ValueError as exc:
         message = str(exc)
 
-        if message == "Order not found":
+        if "not found" in message.lower():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=message,
@@ -161,9 +221,10 @@ async def update_order_status(
         ) from exc
 
 
-# ==========================================================
-# EXECUTE ORDER
-# ==========================================================
+# ----------------------------------------------------------------------
+# Execute
+# ----------------------------------------------------------------------
+
 
 @router.post(
     "/{order_id}/execute",
@@ -171,18 +232,28 @@ async def update_order_status(
 )
 async def execute_order(
     order_id: UUID,
-    current_user=Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     service: OrderExecutionService = Depends(
-        get_order_execution_service
+        get_order_execution_service,
     ),
 ):
+    """
+    Submit an AQE order to the broker.
+
+    The execution service determines whether the order is MARKET,
+    LIMIT, or STOP and routes it to the appropriate broker operation.
+    """
+
     try:
-        return await service.execute_order(order_id, user_id=current_user.id)
+        return await service.execute_order(
+            order_id=order_id,
+            user_id=current_user.id,
+        )
 
     except ValueError as exc:
         message = str(exc)
 
-        if message == "Order not found":
+        if "not found" in message.lower():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=message,
@@ -194,9 +265,10 @@ async def execute_order(
         ) from exc
 
 
-# ==========================================================
-# DELETE ORDER
-# ==========================================================
+# ----------------------------------------------------------------------
+# Delete
+# ----------------------------------------------------------------------
+
 
 @router.delete(
     "/{order_id}",
@@ -204,16 +276,23 @@ async def execute_order(
 )
 async def delete_order(
     order_id: UUID,
-    current_user=Depends(get_current_user),
+    current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
+    """
+    Delete an order that has not yet been submitted to the broker.
+    """
+
     try:
-        await service.delete_order(order_id, user_id=current_user.id)
+        await service.delete_order(
+            order_id=order_id,
+            user_id=current_user.id,
+        )
 
     except ValueError as exc:
         message = str(exc)
 
-        if message == "Order not found":
+        if "not found" in message.lower():
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=message,
@@ -223,5 +302,3 @@ async def delete_order(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=message,
         ) from exc
-
-    return None

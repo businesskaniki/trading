@@ -8,22 +8,19 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.router import api_router
 from app.core.config import settings
+from app.core.engine import get_aqe_engine
+from app.core.engine import EngineStatus
 from app.infrastructure.redis import redis_client
-from app.market_data.consumer import market_data_redis_consumer
-from app.market_data.live import live_tick_hub
-from app.market_data.subscription_manager import (
-    market_data_subscription_manager,
-)
-from app.market_data.historical_synchronizer import (
-    historical_data_synchronizer,
-)
 
-# The backend's core/ has no dedicated logging module (unlike the
-# bridge's app/core/logging.py), so nothing was configuring a root
-# handler. Every logger.info()/logger.exception() call across the
-# whole app - including MarketDataConsumer's diagnostic logging -
-# was silently going nowhere. This must run before anything else
-# below produces a single log line.
+# ----------------------------------------------------------------------
+# Logging
+# ----------------------------------------------------------------------
+#
+# The backend does not have a dedicated logging configuration module.
+# Configure the root logger here before the application starts so all
+# application components can emit useful diagnostics.
+# ----------------------------------------------------------------------
+
 logging.basicConfig(
     level=logging.INFO if settings.DEBUG else logging.WARNING,
     format="%(asctime)s %(levelname)s %(name)s %(message)s",
@@ -34,102 +31,122 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """AQE application lifecycle.
+    """
+    AQE application lifecycle.
+
+    FastAPI owns application infrastructure.
+
+    AQEEngine has its own independent trading-runtime lifecycle.
+
+    FastAPI startup does NOT start the AQE trading engine.
 
     Startup:
         1. Connect to Redis.
-        2. Start the market-data Redis consumer.
-        3. Reconcile market-data subscriptions with the MT5 Bridge.
-        4. Start the historical-data synchronizer.
+        2. Make the API available.
+        3. Leave AQEEngine in STOPPED state.
+
+    AQE Engine startup:
+        Explicitly triggered through the engine control layer/API.
 
     Shutdown:
-        1. Stop the historical-data synchronizer.
-        2. Stop the market-data Redis consumer.
-        3. Disconnect from Redis.
+        1. Stop the AQE trading engine if it is active.
+        2. Disconnect Redis.
+
+    This separation is intentional:
+
+        FastAPI application lifecycle
+                    ≠
+        AQE trading runtime lifecycle
     """
 
     # ==================================================================
-    # STARTUP
+    # APPLICATION STARTUP
     # ==================================================================
 
+    logger.info("Starting AQE backend application.")
+
+    # Redis is application infrastructure and can safely start with
+    # FastAPI. This does NOT start market-data polling or trading.
     await redis_client.connect()
 
-    await market_data_redis_consumer.start()
-    await live_tick_hub.start()
+    logger.info("AQE Redis infrastructure connected.")
 
-    # --------------------------------------------------------------
-    # Reconcile live market-data subscriptions.
-    # --------------------------------------------------------------
-    #
-    # This is intentionally best-effort.
-    #
-    # If the MT5 Bridge is not connected/authenticated yet, AQE
-    # should still start.
-    #
-    # The database remains the source of truth and a later
-    # reconciliation can restore the desired subscriptions.
-    #
-    # NOTE: previously this was a bare `except Exception: pass`,
-    # which meant a genuine reconciliation failure (bridge
-    # unreachable, bad response shape, a bug in reconcile() itself)
-    # produced zero visibility anywhere - the app just started with
-    # subscriptions silently missing. Logging it doesn't change the
-    # best-effort behavior (startup still continues either way), it
-    # just means the failure is no longer invisible.
-    #
-    try:
-        await market_data_subscription_manager.reconcile()
+    aqe_engine = get_aqe_engine()
 
-    except Exception:
-        logger.exception(
-            "Failed to reconcile market-data subscriptions on startup. "
-            "AQE will continue starting; subscriptions may be missing "
-            "until the next successful reconciliation."
-        )
+    # ------------------------------------------------------------------
+    # IMPORTANT:
+    #
+    # Do NOT call:
+    #
+    #     await aqe_engine.start()
+    #
+    # here.
+    #
+    # Starting FastAPI must not automatically start:
+    #
+    #     - broker connection
+    #     - MT5
+    #     - market-data polling
+    #     - symbol subscriptions
+    #     - historical synchronization
+    #     - strategy runtime
+    #     - risk pipeline
+    #     - execution pipeline
+    #
+    # Those are part of the AQE trading runtime and are started
+    # explicitly through the engine control API.
+    # ------------------------------------------------------------------
 
-    # --------------------------------------------------------------
-    # Start automatic historical-data synchronization.
-    # --------------------------------------------------------------
-    #
-    # The synchronizer will continuously inspect AccountSymbol.enabled
-    # and synchronize historical data for the current trading universe.
-    #
-    # It runs independently from the live market-data subscription
-    # manager.
-    #
-    try:
-        await historical_data_synchronizer.start()
+    logger.info(
+        "AQE trading engine is not auto-started. " "Current engine status=%s",
+        aqe_engine.context.status.value,
+    )
 
-    except Exception:
-        # Historical synchronization must not prevent AQE from
-        # starting. The background service is responsible for
-        # handling subsequent synchronization attempts. Logged for
-        # the same reason as the reconcile() failure above - silent
-        # here previously meant no way to know it happened at all.
-        logger.exception(
-            "Failed to start historical-data synchronizer on startup."
-        )
+    logger.info("AQE backend application started.")
 
     try:
         yield
 
     finally:
-
         # ==============================================================
-        # SHUTDOWN
+        # APPLICATION SHUTDOWN
         # ==============================================================
 
-        # Stop historical synchronization first so it cannot start
-        # another database/bridge operation while the application is
-        # shutting down.
-        await historical_data_synchronizer.stop()
+        logger.info("Stopping AQE backend application.")
 
-        # Stop the live market-data consumer.
-        await market_data_redis_consumer.stop()
-        await live_tick_hub.stop()
+        try:
+            # ----------------------------------------------------------
+            # Stop the trading runtime only if it was explicitly
+            # started during the lifetime of the application.
+            # ----------------------------------------------------------
 
-        # Finally disconnect Redis.
-        await redis_client.disconnect()
+            if aqe_engine.context.status is not EngineStatus.STOPPED:
+                logger.info(
+                    "Stopping AQE trading engine. status=%s",
+                    aqe_engine.context.status.value,
+                )
+
+                await aqe_engine.stop()
+
+                logger.info("AQE trading engine stopped.")
+
+            else:
+                logger.info(
+                    "AQE trading engine already stopped. "
+                    "No trading-runtime shutdown required."
+                )
+
+        finally:
+            # ----------------------------------------------------------
+            # Redis belongs to the application infrastructure, so it
+            # is disconnected when FastAPI shuts down.
+            # ----------------------------------------------------------
+
+            await redis_client.disconnect()
+
+            logger.info("AQE Redis infrastructure disconnected.")
+
+        logger.info("AQE backend application stopped.")
 
 
 app = FastAPI(

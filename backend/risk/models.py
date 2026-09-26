@@ -167,10 +167,27 @@ class RiskContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     account: AccountRiskSnapshot
+
     positions: list[PositionRiskSnapshot] = Field(
         default_factory=list,
     )
+
+    # Constraints for the symbol currently being evaluated.
+    #
+    # These are used by position sizing and other rules that operate
+    # directly on the proposed trade.
     symbol_constraints: SymbolRiskConstraints
+
+    # Constraints for every symbol represented by the current
+    # portfolio positions, plus the current signal symbol.
+    #
+    # Exposure calculations require the correct contract specification
+    # for each individual position rather than reusing the signal
+    # symbol's constraints for the entire portfolio.
+    constraints_by_symbol: dict[str, SymbolRiskConstraints] = Field(
+        default_factory=dict,
+    )
+
     market: MarketPricing
     config: RiskConfig
     signal: TradingSignal
@@ -253,7 +270,9 @@ class RiskDecision(BaseModel):
     direction: SignalDirection
     signal_type: SignalType
     order_type: OrderType
-    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    timestamp: datetime = Field(
+        default_factory=lambda: datetime.now(timezone.utc),
+    )
     risk_amount: Decimal = Field(
         default=Decimal("0"),
         ge=Decimal("0"),

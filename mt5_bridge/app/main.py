@@ -33,15 +33,11 @@ async def lifespan(app: FastAPI):
     # Redis must be available before the market-data service
     # starts publishing ticks.
     await redis_client.connect()
-
-    # Confirm the Redis connection is healthy.
     await redis_client.ping()
 
     print("Redis connection established.")
-
     # Start market-data polling only after Redis is ready.
     market_data_service.start()
-
     print("Market-data service started.")
 
     try:
@@ -59,8 +55,8 @@ async def lifespan(app: FastAPI):
 
         print("Market-data service stopped.")
 
-        # Close the Redis connection after all publishers
-        # have stopped using it.
+        # Close Redis only after all publishers have stopped
+        # using the connection.
         await redis_client.disconnect()
 
         print("Redis connection closed.")
@@ -73,10 +69,7 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Auth is already handled inside app.api.router - `router` carries
-# its own require_bridge_token dependency (checking X-Bridge-Token
-# against MT5_BRIDGE_TOKEN) applied to every route it includes.
-# No additional dependency needed here - a second one was previously
-# stacked on top of this by mistake, requiring two different headers
-# to both be present for any request to succeed.
+# Authentication is applied by app.api.router through the
+# require_bridge_token dependency. Do not add a second bridge-token
+# dependency here.
 app.include_router(router)

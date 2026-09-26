@@ -13,7 +13,7 @@ from .calculators.position_size import (
 from .calculators.risk_amount import calculate_risk_amount
 from .enums import RiskDecisionStatus, RiskRejectionReason
 from .exceptions import RiskCalculationError
-from .models import RiskContext, RiskDecision
+from .models import RiskContext, RiskDecision, SymbolRiskConstraints
 from .rules import (
     AccountRiskRule,
     DrawdownRiskRule,
@@ -40,11 +40,16 @@ class RiskEngine:
     @property
     def rules(self) -> tuple[RiskRule, ...]:
         """Return the configured risk rules."""
+
         return tuple(self._rules)
 
     def evaluate(self, context: RiskContext) -> RiskDecision:
         """
         Evaluate a trading signal.
+
+        The strategy layer may provide numeric price values as floats.
+        The Risk Engine establishes the Decimal boundary before performing
+        any monetary or price arithmetic.
 
         The engine first resolves the real market entry price and
         calculates the proposed position size. Policy rules then
@@ -57,6 +62,20 @@ class RiskEngine:
         account = context.account
         config = context.config
         constraints = context.symbol_constraints
+
+        # --------------------------------------------------------------
+        # Normalize numeric signal values at the Risk Engine boundary
+        # --------------------------------------------------------------
+
+        normalized_stop_loss = (
+            self._decimal(signal.stop_loss) if signal.stop_loss is not None else None
+        )
+
+        normalized_take_profit = (
+            self._decimal(signal.take_profit)
+            if signal.take_profit is not None
+            else None
+        )
 
         # --------------------------------------------------------------
         # Symbol validation
@@ -76,30 +95,30 @@ class RiskEngine:
         # --------------------------------------------------------------
 
         try:
-            entry_price = context.entry_price
-        except ValueError as exc:
+            entry_price = self._decimal(context.entry_price)
+        except (TypeError, ValueError, ArithmeticError) as exc:
             return self._reject(
                 context,
                 RiskRejectionReason.INVALID_SIGNAL,
-                str(exc),
+                f"Invalid entry price: {exc}",
             )
 
         # --------------------------------------------------------------
         # Stop-loss validation
         # --------------------------------------------------------------
 
-        if config.require_stop_loss and signal.stop_loss is None:
+        if config.require_stop_loss and normalized_stop_loss is None:
             return self._reject(
                 context,
                 RiskRejectionReason.STOP_LOSS_REQUIRED,
                 "A stop-loss is required by the risk configuration.",
             )
 
-        if signal.stop_loss is not None:
+        if normalized_stop_loss is not None:
             if not self._validate_stop_loss(
                 direction=signal.direction,
                 entry_price=entry_price,
-                stop_loss=signal.stop_loss,
+                stop_loss=normalized_stop_loss,
             ):
                 return self._reject(
                     context,
@@ -111,11 +130,11 @@ class RiskEngine:
         # Take-profit validation
         # --------------------------------------------------------------
 
-        if signal.take_profit is not None:
+        if normalized_take_profit is not None:
             if not self._validate_take_profit(
                 direction=signal.direction,
                 entry_price=entry_price,
-                take_profit=signal.take_profit,
+                take_profit=normalized_take_profit,
             ):
                 return self._reject(
                     context,
@@ -158,7 +177,7 @@ class RiskEngine:
         # Calculate proposed position size
         # --------------------------------------------------------------
 
-        if signal.stop_loss is None:
+        if normalized_stop_loss is None:
             return self._reject(
                 context,
                 RiskRejectionReason.STOP_LOSS_REQUIRED,
@@ -167,11 +186,9 @@ class RiskEngine:
 
         try:
             position_size = calculate_position_size(
-                equity=account.equity,
-                risk_fraction=config.risk_per_trade,
+                risk_amount=risk_amount,
                 entry_price=entry_price,
-                stop_loss=signal.stop_loss,
-                direction=signal.direction,
+                stop_loss=normalized_stop_loss,
                 constraints=constraints,
             )
         except (ValueError, RiskCalculationError) as exc:
@@ -212,15 +229,21 @@ class RiskEngine:
                 return self._reject(
                     context,
                     RiskRejectionReason.POSITION_SIZE_TOO_SMALL,
-                    "Maximum configured position size is below broker minimum.",
+                    ("Maximum configured position size is below " "broker minimum."),
                 )
 
         # --------------------------------------------------------------
-        # Build context containing proposed trade size
+        # Build context containing the fully normalized proposed trade
         # --------------------------------------------------------------
 
         evaluation_context = context.model_copy(
             update={
+                # The original context.entry_price may be a float because
+                # strategy signals can originate with float price values.
+                # Every downstream risk rule must receive the normalized
+                # Decimal value so monetary arithmetic never performs
+                # Decimal × float operations.
+                "entry_price": entry_price,
                 "proposed_position_size": position_size,
             }
         )
@@ -247,7 +270,7 @@ class RiskEngine:
             actual_risk = calculate_position_risk(
                 position_size=position_size,
                 entry_price=entry_price,
-                stop_loss=signal.stop_loss,
+                stop_loss=normalized_stop_loss,
                 constraints=constraints,
             )
         except (ValueError, RiskCalculationError) as exc:
@@ -289,7 +312,7 @@ class RiskEngine:
             return self._reject(
                 evaluation_context,
                 RiskRejectionReason.MAX_PORTFOLIO_RISK,
-                ("The proposed trade would exceed the maximum " "portfolio risk."),
+                "The proposed trade would exceed the maximum portfolio risk.",
             )
 
         # --------------------------------------------------------------
@@ -299,8 +322,8 @@ class RiskEngine:
         risk_reward_ratio = self._calculate_risk_reward(
             direction=signal.direction,
             entry_price=entry_price,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
+            stop_loss=normalized_stop_loss,
+            take_profit=normalized_take_profit,
         )
 
         if risk_reward_ratio is not None and risk_reward_ratio < config.min_risk_reward:
@@ -331,8 +354,8 @@ class RiskEngine:
             risk_amount=actual_risk,
             position_size=position_size,
             entry_price=entry_price,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
+            stop_loss=normalized_stop_loss,
+            take_profit=normalized_take_profit,
             risk_reward_ratio=risk_reward_ratio,
         )
 
@@ -357,6 +380,25 @@ class RiskEngine:
             raise RiskCalculationError("Market ask cannot be below bid.")
 
     # ------------------------------------------------------------------
+    # Decimal normalization
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _decimal(value: Decimal | int | float | str) -> Decimal:
+        """
+        Convert numeric values to Decimal.
+
+        String conversion is intentional when receiving floats. It avoids
+        importing the binary floating-point representation directly into
+        Decimal arithmetic.
+        """
+
+        if isinstance(value, Decimal):
+            return value
+
+        return Decimal(str(value))
+
+    # ------------------------------------------------------------------
     # Position-size normalization
     # ------------------------------------------------------------------
 
@@ -364,7 +406,7 @@ class RiskEngine:
     def _normalize_capped_position_size(
         *,
         position_size: Decimal,
-        constraints,
+        constraints: SymbolRiskConstraints,
     ) -> Decimal:
         """Normalize a capped position size to broker volume rules."""
 

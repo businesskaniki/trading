@@ -34,14 +34,26 @@ class PositionRepository:
 
     async def create(
         self,
+        commit: bool = True,
         **data,
     ) -> Position:
+        """
+        Create a position.
+
+        When commit=False, the position is flushed but the transaction
+        remains open so the caller can atomically persist additional
+        related changes.
+        """
 
         position = Position(**data)
 
         self.db.add(position)
 
-        await self.db.commit()
+        await self.db.flush()
+
+        if commit:
+            await self.db.commit()
+
         await self.db.refresh(position)
 
         return position
@@ -78,7 +90,14 @@ class PositionRepository:
     ) -> Position | None:
 
         result = await self.db.execute(
-            select(Position).options(selectinload(Position.account)).where(Position.ticket == ticket)
+            select(Position)
+            .options(
+                selectinload(Position.account),
+                selectinload(Position.symbol),
+                selectinload(Position.order),
+                selectinload(Position.trade),
+            )
+            .where(Position.ticket == ticket)
         )
 
         return result.scalar_one_or_none()
@@ -93,7 +112,14 @@ class PositionRepository:
     ) -> Position | None:
 
         result = await self.db.execute(
-            select(Position).where(Position.order_id == order_id)
+            select(Position)
+            .options(
+                selectinload(Position.account),
+                selectinload(Position.symbol),
+                selectinload(Position.order),
+                selectinload(Position.trade),
+            )
+            .where(Position.order_id == order_id)
         )
 
         return result.scalar_one_or_none()
@@ -368,7 +394,6 @@ class PositionRepository:
         exposure = Decimal("0")
 
         for position in positions:
-
             exposure += position.current_volume * position.current_price
 
         return exposure
@@ -383,7 +408,7 @@ class PositionRepository:
         symbol_id: UUID,
     ) -> Decimal:
 
-        positions = await self.db.execute(
+        result = await self.db.execute(
             select(Position).where(
                 Position.account_id == account_id,
                 Position.symbol_id == symbol_id,
@@ -393,8 +418,7 @@ class PositionRepository:
 
         exposure = Decimal("0")
 
-        for position in positions.scalars().all():
-
+        for position in result.scalars().all():
             exposure += position.current_volume * position.current_price
 
         return exposure
@@ -474,7 +498,6 @@ class PositionRepository:
         exposure = Decimal("0")
 
         for position in result.scalars().all():
-
             exposure += position.current_volume * position.current_price
 
         return exposure
@@ -512,11 +535,7 @@ class PositionRepository:
     ) -> Position:
 
         for field, value in data.items():
-            setattr(
-                position,
-                field,
-                value,
-            )
+            setattr(position, field, value)
 
         await self.db.flush()
 

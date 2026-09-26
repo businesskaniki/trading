@@ -1,5 +1,8 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from app.core.constants import (
@@ -20,16 +23,28 @@ class PositionSyncService:
     """
     Synchronizes broker positions with AQE Position records.
 
-    Responsibilities:
-    1. Read live positions from the broker.
-    2. Match broker positions using broker ticket.
-    3. Create missing AQE positions when an AQE Order exists.
-    4. Update existing AQE positions.
-    5. Ignore unmanaged broker positions.
-    6. Detect AQE positions that no longer exist at the broker.
-    7. Resolve the closing broker deal.
-    8. Create the immutable Trade.
-    9. Mark the Position CLOSED.
+    Broker identity is kept explicit:
+
+        MT5 position.ticket
+            -> AQE Position.ticket
+
+        MT5 position.identifier
+            -> AQE Position.broker_position_id
+
+        MT5 opening deal.order
+            -> AQE Order.broker_order_id
+
+        MT5 opening deal.ticket
+            -> AQE Order.broker_deal_id
+
+        MT5 closing deal.ticket
+            -> AQE Trade.ticket
+
+    A broker position ticket is never treated as an order ticket.
+
+    Historical deal lookups use the broker position identifier
+    because MT5 history_deals_get(position=...) is keyed by the
+    position identifier, not the position ticket.
     """
 
     def __init__(
@@ -47,272 +62,259 @@ class PositionSyncService:
         self.trade_service = trade_service
 
     # ==========================================================
-    # SYNC ALL POSITIONS
+    # PUBLIC SYNC
     # ==========================================================
 
-    async def sync_positions(self, user_id: UUID | None = None):
+    async def sync_positions(
+        self,
+        user_id: UUID | None = None,
+    ) -> dict[str, Any]:
         """
-        Synchronize broker positions with AQE positions.
+        Synchronize AQE positions against the current broker state.
+
+        The synchronization is intentionally one-way:
+
+            broker -> AQE
+
+        Broker positions are authoritative for live position state.
         """
 
-        broker_positions = (
-            await self.execution_service.get_positions()
-        )
+        broker_positions = await self.execution_service.get_positions()
+        broker_positions = broker_positions or []
 
-        synchronized = []
+        broker_tickets: set[int] = set()
 
-        broker_tickets = {
-            int(position["ticket"])
-            for position in broker_positions
-            if position.get("ticket") is not None
-        }
-
-        # ------------------------------------------------------
-        # Create / update live positions
-        # ------------------------------------------------------
+        created = 0
+        updated = 0
+        ignored = 0
 
         for broker_position in broker_positions:
+            ticket = self._extract_ticket(broker_position)
 
-            position = await self._sync_position(
+            if ticket is None:
+                ignored += 1
+                continue
+
+            broker_tickets.add(ticket)
+
+            existing = await self.position_repository.get_by_ticket(ticket)
+
+            if existing is not None:
+                if user_id is not None and existing.account.user_id != user_id:
+                    ignored += 1
+                    continue
+
+                await self._update_existing_position(
+                    existing,
+                    broker_position,
+                )
+
+                updated += 1
+                continue
+
+            position = await self._create_position(
                 broker_position,
                 user_id=user_id,
             )
 
-            if position is not None:
-                synchronized.append(position)
+            if position is None:
+                ignored += 1
+            else:
+                created += 1
 
-        # ------------------------------------------------------
-        # Reconcile positions that disappeared
-        # ------------------------------------------------------
-
-        closed_positions = (
-            await self._reconcile_closed_positions(
-                broker_tickets,
-                user_id=user_id,
-            )
-        )
-
-        synchronized.extend(
-            closed_positions
-        )
-
-        return synchronized
-
-    # ==========================================================
-    # SYNC SINGLE POSITION
-    # ==========================================================
-
-    async def _sync_position(
-        self,
-        broker_position: dict,
-        user_id: UUID | None = None,
-    ):
-        ticket = broker_position.get("ticket")
-
-        if ticket is None:
-            raise ValueError(
-                "Broker position does not contain a ticket"
-            )
-
-        ticket = int(ticket)
-
-        existing = (
-            await self.position_repository.get_by_ticket(
-                ticket
-            )
-        )
-
-        if existing:
-            if user_id is not None and existing.account.user_id != user_id:
-                return None
-            return await self._update_existing_position(
-                existing,
-                broker_position,
-            )
-
-        return await self._create_position(
-            broker_position,
+        closed_positions = await self._reconcile_closed_positions(
+            broker_tickets=broker_tickets,
             user_id=user_id,
         )
 
+        return {
+            "broker_positions": len(broker_positions),
+            "created": created,
+            "updated": updated,
+            "closed": len(closed_positions),
+            "ignored": ignored,
+        }
+
     # ==========================================================
-    # CREATE POSITION
+    # CREATE
     # ==========================================================
 
     async def _create_position(
         self,
-        broker_position: dict,
+        broker_position: dict[str, Any],
         user_id: UUID | None = None,
     ):
         """
-        Create an AQE Position from a broker position.
+        Create an AQE Position for a broker position.
 
-        Unmanaged broker positions are ignored.
+        Positions are only imported when they can be correlated
+        with an AQE Order.
+
+        Manually opened or externally managed broker positions
+        are intentionally ignored.
         """
 
-        ticket = int(
-            broker_position["ticket"]
-        )
+        ticket = self._extract_ticket(broker_position)
+
+        if ticket is None:
+            raise ValueError("Broker position does not contain a valid ticket.")
 
         symbol = broker_position.get("symbol")
 
         if not symbol:
-            raise ValueError(
-                f"Broker position {ticket} has no symbol"
-            )
+            raise ValueError(f"Broker position {ticket} does not contain a symbol.")
 
-        # ------------------------------------------------------
-        # Find originating AQE Order
-        # ------------------------------------------------------
+        broker_position_id = self._extract_broker_position_id(broker_position)
 
-        order = (
-            await self.order_repository.get_by_ticket(
-                ticket
-            )
+        order = await self._resolve_originating_order(
+            broker_position=broker_position,
+            broker_position_id=broker_position_id,
         )
 
-        if not order:
+        if order is None:
             return None
 
         if user_id is not None and order.account.user_id != user_id:
             return None
 
-        # ------------------------------------------------------
-        # Direction
-        # ------------------------------------------------------
+        direction = self._map_direction(broker_position.get("type"))
 
-        direction = self._map_direction(
-            broker_position.get("type")
+        now = datetime.now(timezone.utc)
+
+        volume = self._decimal(
+            broker_position.get("volume"),
+            default=Decimal("0"),
         )
 
-        now = datetime.now(
-            timezone.utc
+        if volume <= 0:
+            raise ValueError(f"Broker position {ticket} has invalid volume.")
+
+        entry_price = self._decimal(
+            broker_position.get("price_open"),
+            default=Decimal("0"),
         )
 
-        # ------------------------------------------------------
-        # Build AQE Position
-        # ------------------------------------------------------
+        current_price = self._decimal(
+            broker_position.get("price_current"),
+            default=Decimal("0"),
+        )
+
+        if entry_price <= 0:
+            raise ValueError(f"Broker position {ticket} has invalid entry price.")
+
+        if current_price <= 0:
+            current_price = entry_price
+
+        opened_at = self._parse_broker_time(
+            broker_position.get("time"),
+            fallback=now,
+        )
+
+        stop_loss = self._decimal_or_none(broker_position.get("sl"))
+
+        take_profit = self._decimal_or_none(broker_position.get("tp"))
 
         position_data = PositionCreate(
             ticket=ticket,
-            broker_position_id=str(ticket),
+            broker_position_id=broker_position_id,
             strategy=order.strategy,
             account_id=order.account_id,
             symbol_id=order.symbol_id,
             order_id=order.id,
             direction=direction,
-            volume=Decimal(
-                str(
-                    broker_position["volume"]
-                )
+            volume=volume,
+            current_volume=volume,
+            entry_price=entry_price,
+            current_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            floating_profit=self._decimal(
+                broker_position.get("profit"),
+                default=Decimal("0"),
             ),
-            current_volume=Decimal(
-                str(
-                    broker_position["volume"]
-                )
+            swap=self._decimal(
+                broker_position.get("swap"),
+                default=Decimal("0"),
             ),
-            entry_price=Decimal(
-                str(
-                    broker_position["price_open"]
-                )
+            commission=self._decimal(
+                broker_position.get("commission"),
+                default=Decimal("0"),
             ),
-            current_price=Decimal(
-                str(
-                    broker_position["price_current"]
-                )
-            ),
-            stop_loss=self._decimal_or_none(
-                broker_position.get("sl")
-            ),
-            take_profit=self._decimal_or_none(
-                broker_position.get("tp")
-            ),
-            floating_profit=Decimal(
-                str(
-                    broker_position.get(
-                        "profit",
-                        0,
-                    )
-                )
-            ),
-            swap=Decimal(
-                str(
-                    broker_position.get(
-                        "swap",
-                        0,
-                    )
-                )
-            ),
-            commission=Decimal("0"),
             initial_risk=None,
-            opened_at=now,
+            opened_at=opened_at,
             last_updated_price_at=now,
-            comment=broker_position.get(
-                "comment"
-            ),
+            comment=(broker_position.get("comment") or order.comment),
         )
 
-        return await self.position_service.create_position(
-            position_data
+        position = await self.position_service.create_position(position_data)
+
+        # Order.broker_position_id stores MT5's numeric
+        # position identifier.
+        #
+        # Position.broker_position_id stores the same value
+        # as a string.
+        broker_position_numeric_id = self._extract_int(
+            broker_position.get("identifier")
         )
+
+        if order.broker_position_id is None and broker_position_numeric_id is not None:
+            order.broker_position_id = broker_position_numeric_id
+            await self.order_repository.db.flush()
+
+        return position
 
     # ==========================================================
-    # UPDATE POSITION
+    # UPDATE
     # ==========================================================
 
     async def _update_existing_position(
         self,
         position,
-        broker_position: dict,
+        broker_position: dict[str, Any],
     ):
-        now = datetime.now(
-            timezone.utc
+        """
+        Update an existing AQE Position from current broker state.
+
+        The broker remains authoritative for live position values.
+        """
+
+        now = datetime.now(timezone.utc)
+
+        current_volume = self._decimal(
+            broker_position.get("volume"),
+            default=position.current_volume,
         )
 
+        if current_volume < 0:
+            raise ValueError(f"Broker position {position.ticket} has invalid volume.")
+
+        current_price = self._decimal(
+            broker_position.get("price_current"),
+            default=position.current_price,
+        )
+
+        broker_position_id = self._extract_broker_position_id(broker_position)
+
         update_data = PositionUpdate(
-            current_volume=Decimal(
-                str(
-                    broker_position.get(
-                        "volume",
-                        position.current_volume,
-                    )
-                )
+            broker_position_id=(broker_position_id or position.broker_position_id),
+            current_volume=current_volume,
+            current_price=current_price,
+            stop_loss=self._decimal_or_none(broker_position.get("sl")),
+            take_profit=self._decimal_or_none(broker_position.get("tp")),
+            floating_profit=self._decimal(
+                broker_position.get("profit"),
+                default=position.floating_profit,
             ),
-            current_price=Decimal(
-                str(
-                    broker_position.get(
-                        "price_current",
-                        position.current_price,
-                    )
-                )
+            swap=self._decimal(
+                broker_position.get("swap"),
+                default=position.swap,
             ),
-            stop_loss=self._decimal_or_none(
-                broker_position.get("sl")
-            ),
-            take_profit=self._decimal_or_none(
-                broker_position.get("tp")
-            ),
-            floating_profit=Decimal(
-                str(
-                    broker_position.get(
-                        "profit",
-                        position.floating_profit,
-                    )
-                )
-            ),
-            swap=Decimal(
-                str(
-                    broker_position.get(
-                        "swap",
-                        position.swap,
-                    )
-                )
+            commission=self._decimal(
+                broker_position.get("commission"),
+                default=position.commission,
             ),
             last_updated_price_at=now,
-            comment=broker_position.get(
-                "comment",
-                position.comment,
-            ),
+            comment=(broker_position.get("comment") or position.comment),
         )
 
         return await self.position_service.update_position(
@@ -321,64 +323,125 @@ class PositionSyncService:
         )
 
     # ==========================================================
-    # RECONCILE CLOSED POSITIONS
+    # ORDER CORRELATION
+    # ==========================================================
+
+    async def _resolve_originating_order(
+        self,
+        broker_position: dict[str, Any],
+        broker_position_id: str | None,
+    ):
+        """
+        Resolve the AQE Order that created the broker position.
+
+        Resolution order:
+
+        1. Existing AQE correlation by broker position identifier.
+        2. Broker opening deal -> broker order ID.
+        3. Broker opening deal -> broker deal ID.
+
+        The position ticket itself is never queried as an
+        AQE broker order ID.
+        """
+
+        # ------------------------------------------------------
+        # 1. Existing broker-position correlation
+        # ------------------------------------------------------
+
+        numeric_position_id = self._extract_int(broker_position_id)
+
+        if numeric_position_id is not None:
+            order = await self.order_repository.get_by_broker_position_id(
+                numeric_position_id
+            )
+
+            if order is not None:
+                return order
+
+        # ------------------------------------------------------
+        # 2. Resolve through broker deal history
+        # ------------------------------------------------------
+
+        position_identifier = self._extract_int(broker_position.get("identifier"))
+
+        if position_identifier is None:
+            return None
+
+        try:
+            deals = await self.execution_service.get_deals_by_position(
+                position_identifier
+            )
+        except Exception:
+            return None
+
+        opening_deal = self._find_opening_deal(deals)
+
+        if opening_deal is None:
+            return None
+
+        # ------------------------------------------------------
+        # 2a. Opening deal -> broker order
+        # ------------------------------------------------------
+
+        broker_order_id = self._extract_int(opening_deal.get("order"))
+
+        if broker_order_id is not None:
+            order = await self.order_repository.get_by_broker_order_id(broker_order_id)
+
+            if order is not None:
+                return order
+
+        # ------------------------------------------------------
+        # 2b. Opening deal -> broker deal
+        # ------------------------------------------------------
+
+        broker_deal_id = self._extract_int(opening_deal.get("ticket"))
+
+        if broker_deal_id is not None:
+            order = await self.order_repository.get_by_broker_deal_id(broker_deal_id)
+
+            if order is not None:
+                return order
+
+        return None
+
+    # ==========================================================
+    # CLOSED POSITION RECONCILIATION
     # ==========================================================
 
     async def _reconcile_closed_positions(
         self,
         broker_tickets: set[int],
         user_id: UUID | None = None,
-    ):
+    ) -> list:
         """
-        Find AQE positions that are OPEN in PostgreSQL but no longer
-        exist in the broker's live position list.
+        Detect AQE positions that remain OPEN in AQE but no longer
+        exist at the broker.
 
-        For each missing broker position:
-            1. Find the closing deal.
-            2. Mark the AQE Position CLOSED.
-            3. Create the corresponding immutable Trade.
+        A missing broker position is only closed in AQE when a
+        valid closing deal can be resolved.
         """
 
-        open_positions = (
-            await self.position_repository.get_open_positions()
-        )
-
-        if user_id is not None:
-            open_positions = [
-                position
-                for position in open_positions
-                if position.account.user_id == user_id
-            ]
+        open_positions = await self.position_repository.get_open_positions()
 
         closed_positions = []
 
         for position in open_positions:
-
-            # ------------------------------------------------------
-            # Position is still open at the broker
-            # ------------------------------------------------------
+            if user_id is not None and position.account.user_id != user_id:
+                continue
 
             if position.ticket in broker_tickets:
                 continue
 
-            # ------------------------------------------------------
-            # Position disappeared from broker.
-            # Reconcile its closing transaction.
-            # ------------------------------------------------------
+            closed_position = await self._close_position_and_create_trade(position)
 
-            closed_position = (
-                await self._close_position_and_create_trade(
-                    position
-                )
-            )
-
-            closed_positions.append(
-                closed_position
-            )
+            if closed_position is not None:
+                closed_positions.append(closed_position)
 
         return closed_positions
+
     # ==========================================================
-    # CLOSE POSITION + CREATE TRADE
+    # CLOSE + TRADE
     # ==========================================================
 
     async def _close_position_and_create_trade(
@@ -386,108 +449,73 @@ class PositionSyncService:
         position,
     ):
         """
-        Reconcile a broker position that has disappeared from the
-        live broker position list.
+        Resolve the closing broker deal, close the AQE Position,
+        create the immutable Trade, and commit both atomically.
 
-        Workflow:
-            1. Retrieve deals for this exact broker position.
-            2. Find the closing deal.
-            3. Calculate final trade values.
-            4. Mark the AQE Position CLOSED without committing.
-            5. Create the immutable Trade without committing.
-            6. Commit Position + Trade atomically.
-            7. Roll back both if anything fails.
+        Current implementation intentionally handles the normal
+        full-close case.
+
+        Partial-close aggregation is deferred until AQE supports
+        multi-deal position accounting.
         """
 
         db = self.position_repository.db
 
         try:
-            # ======================================================
-            # 1. GET DEALS FOR THIS POSITION
-            # ======================================================
+            position_identifier = self._extract_int(position.broker_position_id)
 
-            deals = (
-                await self.execution_service.get_deals_by_position(
-                    position.ticket
-                )
+            if position_identifier is None:
+                return None
+
+            deals = await self.execution_service.get_deals_by_position(
+                position_identifier
             )
 
             if not deals:
-                raise ValueError(
-                    f"No deal history found for position "
-                    f"{position.ticket}"
-                )
+                return None
 
-            # ======================================================
-            # 2. FIND CLOSING DEAL
-            # ======================================================
-
-            close_deal = self._find_closing_deal(
-                deals
-            )
+            close_deal = self._find_closing_deal(deals)
 
             if close_deal is None:
+                return None
+
+            exit_price = self._decimal(
+                close_deal.get("price"),
+                default=Decimal("0"),
+            )
+
+            if exit_price <= 0:
                 raise ValueError(
-                    f"Could not find closing deal for position "
-                    f"{position.ticket}"
+                    f"Closing deal for position {position.ticket} "
+                    "has an invalid price."
                 )
 
-            # ======================================================
-            # 3. EXTRACT CLOSE DATA
-            # ======================================================
-
-            exit_price = Decimal(
-                str(
-                    close_deal["price"]
-                )
+            close_volume = self._decimal(
+                close_deal.get("volume"),
+                default=position.current_volume,
             )
 
-            close_volume = Decimal(
-                str(
-                    close_deal.get(
-                        "volume",
-                        position.current_volume,
-                    )
-                )
+            gross_profit = self._decimal(
+                close_deal.get("profit"),
+                default=Decimal("0"),
             )
 
-            gross_profit = Decimal(
-                str(
-                    close_deal.get(
-                        "profit",
-                        0,
-                    )
-                )
+            commission = self._decimal(
+                close_deal.get("commission"),
+                default=Decimal("0"),
             )
 
-            commission = Decimal(
-                str(
-                    close_deal.get(
-                        "commission",
-                        0,
-                    )
-                )
+            swap = self._decimal(
+                close_deal.get("swap"),
+                default=Decimal("0"),
             )
 
-            swap = Decimal(
-                str(
-                    close_deal.get(
-                        "swap",
-                        0,
-                    )
-                )
+            fees = self._decimal(
+                close_deal.get("fees"),
+                default=Decimal("0"),
             )
 
-            # The Bridge currently does not expose a separate fee field.
-            fees = Decimal("0")
-
-            # MT5 already provides the broker-level signed values.
-            net_profit = (
-                gross_profit
-                + commission
-                + swap
-                + fees
-            )
+            net_profit = gross_profit + commission + swap + fees
 
             closed_at = self._parse_broker_time(
                 close_deal.get("time"),
@@ -495,57 +523,33 @@ class PositionSyncService:
             )
 
             duration_seconds = max(
-                int(
-                    (
-                        closed_at
-                        - position.opened_at
-                    ).total_seconds()
-                ),
+                int((closed_at - position.opened_at).total_seconds()),
                 0,
             )
 
-            profit_percent = None
-
-            if position.entry_price > 0:
-                profit_percent = (
-                    net_profit
-                    / position.entry_price
-                ) * Decimal("100")
-
-            trade_result = (
-                self._calculate_trade_result(
-                    net_profit
-                )
+            profit_percent = self._calculate_profit_percent(
+                position,
+                net_profit,
             )
 
-            close_ticket = int(
-                close_deal["ticket"]
-            )
+            trade_result = self._calculate_trade_result(net_profit)
 
-            # ======================================================
-            # 4. CHECK FOR EXISTING TRADE
-            # ======================================================
+            close_ticket = self._extract_int(close_deal.get("ticket"))
 
-            try:
-                existing_trade = (
-                    await self.trade_service.get_trade_by_position(
-                        position.id
-                    )
+            if close_ticket is None:
+                raise ValueError(
+                    f"Closing deal for position {position.ticket} "
+                    "does not contain a deal ticket."
                 )
 
-            except ValueError:
-                existing_trade = None
+            # --------------------------------------------------
+            # Idempotency
+            # --------------------------------------------------
 
-            # ======================================================
-            # 5. IF TRADE ALREADY EXISTS
-            # ======================================================
+            existing_trade = await self.trade_service.get_trade_by_position(position.id)
 
-            if existing_trade:
-
-                # Position may have remained OPEN if a previous
-                # synchronization failed after creating the Trade.
+            if existing_trade is not None:
                 if position.status != PositionStatus.CLOSED:
-
                     await self._mark_position_closed(
                         position=position,
                         closed_at=closed_at,
@@ -557,9 +561,9 @@ class PositionSyncService:
 
                 return position
 
-            # ======================================================
-            # 6. BUILD TRADE
-            # ======================================================
+            # --------------------------------------------------
+            # Build immutable trade
+            # --------------------------------------------------
 
             trade_data = TradeCreate(
                 ticket=close_ticket,
@@ -581,234 +585,119 @@ class PositionSyncService:
                 profit_percent=profit_percent,
                 initial_risk=position.initial_risk,
                 reward_risk_ratio=position.risk_reward_ratio,
-                max_favorable_excursion=None,
-                max_adverse_excursion=None,
+                mfe=None,
+                mae=None,
                 result=trade_result,
                 opened_at=position.opened_at,
                 closed_at=closed_at,
                 duration_seconds=duration_seconds,
-                comment=close_deal.get(
-                    "comment",
-                    position.comment,
-                ),
+                comment=position.comment,
             )
 
-            # ======================================================
-            # 7. MARK POSITION CLOSED
-            # ======================================================
-            #
-            # IMPORTANT:
-            # commit=False keeps this operation inside the
-            # current SQLAlchemy transaction.
-            #
+            # --------------------------------------------------
+            # Close position without committing
+            # --------------------------------------------------
 
-            closed_position = (
-                await self._mark_position_closed(
-                    position=position,
-                    closed_at=closed_at,
-                    exit_price=exit_price,
-                    commit=False,
-                )
+            closed_position = await self._mark_position_closed(
+                position=position,
+                closed_at=closed_at,
+                exit_price=exit_price,
+                commit=False,
             )
 
-            # ======================================================
-            # 8. CREATE TRADE
-            # ======================================================
-            #
-            # TradeService sees the in-memory/flushed Position as
-            # CLOSED and therefore passes its validation.
-            #
+            # --------------------------------------------------
+            # Create trade in the same transaction
+            # --------------------------------------------------
 
             await self.trade_service.create_trade(
                 trade_data,
                 commit=False,
             )
 
-            # ======================================================
-            # 9. ATOMIC COMMIT
-            # ======================================================
+            # --------------------------------------------------
+            # Atomic commit
+            # --------------------------------------------------
 
             await db.commit()
 
             return closed_position
 
         except Exception:
-            # ======================================================
-            # ROLLBACK
-            # ======================================================
-
             await db.rollback()
-
             raise
 
-        #=========================================================
-        # MARK POSITION CLOSED
-        # ==========================================================
-
-        async def _mark_position_closed(
-            self,
-            position,
-            closed_at: datetime,
-            exit_price: Decimal,
-        ):
-            return await self.position_service.update_position(
-                position.id,
-                PositionUpdate(
-                    status=PositionStatus.CLOSED,
-                    current_volume=Decimal("0"),
-                    current_price=exit_price,
-                    closed_at=closed_at,
-                    last_updated_price_at=closed_at,
-                ),
-            )
-
     # ==========================================================
-    # FIND CLOSING DEAL
+    # DEAL HELPERS
     # ==========================================================
+
+    @staticmethod
+    def _find_opening_deal(
+        deals: list[dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
+        """
+        Find the broker deal that opened the position.
+
+        MT5 deal entry values:
+
+            0 = IN
+            1 = OUT
+            2 = INOUT
+            3 = OUT_BY
+        """
+
+        if not deals:
+            return None
+
+        opening_deals = [
+            deal
+            for deal in deals
+            if PositionSyncService._extract_int(deal.get("entry")) == 0
+        ]
+
+        if not opening_deals:
+            return None
+
+        return max(
+            opening_deals,
+            key=lambda deal: (
+                PositionSyncService._broker_time_sort_key(deal.get("time"))
+            ),
+        )
 
     @staticmethod
     def _find_closing_deal(
-        deals,
-    ):
+        deals: list[dict[str, Any]] | None,
+    ) -> dict[str, Any] | None:
         """
-        Find the closing deal from the deals belonging to
-        a specific position.
+        Find the latest closing deal.
 
-        MT5:
-            entry=0 → IN
-            entry=1 → OUT
-            entry=2 → INOUT
-            entry=3 → OUT_BY
+        This handles the normal full-close case.
+
+        Partial-close aggregation is intentionally deferred.
         """
 
-        candidates = [
+        if not deals:
+            return None
+
+        closing_deals = [
             deal
             for deal in deals
-            if deal.get("entry") in (1, 2, 3)
+            if PositionSyncService._extract_int(deal.get("entry")) in {1, 2, 3}
         ]
 
-        if not candidates:
+        if not closing_deals:
             return None
 
-        candidates.sort(
-            key=lambda deal: deal.get(
-                "time",
-                0,
-            )
-        )
-
-        return candidates[-1]
-    # ==========================================================
-    # PROFIT PERCENT
-    # ==========================================================
-
-    @staticmethod
-    def _calculate_profit_percent(
-        position,
-        net_profit: Decimal,
-    ) -> Decimal | None:
-
-        if position.entry_price <= 0:
-            return None
-
-        return (
-            net_profit
-            / position.entry_price
-        ) * Decimal("100")
-
-    # ==========================================================
-    # TRADE RESULT
-    # ==========================================================
-
-    @staticmethod
-    def _calculate_trade_result(
-        net_profit: Decimal,
-    ) -> TradeResult:
-
-        if net_profit > 0:
-            return TradeResult.WIN
-
-        if net_profit < 0:
-            return TradeResult.LOSS
-
-        return TradeResult.BREAKEVEN
-
-    # ==========================================================
-    # DIRECTION
-    # ==========================================================
-
-    @staticmethod
-    def _map_direction(
-        broker_type,
-    ) -> PositionDirection:
-
-        if broker_type == 0:
-            return PositionDirection.BUY
-
-        if broker_type == 1:
-            return PositionDirection.SELL
-
-        raise ValueError(
-            f"Unsupported broker position type: {broker_type}"
+        return max(
+            closing_deals,
+            key=lambda deal: (
+                PositionSyncService._broker_time_sort_key(deal.get("time"))
+            ),
         )
 
     # ==========================================================
-    # DECIMAL HELPER
+    # POSITION CLOSE
     # ==========================================================
-
-    @staticmethod
-    def _decimal_or_none(
-        value,
-    ) -> Decimal | None:
-
-        if value is None:
-            return None
-
-        value = Decimal(
-            str(value)
-        )
-
-        if value == 0:
-            return None
-
-        return value
-
-    # ==========================================================
-    # BROKER TIME
-    # ==========================================================
-
-    @staticmethod
-    def _parse_broker_time(
-        value,
-        fallback: datetime,
-    ) -> datetime:
-
-        if value is None:
-            return fallback
-
-        if isinstance(
-            value,
-            datetime,
-        ):
-            if value.tzinfo is None:
-                return value.replace(
-                    tzinfo=timezone.utc
-                )
-
-            return value
-
-        if isinstance(
-            value,
-            (int, float),
-        ):
-            return datetime.fromtimestamp(
-                value,
-                tz=timezone.utc,
-            )
-
-        return fallback
-
-
 
     async def _mark_position_closed(
         self,
@@ -817,14 +706,185 @@ class PositionSyncService:
         exit_price: Decimal,
         commit: bool = True,
     ):
+        """
+        Mark an AQE Position as closed.
+        """
+
         return await self.position_service.update_position(
             position.id,
             PositionUpdate(
-                status=PositionStatus.CLOSED,
                 current_volume=Decimal("0"),
                 current_price=exit_price,
+                status=PositionStatus.CLOSED,
                 closed_at=closed_at,
                 last_updated_price_at=closed_at,
             ),
             commit=commit,
         )
+
+    # ==========================================================
+    # MAPPERS
+    # ==========================================================
+
+    @staticmethod
+    def _map_direction(
+        broker_type: Any,
+    ) -> PositionDirection:
+        """
+        MT5 position type:
+
+            0 = BUY
+            1 = SELL
+        """
+
+        position_type = PositionSyncService._extract_int(broker_type)
+
+        if position_type == 0:
+            return PositionDirection.LONG
+
+        if position_type == 1:
+            return PositionDirection.SHORT
+
+        raise ValueError(f"Unsupported broker position type: {broker_type!r}")
+
+    # ==========================================================
+    # VALUE HELPERS
+    # ==========================================================
+
+    @staticmethod
+    def _extract_ticket(
+        broker_position: dict[str, Any],
+    ) -> int | None:
+        return PositionSyncService._extract_int(broker_position.get("ticket"))
+
+    @staticmethod
+    def _extract_broker_position_id(
+        broker_position: dict[str, Any],
+    ) -> str | None:
+        """
+        Position.broker_position_id stores MT5's identifier.
+
+        This is deliberately distinct from ticket.
+        """
+
+        identifier = broker_position.get("identifier")
+
+        if identifier is not None:
+            value = PositionSyncService._extract_int(identifier)
+
+            if value is not None:
+                return str(value)
+
+        return None
+
+    @staticmethod
+    def _extract_int(
+        value: Any,
+    ) -> int | None:
+        if value is None:
+            return None
+
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _decimal(
+        value: Any,
+        default: Decimal,
+    ) -> Decimal:
+        if value is None:
+            return default
+
+        try:
+            return Decimal(str(value))
+        except Exception:
+            return default
+
+    @staticmethod
+    def _decimal_or_none(
+        value: Any,
+    ) -> Decimal | None:
+        if value is None:
+            return None
+
+        try:
+            decimal_value = Decimal(str(value))
+        except Exception:
+            return None
+
+        if decimal_value <= 0:
+            return None
+
+        return decimal_value
+
+    @staticmethod
+    def _parse_broker_time(
+        value: Any,
+        fallback: datetime,
+    ) -> datetime:
+        if value is None:
+            return fallback
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                return value.replace(tzinfo=timezone.utc)
+
+            return value.astimezone(timezone.utc)
+
+        try:
+            return datetime.fromtimestamp(
+                float(value),
+                tz=timezone.utc,
+            )
+        except (
+            TypeError,
+            ValueError,
+            OverflowError,
+        ):
+            return fallback
+
+    @staticmethod
+    def _broker_time_sort_key(
+        value: Any,
+    ) -> float:
+        if value is None:
+            return 0.0
+
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                value = value.replace(tzinfo=timezone.utc)
+
+            return value.timestamp()
+
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # ==========================================================
+    # PROFIT / RESULT
+    # ==========================================================
+
+    @staticmethod
+    def _calculate_profit_percent(
+        position,
+        net_profit: Decimal,
+    ) -> Decimal | None:
+        if position.entry_price <= 0:
+            return None
+
+        return net_profit / position.entry_price * Decimal("100")
+
+    @staticmethod
+    def _calculate_trade_result(
+        net_profit: Decimal,
+    ) -> TradeResult:
+        if net_profit > 0:
+            return TradeResult.WIN
+
+        if net_profit < 0:
+            return TradeResult.LOSS
+
+        return TradeResult.BREAKEVEN

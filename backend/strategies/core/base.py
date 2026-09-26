@@ -1,4 +1,3 @@
-
 """Base strategy contract for the AQE Strategy Engine."""
 
 from __future__ import annotations
@@ -6,8 +5,15 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
 from typing import Any
+from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+    model_validator,
+)
 
 from app.events.market import MarketCandleEvent, MarketTickEvent
 
@@ -48,7 +54,13 @@ class StrategyConfig(BaseModel):
     Runtime configuration for a strategy instance.
 
     One strategy implementation can have many independent instances,
-    each with its own symbols, timeframes, parameters, and execution mode.
+    each with its own symbols, timeframes, parameters, execution mode,
+    and trading-account assignment.
+
+    Account assignment is a runtime concern and is intentionally kept
+    out of TradingSignal. A signal identifies the strategy instance;
+    the execution pipeline resolves that strategy instance to its
+    configured trading account.
     """
 
     model_config = ConfigDict(
@@ -58,8 +70,11 @@ class StrategyConfig(BaseModel):
 
     strategy_id: str = Field(min_length=1, max_length=128)
     strategy_name: str = Field(min_length=1, max_length=128)
+
     mode: StrategyMode = StrategyMode.PAPER
     enabled: bool = True
+
+    account_id: UUID | None = None
 
     symbols: list[str] = Field(min_length=1)
     timeframes: list[str] = Field(min_length=1)
@@ -79,6 +94,28 @@ class StrategyConfig(BaseModel):
             )
 
         return value
+
+    @model_validator(mode="after")
+    def validate_account_assignment(self) -> StrategyConfig:
+        """
+        Validate account assignment for broker-backed execution modes.
+
+        LIVE and PAPER strategies participate in the risk/execution
+        pipeline and therefore require an explicit trading account.
+
+        BACKTEST and REPLAY runtimes may operate without a live
+        TradingAccount, so account_id remains optional for those modes.
+        """
+
+        mode = self.mode.value.upper()
+
+        if mode in {"LIVE", "PAPER"} and self.account_id is None:
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' running in "
+                f"{mode} mode requires an account_id."
+            )
+
+        return self
 
     @field_validator("symbols")
     @classmethod
@@ -194,6 +231,12 @@ class BaseStrategy(ABC):
         """Return execution mode."""
 
         return self.config.mode
+
+    @property
+    def account_id(self) -> UUID | None:
+        """Return the trading account assigned to this strategy instance."""
+
+        return self.config.account_id
 
     @property
     def symbols(self) -> tuple[str, ...]:

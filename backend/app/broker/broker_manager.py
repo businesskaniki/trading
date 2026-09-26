@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from app.broker.base import BrokerAdapter
 from app.broker.exceptions import (
     BrokerConnectionError,
@@ -5,60 +7,79 @@ from app.broker.exceptions import (
     BrokerPositionError,
     BrokerSymbolError,
 )
+from app.schemas.execution import ExecutionOrder
 
 
 class BrokerManager:
     """
     High-level broker interface used by the trading engine.
 
-    The manager hides the concrete broker implementation
-    from the rest of the application.
+    BrokerManager wraps a single configured BrokerAdapter and provides
+    a broker-agnostic interface to the rest of AQE.
+
+    The manager does not contain broker-specific logic. Concrete broker
+    behavior remains inside the selected BrokerAdapter implementation.
     """
 
     def __init__(self, adapter: BrokerAdapter):
         self.adapter = adapter
 
     # ==========================================================
-    # Connection
+    # CONNECTION
     # ==========================================================
 
     async def connect(self, credentials: dict):
-        """
-        Connect to the configured broker.
-        """
+        """Connect to the configured broker."""
 
         try:
             return await self.adapter.connect(credentials)
 
+        except BrokerConnectionError:
+            raise
+
         except Exception as exc:
-            raise BrokerConnectionError(
-                f"Failed to connect to broker: {exc}"
-            ) from exc
+            raise BrokerConnectionError(f"Failed to connect to broker: {exc}") from exc
 
     async def disconnect(self):
-        """
-        Disconnect from the configured broker.
-        """
+        """Disconnect from the configured broker."""
 
         try:
             return await self.adapter.disconnect()
+
+        except BrokerConnectionError:
+            raise
 
         except Exception as exc:
             raise BrokerConnectionError(
                 f"Failed to disconnect from broker: {exc}"
             ) from exc
 
+    async def connection_status(self):
+        """Return the broker connection status."""
+
+        try:
+            return await self.adapter.connection_status()
+
+        except BrokerConnectionError:
+            raise
+
+        except Exception as exc:
+            raise BrokerConnectionError(
+                f"Failed to retrieve broker connection status: {exc}"
+            ) from exc
+
     # ==========================================================
-    # Account
+    # ACCOUNT
     # ==========================================================
 
     async def get_account(self):
-        """
-        Get broker account information.
-        """
+        """Get broker account information."""
 
         try:
             return await self.adapter.get_account()
+
+        except BrokerConnectionError:
+            raise
 
         except Exception as exc:
             raise BrokerConnectionError(
@@ -66,16 +87,17 @@ class BrokerManager:
             ) from exc
 
     # ==========================================================
-    # Symbols
+    # SYMBOLS
     # ==========================================================
 
     async def get_symbols(self):
-        """
-        Get all available broker symbols.
-        """
+        """Get all available broker symbols."""
 
         try:
             return await self.adapter.get_symbols()
+
+        except BrokerSymbolError:
+            raise
 
         except Exception as exc:
             raise BrokerSymbolError(
@@ -83,195 +105,27 @@ class BrokerManager:
             ) from exc
 
     async def get_symbol(self, symbol: str):
-        """
-        Get information for a specific symbol.
-        """
+        """Get information for a specific symbol."""
 
         try:
             return await self.adapter.get_symbol(symbol)
+
+        except BrokerSymbolError:
+            raise
 
         except Exception as exc:
             raise BrokerSymbolError(
                 f"Failed to retrieve symbol '{symbol}': {exc}"
             ) from exc
 
-    # ==========================================================
-    # Orders
-    # ==========================================================
-
-    async def get_orders(self):
-        """
-        Get broker orders.
-        """
-
-        try:
-            return await self.adapter.get_orders()
-
-        except Exception as exc:
-            raise BrokerOrderError(
-                f"Failed to retrieve broker orders: {exc}"
-            ) from exc
-
-    async def place_order(self, order: dict):
-        """
-        Submit an order to the broker.
-        """
-
-        try:
-            return await self.adapter.place_order(order)
-
-        except Exception as exc:
-            raise BrokerOrderError(
-                f"Failed to place order: {exc}"
-            ) from exc
-
-    # ==========================================================
-    # Positions
-    # ==========================================================
-
-    async def get_positions(self):
-        """
-        Get open broker positions.
-        """
-
-        try:
-            return await self.adapter.get_positions()
-
-        except Exception as exc:
-            raise BrokerPositionError(
-                f"Failed to retrieve positions: {exc}"
-            ) from exc
-
-    async def close_position(self, position_id: int):
-        """
-        Close a broker position.
-        """
-
-        try:
-            return await self.adapter.close_position(
-                position_id
-            )
-
-        except Exception as exc:
-            raise BrokerPositionError(
-                f"Failed to close position "
-                f"{position_id}: {exc}"
-            ) from exc
-
-
-    # ==========================================================
-# PENDING ORDERS
-# ==========================================================
-
-    async def create_pending_order(self, order: dict):
-        """
-        Submit a pending order to the broker.
-        """
-
-        try:
-            return await self.adapter.create_pending_order(order)
-
-        except Exception as exc:
-            raise BrokerOrderError(
-                f"Failed to create pending order: {exc}"
-            ) from exc
-
-
-    # ==========================================================
-    # POSITION
-    # ==========================================================
-
-    async def get_position(self, position_id: int):
-        """
-        Get a single open position.
-        """
-
-        try:
-            return await self.adapter.get_position(position_id)
-
-        except Exception as exc:
-            raise BrokerPositionError(
-                f"Failed to retrieve position "
-                f"{position_id}: {exc}"
-            ) from exc
-
-
-    async def modify_position(
-        self,
-        position_id: int,
-        sl: float | None = None,
-        tp: float | None = None,
-    ):
-        """
-        Modify the SL/TP of an existing position.
-        """
-
-        try:
-            return await self.adapter.modify_position(
-                position_id=position_id,
-                sl=sl,
-                tp=tp,
-            )
-
-        except Exception as exc:
-            raise BrokerPositionError(
-                f"Failed to modify position "
-                f"{position_id}: {exc}"
-            ) from exc
-
-
-    # ==========================================================
-    # HISTORY
-    # ==========================================================
-
-    async def get_order_history(
-        self,
-        start,
-        end,
-    ):
-        """
-        Retrieve historical orders.
-        """
-
-        try:
-            return await self.adapter.get_order_history(
-                start=start,
-                end=end,
-            )
-
-        except Exception as exc:
-            raise BrokerOrderError(
-                f"Failed to retrieve order history: {exc}"
-            ) from exc
-
-
-    async def get_deal_history(
-        self,
-        start,
-        end,
-    ):
-        """
-        Retrieve historical deals.
-        """
-
-        try:
-            return await self.adapter.get_deal_history(
-                start=start,
-                end=end,
-            )
-
-        except Exception as exc:
-            raise BrokerOrderError(
-                f"Failed to retrieve deal history: {exc}"
-            ) from exc
-
     async def get_tick(self, symbol: str):
-        """
-        Get the current market tick for a symbol.
-        """
+        """Get the current market tick for a symbol."""
 
         try:
             return await self.adapter.get_tick(symbol)
+
+        except BrokerSymbolError:
+            raise
 
         except Exception as exc:
             raise BrokerSymbolError(
@@ -287,9 +141,8 @@ class BrokerManager:
         """
         Get recent OHLC candles for a symbol.
 
-        Used by the engine's market feed to build the price history
-        a strategy needs - separate from get_tick(), which only
-        returns the current price.
+        This is market-data retrieval and is separate from broker
+        trading history.
         """
 
         try:
@@ -299,26 +152,185 @@ class BrokerManager:
                 count=count,
             )
 
+        except BrokerSymbolError:
+            raise
+
         except Exception as exc:
             raise BrokerSymbolError(
                 f"Failed to retrieve candles for '{symbol}': {exc}"
             ) from exc
 
-    async def get_deals_by_position(
+    # ==========================================================
+    # ORDERS
+    # ==========================================================
+
+    async def get_orders(self):
+        """Get broker orders."""
+
+        try:
+            return await self.adapter.get_orders()
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(f"Failed to retrieve broker orders: {exc}") from exc
+
+    async def place_order(
         self,
-        position_id: int,
+        order: ExecutionOrder,
     ):
         """
-        Retrieve broker deal history for a specific position.
+        Submit a normalized execution order to the configured broker.
+
+        ExecutionOrder is the broker-agnostic AQE execution contract.
+        Broker-specific translation is handled by the adapter.
         """
 
         try:
-            return await self.adapter.get_deals_by_position(
-                position_id
+            return await self.adapter.place_order(order)
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(f"Failed to place order: {exc}") from exc
+
+    async def create_pending_order(
+        self,
+        order: ExecutionOrder,
+    ):
+        """
+        Submit a pending order directly to the configured broker.
+
+        This method remains available for broker-level operations.
+        The ExecutionEngine should normally use place_order(), allowing
+        the adapter to determine the broker-specific execution path
+        from ExecutionOrder.order_type.
+        """
+
+        try:
+            return await self.adapter.create_pending_order(order)
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(f"Failed to create pending order: {exc}") from exc
+
+    # ==========================================================
+    # POSITIONS
+    # ==========================================================
+
+    async def get_positions(self):
+        """Get open broker positions."""
+
+        try:
+            return await self.adapter.get_positions()
+
+        except BrokerPositionError:
+            raise
+
+        except Exception as exc:
+            raise BrokerPositionError(f"Failed to retrieve positions: {exc}") from exc
+
+    async def get_position(self, position_id: int):
+        """Get a single open broker position."""
+
+        try:
+            return await self.adapter.get_position(position_id)
+
+        except BrokerPositionError:
+            raise
+
+        except Exception as exc:
+            raise BrokerPositionError(
+                f"Failed to retrieve position {position_id}: {exc}"
+            ) from exc
+
+    async def modify_position(
+        self,
+        position_id: int,
+        sl: float | None = None,
+        tp: float | None = None,
+    ):
+        """Modify the SL/TP of an existing position."""
+
+        try:
+            return await self.adapter.modify_position(
+                position_id=position_id,
+                sl=sl,
+                tp=tp,
             )
+
+        except BrokerPositionError:
+            raise
+
+        except Exception as exc:
+            raise BrokerPositionError(
+                f"Failed to modify position {position_id}: {exc}"
+            ) from exc
+
+    async def close_position(self, position_id: int):
+        """Close an existing broker position."""
+
+        try:
+            return await self.adapter.close_position(position_id)
+
+        except BrokerPositionError:
+            raise
+
+        except Exception as exc:
+            raise BrokerPositionError(
+                f"Failed to close position {position_id}: {exc}"
+            ) from exc
+
+    # ==========================================================
+    # HISTORY
+    # ==========================================================
+
+    async def get_order_history(self, start, end):
+        """Retrieve historical broker orders."""
+
+        try:
+            return await self.adapter.get_order_history(
+                start=start,
+                end=end,
+            )
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(f"Failed to retrieve order history: {exc}") from exc
+
+    async def get_deal_history(self, start, end):
+        """Retrieve historical broker deals."""
+
+        try:
+            return await self.adapter.get_deal_history(
+                start=start,
+                end=end,
+            )
+
+        except BrokerOrderError:
+            raise
+
+        except Exception as exc:
+            raise BrokerOrderError(f"Failed to retrieve broker deals: {exc}") from exc
+
+    async def get_deals_by_position(self, position_id: int):
+        """
+        Retrieve broker deals associated with a specific position.
+        """
+
+        try:
+            return await self.adapter.get_deals_by_position(position_id)
+
+        except BrokerOrderError:
+            raise
 
         except Exception as exc:
             raise BrokerOrderError(
-                f"Failed to retrieve deals for position "
-                f"{position_id}: {exc}"
+                f"Failed to retrieve deals for position " f"{position_id}: {exc}"
             ) from exc

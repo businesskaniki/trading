@@ -1,9 +1,9 @@
-
 """Trading signal contract produced by AQE strategies."""
 
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -20,6 +20,10 @@ class TradingSignal(BaseModel):
     A TradingSignal expresses trading intent. It does not determine
     position size, account risk, or broker execution details. Those
     responsibilities belong to the Risk and Execution Engines.
+
+    Financial price values use Decimal so that downstream risk and
+    execution
+    calculations never mix Decimal and float arithmetic.
     """
 
     model_config = ConfigDict(
@@ -54,19 +58,19 @@ class TradingSignal(BaseModel):
 
     timestamp: datetime
 
-    entry_price: float | None = Field(
+    entry_price: Decimal | None = Field(
         default=None,
-        gt=0,
+        gt=Decimal("0"),
     )
 
-    stop_loss: float | None = Field(
+    stop_loss: Decimal | None = Field(
         default=None,
-        gt=0,
+        gt=Decimal("0"),
     )
 
-    take_profit: float | None = Field(
+    take_profit: Decimal | None = Field(
         default=None,
-        gt=0,
+        gt=Decimal("0"),
     )
 
     confidence: float = Field(
@@ -182,13 +186,13 @@ class TradingSignal(BaseModel):
 
     @property
     def is_entry(self) -> bool:
-        """Return True when this signal opens a position."""
+        """Return True when the signal opens a position."""
 
         return self.signal_type is SignalType.ENTRY
 
     @property
     def is_exit(self) -> bool:
-        """Return True when this signal closes a position."""
+        """Return True when the signal closes a position."""
 
         return self.signal_type is SignalType.EXIT
 
@@ -205,7 +209,7 @@ class TradingSignal(BaseModel):
         return self.direction is SignalDirection.SHORT
 
     @property
-    def risk_distance(self) -> float | None:
+    def risk_distance(self) -> Decimal | None:
         """
         Return the distance between entry and stop-loss.
 
@@ -218,7 +222,7 @@ class TradingSignal(BaseModel):
         return abs(self.entry_price - self.stop_loss)
 
     @property
-    def reward_distance(self) -> float | None:
+    def reward_distance(self) -> Decimal | None:
         """
         Return the distance between entry and take-profit.
 
@@ -231,7 +235,7 @@ class TradingSignal(BaseModel):
         return abs(self.take_profit - self.entry_price)
 
     @property
-    def risk_reward_ratio(self) -> float | None:
+    def risk_reward_ratio(self) -> Decimal | None:
         """
         Return the reward-to-risk ratio.
 
@@ -242,7 +246,7 @@ class TradingSignal(BaseModel):
         risk = self.risk_distance
         reward = self.reward_distance
 
-        if risk is None or reward is None or risk == 0:
+        if risk is None or reward is None or risk == Decimal("0"):
             return None
 
         return reward / risk
