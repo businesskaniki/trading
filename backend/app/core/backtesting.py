@@ -1,8 +1,5 @@
-"""Application-level dependency composition for AQE backtesting."""
-
 from __future__ import annotations
 
-import logging
 from decimal import Decimal
 from typing import Any
 
@@ -23,55 +20,52 @@ from strategies.core.enums import StrategyMode
 
 from app.database.models.symbol import Symbol
 from app.database.session import SessionLocal
-from app.repositories.account_symbol_repository import (
-    AccountSymbolRepository,
-)
+from app.repositories.account_symbol_repository import AccountSymbolRepository
 from app.repositories.strategy_run_repository import StrategyRunRepository
 from app.services.historical_data_service import HistoricalDataService
 from app.services.mt5_bridge_service import MT5BridgeService
 
-logger = logging.getLogger(__name__)
 
-
-# ======================================================================
-# HISTORICAL MARKET DATA
-# ======================================================================
+# ---------------------------------------------------------------------------
+# Historical market-data dependencies
+# ---------------------------------------------------------------------------
 
 
 def create_historical_market_data_loader() -> HistoricalMarketDataLoader:
     """
-    Create the read-only historical market-data loader used by
-    backtests.
+    Create the read-only historical market-data loader used by backtests.
 
-    The loader reads candles that have already been persisted into
-    AQE's market-data tables.
-
-    It does not communicate with MT5 and does not perform historical
-    backfills.
+    The loader reads persisted market data from PostgreSQL. It does not
+    perform broker communication or mutate historical data.
     """
-
     return HistoricalMarketDataLoader(
         session_factory=SessionLocal,
     )
 
 
+async def load_historical_market_data(
+    config: BacktestConfig,
+):
+    """
+    Load persisted historical market data for a backtest.
+
+    BacktestComposition expects its market-data dependency to be callable
+    with BacktestConfig. The concrete HistoricalMarketDataLoader owns the
+    actual PostgreSQL loading implementation.
+    """
+    loader = create_historical_market_data_loader()
+
+    return await loader.load(config)
+
+
 def create_historical_data_service() -> HistoricalDataService:
     """
-    Create the application-level historical data service.
-
-    HistoricalDataService is responsible for fetching historical
-    candles from the MT5 bridge and persisting them into AQE's
-    market-data database.
-
-    This service is only invoked when persisted historical coverage
-    is missing or incomplete.
+    Create the historical-data service used when PostgreSQL coverage is
+    incomplete and a backfill from the MT5 bridge is required.
     """
-
-    bridge_service = MT5BridgeService()
-
     return HistoricalDataService(
         session_factory=SessionLocal,
-        bridge_service=bridge_service,
+        mt5_bridge_service=MT5BridgeService(),
     )
 
 
@@ -79,23 +73,27 @@ async def _historical_market_data_is_available(
     config: BacktestConfig,
 ) -> bool:
     """
-    Verify that PostgreSQL contains complete historical coverage for
-    the requested backtest.
+    Check whether persisted historical data fully covers the requested
+    backtest period and symbols/timeframes.
 
-    The same HistoricalMarketDataLoader used by the actual backtest
-    is used here so that coverage validation has a single source of
-    truth.
+    HistoricalMarketDataLoader.load() accepts the complete BacktestConfig.
+    The loader is responsible for interpreting:
 
-    Raises
-    ------
-    HistoricalMarketDataLoadError
-        When one or more requested symbol/timeframe pairs are missing
-        or do not completely cover the requested range.
+    - config.symbols
+    - config.timeframes
+    - config.start
+    - config.end
+
+    This check is intentionally read-only. If the loader cannot satisfy
+    the requested historical-data requirements, HistoricalMarketDataLoadError
+    is translated into False so the caller can initiate a backfill.
     """
-
     loader = create_historical_market_data_loader()
 
-    await loader.load(config)
+    try:
+        await loader.load(config)
+    except HistoricalMarketDataLoadError:
+        return False
 
     return True
 
@@ -104,332 +102,448 @@ async def prepare_historical_market_data(
     config: BacktestConfig,
 ) -> dict[str, Any]:
     """
-    Prepare the historical market data required by a backtest.
+    Ensure that all historical market data required by the backtest exists.
 
-    The process is database-first:
+    The workflow is:
 
-        1. Check persisted PostgreSQL coverage.
-        2. If coverage is complete, do not contact MT5.
-        3. If coverage is incomplete, perform MT5 backfill.
-        4. Verify persisted coverage again.
-        5. Return only after the complete range is available.
+    1. Check persisted PostgreSQL historical coverage.
+    2. If coverage is incomplete, backfill every required timeframe.
+    3. Verify the coverage again.
+    4. Return normalized preparation information.
 
-    PostgreSQL is the historical source consumed by the backtest.
-
-    MT5 is only the historical acquisition/backfill source.
+    The backtest itself still consumes persisted historical data through the
+    HistoricalMarketDataLoader.
     """
-
-    account_id = config.account_id
-
-    if account_id is None:
-        raise ValueError(
-            "BacktestConfig.account_id is required for historical "
-            "market-data preparation.",
-        )
-
-    start = config.start
-    end = config.end
-
-    if start is None:
-        raise ValueError(
-            "BacktestConfig.start is required for historical "
-            "market-data preparation.",
-        )
-
-    if end is None:
-        raise ValueError(
-            "BacktestConfig.end is required for historical " "market-data preparation.",
-        )
-
-    if start >= end:
-        raise ValueError(
-            "BacktestConfig.start must be earlier than " "BacktestConfig.end.",
-        )
-
-    timeframe = "M15"
-
-    # ------------------------------------------------------------------
-    # STEP 1: PostgreSQL coverage check.
-    # ------------------------------------------------------------------
-
-    try:
-        await _historical_market_data_is_available(config)
-
-    except HistoricalMarketDataLoadError as coverage_error:
-        logger.info(
-            "Persisted historical coverage is incomplete; "
-            "starting MT5 historical backfill. "
-            "account_id=%s start=%s end=%s timeframe=%s reason=%s",
-            account_id,
-            start.isoformat(),
-            end.isoformat(),
-            timeframe,
-            coverage_error,
-        )
-
-    else:
-        logger.info(
-            "Persisted historical coverage is complete; "
-            "skipping MT5 historical backfill. "
-            "account_id=%s start=%s end=%s timeframe=%s",
-            account_id,
-            start.isoformat(),
-            end.isoformat(),
-            timeframe,
-        )
-
-        return {
-            "account_id": str(account_id),
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "timeframe": timeframe,
-            "source": "postgresql",
-            "backfill_required": False,
-            "coverage_verified": True,
-        }
-
-    # ------------------------------------------------------------------
-    # STEP 2: MT5 historical acquisition.
-    # ------------------------------------------------------------------
-
-    service = create_historical_data_service()
-
-    result = await service.backfill_selected_symbols(
-        account_id=account_id,
-        start=start,
-        end=end,
-        timeframe=timeframe,
+    initial_available = await _historical_market_data_is_available(
+        config,
     )
 
-    # ------------------------------------------------------------------
-    # STEP 3: Verify the persisted result.
-    # ------------------------------------------------------------------
+    if initial_available:
+        return {
+            "available": True,
+            "backfilled": False,
+            "symbols": list(config.symbols),
+            "timeframes": list(config.timeframes),
+            "start": config.start,
+            "end": config.end,
+        }
 
-    try:
-        await _historical_market_data_is_available(config)
+    historical_data_service = create_historical_data_service()
 
-    except HistoricalMarketDataLoadError as coverage_error:
-        logger.error(
-            "Historical backfill completed but persisted coverage "
-            "is still incomplete. "
-            "account_id=%s start=%s end=%s timeframe=%s error=%s",
-            account_id,
-            start.isoformat(),
-            end.isoformat(),
-            timeframe,
-            coverage_error,
+    backfilled_timeframes: list[str] = []
+
+    for timeframe in config.timeframes:
+        await historical_data_service.backfill_selected_symbols(
+            account_id=config.account_id,
+            start=config.start,
+            end=config.end,
+            timeframe=timeframe,
         )
 
-        raise RuntimeError(
-            "Historical backfill completed, but the requested "
-            "backtest range is still not fully covered by persisted "
-            "market data.",
-        ) from coverage_error
+        backfilled_timeframes.append(timeframe)
 
-    logger.info(
-        "Historical market-data preparation completed successfully. "
-        "account_id=%s start=%s end=%s timeframe=%s source=mt5_backfill",
-        account_id,
-        start.isoformat(),
-        end.isoformat(),
-        timeframe,
+    final_available = await _historical_market_data_is_available(
+        config,
     )
 
-    if result is None:
-        return {
-            "account_id": str(account_id),
-            "start": start.isoformat(),
-            "end": end.isoformat(),
-            "timeframe": timeframe,
-            "source": "mt5_backfill",
-            "backfill_required": True,
-            "coverage_verified": True,
-        }
-
-    if isinstance(result, dict):
-        return {
-            **result,
-            "source": "mt5_backfill",
-            "backfill_required": True,
-            "coverage_verified": True,
-        }
+    if not final_available:
+        raise HistoricalMarketDataLoadError(
+            "Historical market data is still incomplete after backfill. "
+            f"account_id={config.account_id}, "
+            f"symbols={list(config.symbols)}, "
+            f"timeframes={list(config.timeframes)}, "
+            f"start={config.start}, "
+            f"end={config.end}"
+        )
 
     return {
-        "account_id": str(account_id),
-        "start": start.isoformat(),
-        "end": end.isoformat(),
-        "timeframe": timeframe,
-        "source": "mt5_backfill",
-        "backfill_required": True,
-        "coverage_verified": True,
-        "result": result,
+        "available": True,
+        "backfilled": True,
+        "backfilled_timeframes": backfilled_timeframes,
+        "symbols": list(config.symbols),
+        "timeframes": list(config.timeframes),
+        "start": config.start,
+        "end": config.end,
     }
 
 
-# ======================================================================
-# STRATEGY CONFIGURATION
-# ======================================================================
+# ---------------------------------------------------------------------------
+# Strategy configuration
+# ---------------------------------------------------------------------------
+
+
+def _resolve_strategy_timeframes(
+    strategy_run: Any,
+    config: BacktestConfig,
+) -> list[str]:
+    """
+    Resolve the timeframe(s) applicable to one StrategyRun.
+
+    StrategyRun currently stores a single ``timeframe`` field.
+
+    Resolution order:
+
+    1. StrategyRun.timeframe when explicitly configured.
+    2. BacktestConfig.timeframes as the fallback.
+
+    The helper also tolerates a list/tuple/set value defensively in case the
+    persistence representation is changed later to support multiple
+    timeframes.
+    """
+    strategy_timeframe = getattr(
+        strategy_run,
+        "timeframe",
+        None,
+    )
+
+    if strategy_timeframe is None:
+        return list(config.timeframes)
+
+    if isinstance(strategy_timeframe, str):
+        normalized = strategy_timeframe.strip()
+
+        if not normalized:
+            return list(config.timeframes)
+
+        if "," in normalized:
+            resolved = [
+                item.strip()
+                for item in normalized.split(",")
+                if item.strip()
+            ]
+
+            if resolved:
+                return resolved
+
+            return list(config.timeframes)
+
+        return [normalized]
+
+    if isinstance(
+        strategy_timeframe,
+        (list, tuple, set, frozenset),
+    ):
+        resolved = [
+            str(item).strip()
+            for item in strategy_timeframe
+            if item is not None and str(item).strip()
+        ]
+
+        if resolved:
+            return resolved
+
+    return list(config.timeframes)
+
+
+def _resolve_strategy_id(
+    strategy_run: Any,
+) -> str:
+    """
+    Resolve the strategy definition identifier stored by StrategyRun.
+
+    StrategyRun uses ``strategy_definition_id`` as the persisted foreign-key
+    field, while StrategyConfig exposes that value as ``strategy_id``.
+    """
+    strategy_definition_id = getattr(
+        strategy_run,
+        "strategy_definition_id",
+        None,
+    )
+
+    if strategy_definition_id is None:
+        raise ValueError(
+            "Enabled StrategyRun is missing strategy_definition_id"
+        )
+
+    return str(strategy_definition_id)
+
+
+def _resolve_strategy_metadata(
+    strategy_run: Any,
+) -> dict[str, Any]:
+    """
+    Resolve optional strategy metadata.
+
+    StrategyRun's persisted schema currently exposes parameters but does not
+    expose a metadata column. If a future model adds metadata, it will be
+    preserved automatically.
+    """
+    metadata = getattr(
+        strategy_run,
+        "metadata",
+        None,
+    )
+
+    if metadata is None:
+        return {}
+
+    if isinstance(metadata, dict):
+        return dict(metadata)
+
+    try:
+        return dict(metadata)
+    except (TypeError, ValueError):
+        return {}
 
 
 async def create_strategy_configs(
     config: BacktestConfig,
 ) -> list[StrategyConfig]:
     """
-    Resolve enabled persisted StrategyRun records for the requested
-    backtest account and convert them into runtime StrategyConfig
-    objects.
+    Resolve the enabled account strategies into isolated BACKTEST strategy
+    configurations.
+
+    StrategyRun remains the source of truth for which strategies are enabled
+    for the account.
+
+    StrategyRun fields are mapped into the strategy-engine contract as
+    follows:
+
+        strategy_definition_id -> StrategyConfig.strategy_id
+        strategy_name         -> StrategyConfig.strategy_name
+        timeframe             -> StrategyConfig.timeframes
+        parameters            -> StrategyConfig.parameters
+
+    StrategyRun stores one timeframe, while StrategyConfig supports a list
+    of timeframes. Therefore, each StrategyRun becomes one StrategyConfig
+    with its resolved StrategyRun.timeframe represented as a one-element
+    ``timeframes`` list.
+
+    If StrategyRun.timeframe is empty, the backtest-level timeframes are
+    used as the fallback.
     """
-
-    account_id = config.account_id
-
-    if account_id is None:
-        raise ValueError(
-            "BacktestConfig.account_id is required.",
-        )
-
-    user_id = getattr(
-        config,
-        "user_id",
-        None,
-    )
-
-    if user_id is None:
-        raise ValueError(
-            "BacktestConfig.user_id is required for account-scoped "
-            "strategy resolution.",
-        )
-
     async with SessionLocal() as db:
         repository = StrategyRunRepository(db)
 
         strategy_runs = await repository.get_enabled_for_account(
-            account_id=account_id,
-            user_id=user_id,
+            account_id=config.account_id,
+            user_id=config.user_id,
         )
 
-    if not strategy_runs:
-        raise ValueError(
-            f"No enabled strategies are configured for account " f"'{account_id}'.",
-        )
+        strategy_configs: list[StrategyConfig] = []
 
-    configs: list[StrategyConfig] = []
-
-    for strategy_run in strategy_runs:
-        strategy_id = str(strategy_run.id)
-
-        strategy_name = (
-            strategy_run.strategy_name.strip() if strategy_run.strategy_name else ""
-        )
-
-        if not strategy_name:
-            continue
-
-        symbols = [
-            str(symbol).strip()
-            for symbol in (strategy_run.symbols or [])
-            if str(symbol).strip()
-        ]
-
-        timeframe = (
-            strategy_run.timeframe.strip().upper() if strategy_run.timeframe else ""
-        )
-
-        if not timeframe:
-            raise ValueError(
-                f"StrategyRun '{strategy_run.id}' does not define " "a timeframe.",
+        for strategy_run in strategy_runs:
+            strategy_id = _resolve_strategy_id(
+                strategy_run,
             )
 
-        if not symbols:
-            raise ValueError(
-                f"StrategyRun '{strategy_run.id}' does not define " "any symbols.",
+            strategy_name = str(
+                strategy_run.strategy_name,
+            ).strip()
+
+            if not strategy_name:
+                raise ValueError(
+                    "Enabled StrategyRun is missing strategy_name"
+                )
+
+            strategy_timeframes = _resolve_strategy_timeframes(
+                strategy_run,
+                config,
             )
 
-        metadata: dict[str, Any] = {
-            "strategy_run_id": str(strategy_run.id),
-            "strategy_version": strategy_run.strategy_version,
-            "run_name": strategy_run.run_name,
-        }
+            if not strategy_timeframes:
+                raise ValueError(
+                    f"Enabled strategy {strategy_name!r} has no "
+                    "resolved timeframes"
+                )
 
-        if strategy_run.description:
-            metadata["description"] = strategy_run.description
+            parameters = dict(
+                strategy_run.parameters or {},
+            )
 
-        if strategy_run.notes:
-            metadata["notes"] = strategy_run.notes
+            metadata = _resolve_strategy_metadata(
+                strategy_run,
+            )
 
-        configs.append(
-            StrategyConfig(
-                strategy_id=strategy_id,
-                strategy_name=strategy_name,
-                mode=StrategyMode.BACKTEST,
-                enabled=True,
-                account_id=account_id,
-                symbols=symbols,
-                timeframes=[timeframe],
-                parameters=dict(strategy_run.parameters or {}),
-                metadata=metadata,
-            ),
+            strategy_configs.append(
+                StrategyConfig(
+                    strategy_id=strategy_id,
+                    strategy_name=strategy_name,
+                    mode=StrategyMode.BACKTEST,
+                    account_id=config.account_id,
+                    symbols=list(config.symbols),
+                    timeframes=strategy_timeframes,
+                    parameters=parameters,
+                    metadata=metadata,
+                )
+            )
+
+        return strategy_configs
+
+
+# ---------------------------------------------------------------------------
+# Risk configuration
+# ---------------------------------------------------------------------------
+
+
+def create_risk_config(
+    config: BacktestConfig,
+) -> RiskConfig:
+    """
+    Create the risk configuration used by the real RiskEngine during
+    backtesting.
+
+    Backtests intentionally use the same risk engine as live/paper
+    execution. The execution side is simulated separately.
+    """
+    return RiskConfig()
+
+
+# ---------------------------------------------------------------------------
+# Symbol metadata
+# ---------------------------------------------------------------------------
+
+
+def _decimal_or_none(
+    value: Any,
+    *,
+    field_name: str,
+) -> Decimal | None:
+    """
+    Convert a nullable database numeric value to Decimal and validate it.
+
+    Nullable fields remain None. Any supplied numeric value must be finite
+    and strictly positive.
+    """
+    if value is None:
+        return None
+
+    try:
+        decimal_value = Decimal(
+            str(value),
         )
-
-    if not configs:
+    except Exception as exc:
         raise ValueError(
-            "No valid enabled strategy configurations were found "
-            f"for account '{account_id}'.",
+            f"Invalid {field_name}: {value!r}"
+        ) from exc
+
+    if not decimal_value.is_finite():
+        raise ValueError(
+            f"{field_name} must be finite; got {value!r}"
         )
 
-    return configs
+    if decimal_value <= Decimal("0"):
+        raise ValueError(
+            f"{field_name} must be greater than zero; got {value!r}"
+        )
+
+    return decimal_value
 
 
-# ======================================================================
-# ACCOUNT TRADING UNIVERSE
-# ======================================================================
+def _validate_account_symbol_metadata(
+    *,
+    broker_symbol: str,
+    digits: int,
+    point: Decimal,
+    tick_size: Decimal,
+    contract_size: Decimal | None,
+    min_volume: Decimal | None,
+    max_volume: Decimal | None,
+    volume_step: Decimal | None,
+) -> None:
+    """
+    Validate the trading metadata persisted on AccountSymbol.
+
+    The database model already defines these fields, but validation here
+    keeps invalid instrument metadata from silently entering the backtest
+    risk engine.
+    """
+    if not broker_symbol:
+        raise ValueError(
+            "broker_symbol must not be empty"
+        )
+
+    if digits < 0:
+        raise ValueError(
+            "digits must be greater than or equal to zero; "
+            f"got {digits}"
+        )
+
+    if not point.is_finite() or point <= Decimal("0"):
+        raise ValueError(
+            "point must be finite and greater than zero; "
+            f"got {point}"
+        )
+
+    if not tick_size.is_finite() or tick_size <= Decimal("0"):
+        raise ValueError(
+            "tick_size must be finite and greater than zero; "
+            f"got {tick_size}"
+        )
+
+    if contract_size is not None and contract_size <= Decimal("0"):
+        raise ValueError(
+            "contract_size must be greater than zero "
+            "when supplied"
+        )
+
+    if min_volume is not None and min_volume <= Decimal("0"):
+        raise ValueError(
+            "min_volume must be greater than zero "
+            "when supplied"
+        )
+
+    if max_volume is not None and max_volume <= Decimal("0"):
+        raise ValueError(
+            "max_volume must be greater than zero "
+            "when supplied"
+        )
+
+    if volume_step is not None and volume_step <= Decimal("0"):
+        raise ValueError(
+            "volume_step must be greater than zero "
+            "when supplied"
+        )
+
+    if (
+        min_volume is not None
+        and max_volume is not None
+        and max_volume < min_volume
+    ):
+        raise ValueError(
+            "max_volume must be greater than or equal to "
+            "min_volume"
+        )
 
 
 async def create_selected_symbols(
     config: BacktestConfig,
 ) -> list[BacktestSymbolSpecification]:
     """
-    Resolve the enabled trading universe for the requested account.
+    Resolve the account's enabled symbols into complete backtest symbol
+    specifications.
 
-    AccountSymbol contains both:
+    AccountSymbol is the source of truth for broker-specific trading
+    metadata. The canonical Symbol model supplies the AQE symbol name used
+    by the strategy and historical-data layers.
 
-        broker_symbol
-            The broker/MT5 symbol, for example ``XAUUSD.s``.
+    Metadata preserved from AccountSymbol:
 
-        symbol_id
-            The foreign key to AQE's canonical Symbol record, for
-            example ``XAUUSD``.
+    - broker_symbol
+    - digits
+    - point
+    - tick_size
+    - contract_size
+    - min_volume
+    - max_volume
+    - volume_step
 
-    Backtests operate on canonical AQE symbols.
-
-    Therefore:
-
-        AccountSymbol.broker_symbol
-            -> used by MT5 historical acquisition
-
-        Symbol.name
-            -> used by PostgreSQL historical data and backtesting
-
-    This separation is intentional and prevents broker-specific
-    symbol suffixes from leaking into the persisted backtest domain.
+    This is important because the RiskEngine needs the instrument's actual
+    tick/volume constraints when calculating position size.
     """
-
     account_id = config.account_id
+    user_id = config.user_id
 
     if account_id is None:
         raise ValueError(
-            "BacktestConfig.account_id is required.",
+            "BacktestConfig.account_id is required to resolve "
+            "selected symbols"
         )
-
-    user_id = getattr(
-        config,
-        "user_id",
-        None,
-    )
 
     if user_id is None:
         raise ValueError(
-            "BacktestConfig.user_id is required for account-scoped "
-            "symbol resolution.",
+            "BacktestConfig.user_id is required to resolve "
+            "selected symbols"
         )
 
     async with SessionLocal() as db:
@@ -440,6 +554,7 @@ async def create_selected_symbols(
         )
 
         specifications: list[BacktestSymbolSpecification] = []
+
         seen_symbols: set[str] = set()
 
         for account_symbol in account_symbols:
@@ -452,139 +567,123 @@ async def create_selected_symbols(
             if not broker_symbol:
                 continue
 
-            # ----------------------------------------------------------
-            # Resolve canonical AQE symbol.
-            #
-            # Do NOT access account_symbol.symbol here because that
-            # relationship may be lazy-loaded and cause MissingGreenlet
-            # errors with AsyncSession.
-            # ----------------------------------------------------------
-
             symbol_model = await db.get(
                 Symbol,
                 account_symbol.symbol_id,
             )
 
             if symbol_model is None:
-                raise ValueError(
-                    f"Canonical Symbol '{account_symbol.symbol_id}' "
-                    f"referenced by account symbol '{broker_symbol}' "
-                    f"was not found.",
-                )
+                continue
 
-            symbol = symbol_model.name.strip() if symbol_model.name else ""
+            symbol = symbol_model.name.strip().upper()
 
             if not symbol:
-                raise ValueError(
-                    f"Canonical Symbol '{account_symbol.symbol_id}' "
-                    f"has an empty name.",
-                )
-
-            symbol = symbol.upper()
+                continue
 
             if symbol in seen_symbols:
                 continue
 
-            seen_symbols.add(symbol)
+            try:
+                digits = int(
+                    account_symbol.digits,
+                )
+            except (
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise ValueError(
+                    f"Invalid digits for account symbol "
+                    f"{symbol!r}: "
+                    f"{account_symbol.digits!r}"
+                ) from exc
 
-            contract_size: Decimal | None = None
+            point = _decimal_or_none(
+                account_symbol.point,
+                field_name=f"{symbol}.point",
+            )
 
-            if account_symbol.contract_size is not None:
-                try:
-                    contract_size = Decimal(
-                        str(account_symbol.contract_size),
-                    )
-                except Exception as exc:
-                    raise ValueError(
-                        f"Invalid contract_size for account symbol "
-                        f"'{broker_symbol}' on account '{account_id}': "
-                        f"{account_symbol.contract_size!r}.",
-                    ) from exc
+            tick_size = _decimal_or_none(
+                account_symbol.tick_size,
+                field_name=f"{symbol}.tick_size",
+            )
 
-                if not contract_size.is_finite():
-                    raise ValueError(
-                        f"contract_size for account symbol "
-                        f"'{broker_symbol}' must be finite.",
-                    )
+            contract_size = _decimal_or_none(
+                account_symbol.contract_size,
+                field_name=f"{symbol}.contract_size",
+            )
 
-                if contract_size <= 0:
-                    raise ValueError(
-                        f"contract_size for account symbol "
-                        f"'{broker_symbol}' must be positive.",
-                    )
+            min_volume = _decimal_or_none(
+                account_symbol.min_volume,
+                field_name=f"{symbol}.min_volume",
+            )
 
-            logger.debug(
-                "Resolved backtest symbol | "
-                "account_id=%s broker_symbol=%s canonical_symbol=%s",
-                account_id,
-                broker_symbol,
-                symbol,
+            max_volume = _decimal_or_none(
+                account_symbol.max_volume,
+                field_name=f"{symbol}.max_volume",
+            )
+
+            volume_step = _decimal_or_none(
+                account_symbol.volume_step,
+                field_name=f"{symbol}.volume_step",
+            )
+
+            if point is None:
+                raise ValueError(
+                    f"Account symbol {symbol!r} has no valid "
+                    "point value"
+                )
+
+            if tick_size is None:
+                raise ValueError(
+                    f"Account symbol {symbol!r} has no valid "
+                    "tick_size value"
+                )
+
+            _validate_account_symbol_metadata(
+                broker_symbol=broker_symbol,
+                digits=digits,
+                point=point,
+                tick_size=tick_size,
+                contract_size=contract_size,
+                min_volume=min_volume,
+                max_volume=max_volume,
+                volume_step=volume_step,
             )
 
             specifications.append(
                 BacktestSymbolSpecification(
                     symbol=symbol,
+                    broker_symbol=broker_symbol,
+                    digits=digits,
+                    point=point,
+                    tick_size=tick_size,
                     contract_size=contract_size,
-                ),
+                    min_volume=min_volume,
+                    max_volume=max_volume,
+                    volume_step=volume_step,
+                )
             )
 
-    if not specifications:
-        raise ValueError(
-            "No enabled trading symbols are configured for account " f"'{account_id}'.",
-        )
+            seen_symbols.add(symbol)
 
-    logger.info(
-        "Resolved backtest trading universe | " "account_id=%s symbols=%s",
-        account_id,
-        tuple(spec.symbol for spec in specifications),
-    )
-
-    return specifications
+        return specifications
 
 
-# ======================================================================
-# RISK CONFIGURATION
-# ======================================================================
-
-
-def create_risk_config(
-    config: BacktestConfig,
-) -> RiskConfig:
-    """
-    Create the risk configuration used by the real AQE RiskEngine.
-
-    Backtests intentionally use the same RiskConfig contract as the
-    production RiskEngine.
-    """
-
-    return RiskConfig()
-
-
-# ======================================================================
-# COMPOSITION
-# ======================================================================
+# ---------------------------------------------------------------------------
+# Backtest composition
+# ---------------------------------------------------------------------------
 
 
 def create_backtest_composition() -> BacktestComposition:
     """
-    Create the complete dependency composition for backtests.
+    Create the application-level backtest composition root.
 
-    PostgreSQL is the persisted historical source.
-
-    MT5 is the acquisition/backfill source only when the requested
-    historical range is not already available.
-
-    AccountSymbolRepository provides the account universe.
-
-    StrategyRunRepository provides enabled strategy configurations.
-
-    RiskConfig provides the production RiskEngine configuration.
+    The composition root injects application concerns into the domain-level
+    backtesting components without making the backtesting engine aware of
+    SQLAlchemy repositories, FastAPI dependencies, or MT5 services.
     """
-
-    market_data_loader = create_historical_market_data_loader()
-
     return BacktestComposition(
-        market_data_loader=market_data_loader.load,
+        market_data_loader=load_historical_market_data,
         historical_data_backfill=prepare_historical_market_data,
         strategy_config_factory=create_strategy_configs,
         risk_config_factory=create_risk_config,
@@ -592,35 +691,33 @@ def create_backtest_composition() -> BacktestComposition:
     )
 
 
-# ======================================================================
-# FACTORY
-# ======================================================================
+# ---------------------------------------------------------------------------
+# Factory
+# ---------------------------------------------------------------------------
 
 
 def create_backtest_factory() -> BacktestFactory:
     """
-    Create the factory responsible for constructing independent
-    BacktestOrchestrator instances.
+    Create the application backtest factory.
     """
+    return BacktestFactory(
+        composition=create_backtest_composition(),
+    )
 
-    composition = create_backtest_composition()
 
-    return composition.create_factory()
-
-
-# ======================================================================
-# SERVICE
-# ======================================================================
+# ---------------------------------------------------------------------------
+# Service
+# ---------------------------------------------------------------------------
 
 
 def create_backtest_service() -> BacktestService:
     """
-    Create the application-level BacktestService.
+    Create the application backtest service.
 
-    BacktestService owns lifecycle management while
-    BacktestComposition owns simulation dependency construction.
+    BacktestService expects an orchestrator factory callable rather than
+    the factory object itself. BacktestFactory.create is therefore injected
+    as the lifecycle service's orchestrator factory.
     """
-
     factory = create_backtest_factory()
 
     return BacktestService(
@@ -628,17 +725,11 @@ def create_backtest_service() -> BacktestService:
     )
 
 
-# ======================================================================
-# APPLICATION-LEVEL SERVICE
-# ======================================================================
-
-
 backtest_service = create_backtest_service()
 
 
 def get_backtest_service() -> BacktestService:
     """
-    Return the application-level BacktestService.
+    Return the application-level backtest service.
     """
-
     return backtest_service

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -15,6 +16,7 @@ from app.schemas.execution import (
     OrderSide as ExecOrderSide,
     OrderType as ExecOrderType,
 )
+
 from risk.config import RiskConfig
 from risk.engine import RiskEngine
 from risk.models import (
@@ -25,6 +27,7 @@ from risk.models import (
     RiskDecision,
     SymbolRiskConstraints,
 )
+
 from strategies.core.enums import (
     SignalDirection,
     StrategyMode,
@@ -36,6 +39,7 @@ from strategies.runtime.manager import StrategyManager
 from .engine import (
     BacktestEngine,
     BacktestExecutionRecord,
+    BacktestSymbolSpecification,
 )
 from .market import (
     BacktestCandle,
@@ -181,11 +185,11 @@ class BacktestOrchestrator:
                 |
                 v
         StrategyManager
-           /     |     \
-          /      |      \
+           /     |     \\
+          /      |      \\
     Strategy A  ...  Strategy N
-          \      |      /
-           \     |     /
+          **      |      /
+           **     |     /
             TradingSignal
                 |
                 v
@@ -207,7 +211,6 @@ class BacktestOrchestrator:
        Shared BacktestPortfolio
 
     Responsibilities:
-
         - coordinate isolated strategy instances
         - advance the backtest market-data view
         - route historical candle events
@@ -217,7 +220,6 @@ class BacktestOrchestrator:
         - maintain strategy and symbol attribution
 
     It does not implement:
-
         - strategy logic
         - risk rules
         - position sizing rules
@@ -244,7 +246,6 @@ class BacktestOrchestrator:
         self.strategy_ids = self._normalize_strategy_ids(
             strategy_ids,
         )
-
         self._market_data_view: BacktestMarketDataView | None = None
         self.result = BacktestOrchestrationResult()
         self._current_event: BacktestMarketEvent | None = None
@@ -262,7 +263,6 @@ class BacktestOrchestrator:
         Run the complete account-level multi-strategy pipeline.
 
         Lifecycle:
-
             configure callback
                 ->
             start StrategyManager
@@ -356,7 +356,6 @@ class BacktestOrchestrator:
         Validate every resolved strategy instance.
 
         Every participating strategy must:
-
             - exist in StrategyManager
             - run in BACKTEST mode
             - be enabled
@@ -448,6 +447,7 @@ class BacktestOrchestrator:
                     )
 
             self._strategies_started = False
+
             raise
 
     async def _stop_strategies(
@@ -973,7 +973,6 @@ class BacktestOrchestrator:
         Convert the current candle into RiskEngine market pricing.
 
         Historical candle spread is not interpreted as a price delta.
-
         Until explicit historical bid/ask data exists, the close is used
         for both bid and ask.
         """
@@ -1001,12 +1000,35 @@ class BacktestOrchestrator:
         symbol: str,
     ) -> SymbolRiskConstraints:
         """
-        Build symbol constraints consumed by RiskEngine.
+        Build the symbol constraints consumed by RiskEngine.
 
-        Configured contract sizes take precedence.
+        Resolution order:
 
-        XAUUSD / XAUUSD.s currently use the verified AQE gold
-        backtest constraints.
+            1. Explicit BacktestConfig.contract_sizes
+            2. BacktestConfig.symbol_specifications metadata
+            3. Legacy XAUUSD fallback
+            4. Generic legacy fallback
+
+        Symbol metadata propagated from AccountSymbol is preferred over
+        hard-coded generic values.
+
+        The available AccountSymbol metadata contains:
+
+            - digits
+            - point
+            - tick_size
+            - contract_size
+            - min_volume
+            - max_volume
+            - volume_step
+
+        AccountSymbol does not currently expose a separate tick-value
+        field. Therefore the canonical backtest convention is:
+
+            tick_value = tick_size * contract_size
+
+        This gives the RiskEngine a consistent monetary value per tick
+        per one volume unit.
         """
 
         normalized_symbol = symbol.strip().upper()
@@ -1016,35 +1038,180 @@ class BacktestOrchestrator:
                 "Symbol constraints require a non-empty symbol.",
             )
 
+        specification = self._symbol_specification(
+            normalized_symbol,
+        )
+
         contract_size = self._contract_size(
             normalized_symbol,
         )
 
-        if normalized_symbol in {
-            "XAUUSD",
-            "XAUUSD.S",
-        }:
-            return SymbolRiskConstraints(
-                symbol=normalized_symbol,
-                contract_size=contract_size,
-                tick_size=Decimal("0.01"),
-                tick_value=Decimal("1"),
-                volume_min=Decimal("0.01"),
-                volume_max=Decimal("100"),
-                volume_step=Decimal("0.01"),
-                margin_rate=Decimal("1"),
+        # --------------------------------------------------------------
+        # Tick size
+        # --------------------------------------------------------------
+
+        tick_size: Decimal | None = None
+
+        if specification is not None:
+            if specification.tick_size is not None:
+                tick_size = self._decimal(
+                    specification.tick_size,
+                )
+
+            elif specification.point is not None:
+                tick_size = self._decimal(
+                    specification.point,
+                )
+
+        # Preserve the previously verified XAUUSD backtest convention
+        # when explicit symbol metadata is unavailable.
+        if tick_size is None:
+            if normalized_symbol in {
+                "XAUUSD",
+                "XAUUSD.S",
+            }:
+                tick_size = Decimal("0.01")
+            else:
+                tick_size = Decimal("0.00001")
+
+        if tick_size <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                f"Invalid tick size for symbol '{normalized_symbol}': " f"{tick_size}",
+            )
+
+        # --------------------------------------------------------------
+        # Tick value
+        # --------------------------------------------------------------
+
+        if specification is not None:
+            specification_tick_value = specification.tick_value
+
+        else:
+            specification_tick_value = None
+
+        if specification_tick_value is not None:
+            tick_value = self._decimal(
+                specification_tick_value,
+            )
+        else:
+            tick_value = tick_size * contract_size
+
+        if tick_value <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                f"Invalid tick value for symbol '{normalized_symbol}': "
+                f"{tick_value}",
+            )
+
+        # --------------------------------------------------------------
+        # Volume constraints
+        # --------------------------------------------------------------
+
+        volume_min: Decimal | None = None
+        volume_max: Decimal | None = None
+        volume_step: Decimal | None = None
+
+        if specification is not None:
+            if specification.min_volume is not None:
+                volume_min = self._decimal(
+                    specification.min_volume,
+                )
+
+            if specification.max_volume is not None:
+                volume_max = self._decimal(
+                    specification.max_volume,
+                )
+
+            if specification.volume_step is not None:
+                volume_step = self._decimal(
+                    specification.volume_step,
+                )
+
+        # Preserve the old XAUUSD defaults only when broker metadata
+        # did not provide the corresponding values.
+        if volume_min is None:
+            volume_min = Decimal("0.01")
+
+        if volume_max is None:
+            if normalized_symbol in {
+                "XAUUSD",
+                "XAUUSD.S",
+            }:
+                volume_max = Decimal("100")
+            else:
+                volume_max = Decimal("1000")
+
+        if volume_step is None:
+            volume_step = Decimal("0.01")
+
+        if volume_min <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                f"Invalid minimum volume for symbol "
+                f"'{normalized_symbol}': {volume_min}",
+            )
+
+        if volume_max <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                f"Invalid maximum volume for symbol "
+                f"'{normalized_symbol}': {volume_max}",
+            )
+
+        if volume_max < volume_min:
+            raise BacktestOrchestrationError(
+                f"Maximum volume is below minimum volume for "
+                f"'{normalized_symbol}': "
+                f"min={volume_min} max={volume_max}",
+            )
+
+        if volume_step <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                f"Invalid volume step for symbol "
+                f"'{normalized_symbol}': {volume_step}",
             )
 
         return SymbolRiskConstraints(
             symbol=normalized_symbol,
             contract_size=contract_size,
-            tick_size=Decimal("0.00001"),
-            tick_value=Decimal("1"),
-            volume_min=Decimal("0.01"),
-            volume_max=Decimal("1000"),
-            volume_step=Decimal("0.01"),
+            tick_size=tick_size,
+            tick_value=tick_value,
+            volume_min=volume_min,
+            volume_max=volume_max,
+            volume_step=volume_step,
             margin_rate=Decimal("1"),
         )
+
+    def _symbol_specification(
+        self,
+        symbol: str,
+    ) -> BacktestSymbolSpecification | None:
+        """
+        Return the canonical symbol specification for one symbol.
+
+        BacktestConfig is the single source of truth for metadata once
+        the composition layer has resolved AccountSymbol information.
+        """
+
+        normalized_symbol = symbol.strip().upper()
+
+        if not normalized_symbol:
+            return None
+
+        specification = self.engine.config.symbol_specifications.get(
+            normalized_symbol,
+        )
+
+        if specification is not None:
+            return specification
+
+        # Be defensive for manually constructed BacktestConfig instances
+        # whose specification mapping may contain non-normalized keys.
+        for (
+            configured_symbol,
+            candidate,
+        ) in self.engine.config.symbol_specifications.items():
+            if configured_symbol.strip().upper() == normalized_symbol:
+                return candidate
+
+        return None
 
     # ==================================================================
     # RISK -> EXECUTION
@@ -1344,19 +1511,35 @@ class BacktestOrchestrator:
         Resolve contract sizes for all symbols participating in the
         current account-level backtest.
 
-        Explicit account-specific configuration takes precedence.
+        Resolution precedence:
 
-        The XAUUSD fallback remains for compatibility with older
-        BacktestConfig objects that were created before AccountSymbol
-        metadata was propagated into the composition layer.
+            1. Explicit BacktestConfig.contract_sizes
+            2. BacktestConfig.symbol_specifications[*].contract_size
+            3. XAUUSD legacy fallback
+            4. Generic legacy fallback
+
+        Explicit contract_sizes therefore remain the strongest override,
+        while AccountSymbol-derived metadata is now correctly honored.
         """
 
         symbols = self.engine.config.symbols
 
         configured = {
-            symbol.strip().upper(): self._decimal(contract_size)
+            symbol.strip().upper(): self._decimal(
+                contract_size,
+            )
             for symbol, contract_size in self.engine.config.contract_sizes.items()
         }
+
+        specifications: dict[str, BacktestSymbolSpecification] = {}
+
+        for symbol, specification in self.engine.config.symbol_specifications.items():
+            normalized_symbol = symbol.strip().upper()
+
+            if not normalized_symbol:
+                continue
+
+            specifications[normalized_symbol] = specification
 
         resolved: dict[str, Decimal] = {}
 
@@ -1366,9 +1549,31 @@ class BacktestOrchestrator:
             if not normalized_symbol:
                 continue
 
+            # ----------------------------------------------------------
+            # 1. Explicit contract_sizes
+            # ----------------------------------------------------------
+
             if normalized_symbol in configured:
                 resolved[normalized_symbol] = configured[normalized_symbol]
                 continue
+
+            # ----------------------------------------------------------
+            # 2. Symbol specification contract_size
+            # ----------------------------------------------------------
+
+            specification = specifications.get(
+                normalized_symbol,
+            )
+
+            if specification is not None and specification.contract_size is not None:
+                resolved[normalized_symbol] = self._decimal(
+                    specification.contract_size,
+                )
+                continue
+
+            # ----------------------------------------------------------
+            # 3. Legacy XAUUSD fallback
+            # ----------------------------------------------------------
 
             if normalized_symbol in {
                 "XAUUSD",
@@ -1377,16 +1582,31 @@ class BacktestOrchestrator:
                 resolved[normalized_symbol] = Decimal("100")
                 continue
 
+            # ----------------------------------------------------------
+            # 4. Generic legacy fallback
+            # ----------------------------------------------------------
+
             resolved[normalized_symbol] = Decimal("1")
 
         # Include explicitly configured symbols even when they are not
-        # present in config.symbols. This keeps the helper safe for
-        # compatibility with manually constructed BacktestConfig values.
+        # present in config.symbols.
         for symbol, contract_size in configured.items():
             resolved.setdefault(
                 symbol,
                 contract_size,
             )
+
+        # Also include explicitly supplied symbol specifications that
+        # contain a contract size, even when they are not present in
+        # config.symbols.
+        for symbol, specification in specifications.items():
+            if specification.contract_size is not None:
+                resolved.setdefault(
+                    symbol,
+                    self._decimal(
+                        specification.contract_size,
+                    ),
+                )
 
         return resolved
 
@@ -1396,6 +1616,9 @@ class BacktestOrchestrator:
     ) -> Decimal:
         """
         Return the resolved contract size for one symbol.
+
+        Explicit BacktestConfig.contract_sizes take precedence over
+        symbol specifications.
         """
 
         normalized_symbol = symbol.strip().upper()
@@ -1413,6 +1636,15 @@ class BacktestOrchestrator:
 
         if configured is not None:
             return configured
+
+        specification = self._symbol_specification(
+            normalized_symbol,
+        )
+
+        if specification is not None and specification.contract_size is not None:
+            return self._decimal(
+                specification.contract_size,
+            )
 
         if normalized_symbol in {
             "XAUUSD",

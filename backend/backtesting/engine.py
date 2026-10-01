@@ -37,7 +37,7 @@ from .orders import (
     PendingBacktestOrder,
 )
 from .portfolio import BacktestPortfolio
-
+from .position import BacktestPositionSide
 # ======================================================================
 # EXCEPTIONS
 # ======================================================================
@@ -275,6 +275,252 @@ class BacktestPeriod:
 
 
 # ======================================================================
+# SYMBOL SPECIFICATION
+# ======================================================================
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestSymbolSpecification:
+    """
+    Account/broker-specific trading specification for one backtest symbol.
+
+    ``symbol`` is the canonical AQE symbol.
+
+    ``broker_symbol`` is the broker/server representation used when
+    historical data was acquired.
+
+    The remaining fields mirror the relevant AccountSymbol trading
+    metadata needed by the simulation and risk engine.
+
+    ``tick_value`` is intentionally derived because AccountSymbol does
+    not currently persist an explicit tick-value field.
+
+    When both tick_size and contract_size are available:
+
+        tick_value = tick_size * contract_size
+
+    This is a simulation convention and should not be interpreted as a
+    broker-reported MT5 tick value.
+    """
+
+    symbol: str
+    broker_symbol: str | None = None
+
+    digits: int | None = None
+    point: Decimal | None = None
+    tick_size: Decimal | None = None
+
+    contract_size: Decimal | None = None
+
+    min_volume: Decimal | None = None
+    max_volume: Decimal | None = None
+    volume_step: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        # ==============================================================
+        # SYMBOL
+        # ==============================================================
+
+        if not isinstance(
+            self.symbol,
+            str,
+        ):
+            raise BacktestConfigurationError(
+                "Backtest symbol specification symbol must be a string.",
+            )
+
+        symbol = self.symbol.strip().upper()
+
+        if not symbol:
+            raise BacktestConfigurationError(
+                "Backtest symbol specification symbol cannot be empty.",
+            )
+
+        object.__setattr__(
+            self,
+            "symbol",
+            symbol,
+        )
+
+        # ==============================================================
+        # BROKER SYMBOL
+        # ==============================================================
+
+        broker_symbol = self.broker_symbol
+
+        if broker_symbol is not None:
+            if not isinstance(
+                broker_symbol,
+                str,
+            ):
+                raise BacktestConfigurationError(
+                    f"Broker symbol for '{symbol}' must be a string.",
+                )
+
+            broker_symbol = broker_symbol.strip()
+
+            if not broker_symbol:
+                broker_symbol = None
+
+        object.__setattr__(
+            self,
+            "broker_symbol",
+            broker_symbol,
+        )
+
+        # ==============================================================
+        # DIGITS
+        # ==============================================================
+
+        if self.digits is not None:
+            if isinstance(
+                self.digits,
+                bool,
+            ) or not isinstance(
+                self.digits,
+                int,
+            ):
+                raise BacktestConfigurationError(
+                    f"Digits for '{symbol}' must be an integer.",
+                )
+
+            if self.digits < 0:
+                raise BacktestConfigurationError(
+                    f"Digits for '{symbol}' cannot be negative.",
+                )
+
+        # ==============================================================
+        # DECIMAL METADATA
+        # ==============================================================
+
+        normalized_point = self._normalize_positive_decimal(
+            self.point,
+            field_name="point",
+            symbol=symbol,
+        )
+
+        normalized_tick_size = self._normalize_positive_decimal(
+            self.tick_size,
+            field_name="tick_size",
+            symbol=symbol,
+        )
+
+        normalized_contract_size = self._normalize_positive_decimal(
+            self.contract_size,
+            field_name="contract_size",
+            symbol=symbol,
+        )
+
+        normalized_min_volume = self._normalize_positive_decimal(
+            self.min_volume,
+            field_name="min_volume",
+            symbol=symbol,
+        )
+
+        normalized_max_volume = self._normalize_positive_decimal(
+            self.max_volume,
+            field_name="max_volume",
+            symbol=symbol,
+        )
+
+        normalized_volume_step = self._normalize_positive_decimal(
+            self.volume_step,
+            field_name="volume_step",
+            symbol=symbol,
+        )
+
+        if (
+            normalized_min_volume is not None
+            and normalized_max_volume is not None
+            and normalized_max_volume < normalized_min_volume
+        ):
+            raise BacktestConfigurationError(
+                f"max_volume cannot be smaller than min_volume " f"for '{symbol}'.",
+            )
+
+        object.__setattr__(
+            self,
+            "point",
+            normalized_point,
+        )
+
+        object.__setattr__(
+            self,
+            "tick_size",
+            normalized_tick_size,
+        )
+
+        object.__setattr__(
+            self,
+            "contract_size",
+            normalized_contract_size,
+        )
+
+        object.__setattr__(
+            self,
+            "min_volume",
+            normalized_min_volume,
+        )
+
+        object.__setattr__(
+            self,
+            "max_volume",
+            normalized_max_volume,
+        )
+
+        object.__setattr__(
+            self,
+            "volume_step",
+            normalized_volume_step,
+        )
+
+    @staticmethod
+    def _normalize_positive_decimal(
+        value: Decimal | None,
+        *,
+        field_name: str,
+        symbol: str,
+    ) -> Decimal | None:
+        if value is None:
+            return None
+
+        try:
+            normalized = Decimal(
+                str(value),
+            )
+        except Exception as exc:
+            raise BacktestConfigurationError(
+                f"{field_name} for '{symbol}' must be a valid decimal.",
+            ) from exc
+
+        if not normalized.is_finite():
+            raise BacktestConfigurationError(
+                f"{field_name} for '{symbol}' must be finite.",
+            )
+
+        if normalized <= Decimal("0"):
+            raise BacktestConfigurationError(
+                f"{field_name} for '{symbol}' must be greater than zero.",
+            )
+
+        return normalized
+
+    @property
+    def tick_value(self) -> Decimal | None:
+        """
+        Derive the simulation tick value when sufficient metadata exists.
+        """
+
+        if self.tick_size is None:
+            return None
+
+        if self.contract_size is None:
+            return None
+
+        return self.tick_size * self.contract_size
+
+
+# ======================================================================
 # CONFIGURATION
 # ======================================================================
 
@@ -300,6 +546,7 @@ class BacktestConfig:
         symbols
         timeframes
         contract_sizes
+        symbol_specifications
 
     There is intentionally no strategy identity here.
     """
@@ -319,7 +566,16 @@ class BacktestConfig:
         default_factory=BacktestFillConfig,
     )
 
+    # Backward-compatible contract-size overrides.
     contract_sizes: dict[str, Decimal] = field(
+        default_factory=dict,
+    )
+
+    # AccountSymbol-derived trading metadata.
+    symbol_specifications: dict[
+        str,
+        BacktestSymbolSpecification,
+    ] = field(
         default_factory=dict,
     )
 
@@ -555,6 +811,94 @@ class BacktestConfig:
             normalized_contract_sizes,
         )
 
+        # ==============================================================
+        # SYMBOL SPECIFICATIONS
+        # ==============================================================
+
+        normalized_specifications: dict[
+            str,
+            BacktestSymbolSpecification,
+        ] = {}
+
+        for symbol, specification in self.symbol_specifications.items():
+            if isinstance(
+                specification,
+                BacktestSymbolSpecification,
+            ):
+                normalized_specification = specification
+
+            elif isinstance(
+                specification,
+                dict,
+            ):
+                try:
+                    normalized_specification = BacktestSymbolSpecification(
+                        symbol=specification.get(
+                            "symbol",
+                            symbol,
+                        ),
+                        broker_symbol=specification.get(
+                            "broker_symbol",
+                        ),
+                        digits=specification.get(
+                            "digits",
+                        ),
+                        point=specification.get(
+                            "point",
+                        ),
+                        tick_size=specification.get(
+                            "tick_size",
+                        ),
+                        contract_size=specification.get(
+                            "contract_size",
+                        ),
+                        min_volume=specification.get(
+                            "min_volume",
+                        ),
+                        max_volume=specification.get(
+                            "max_volume",
+                        ),
+                        volume_step=specification.get(
+                            "volume_step",
+                        ),
+                    )
+
+                except (
+                    BacktestConfigurationError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    raise BacktestConfigurationError(
+                        f"Invalid symbol specification for " f"'{symbol}'.",
+                    ) from exc
+
+            else:
+                raise BacktestConfigurationError(
+                    f"Symbol specification for '{symbol}' must be "
+                    "a BacktestSymbolSpecification or mapping.",
+                )
+
+            normalized_symbol = normalized_specification.symbol
+
+            if normalized_symbol != symbol.strip().upper():
+                raise BacktestConfigurationError(
+                    f"Symbol specification key '{symbol}' does not "
+                    f"match specification symbol "
+                    f"'{normalized_symbol}'.",
+                )
+
+            normalized_specifications[normalized_symbol] = normalized_specification
+
+        object.__setattr__(
+            self,
+            "symbol_specifications",
+            normalized_specifications,
+        )
+
+        # ==============================================================
+        # CLOSE POSITIONS
+        # ==============================================================
+
         object.__setattr__(
             self,
             "close_positions_at_end",
@@ -599,6 +943,18 @@ class BacktestConfig:
             )
 
         return self.start, self.end
+
+    def symbol_specification(
+        self,
+        symbol: str,
+    ) -> BacktestSymbolSpecification | None:
+        """Return the specification for one canonical symbol."""
+
+        normalized_symbol = symbol.strip().upper()
+
+        return self.symbol_specifications.get(
+            normalized_symbol,
+        )
 
 
 # ======================================================================
@@ -1412,13 +1768,15 @@ class BacktestEngine:
         """
         Resolve a complete contract-size map for the backtest universe.
 
-        Explicit configured values take precedence.
+        Resolution order:
 
-        XAUUSD / XAUUSD.S default to 100, matching the risk-model
-        contract specification.
+            1. explicit BacktestConfig.contract_sizes
+            2. AccountSymbol-derived specification
+            3. XAUUSD legacy default of 100
+            4. generic legacy default of 1
 
-        Other symbols default to 1 until actual AccountSymbol contract
-        metadata is injected into BacktestConfig.
+        Explicit contract-size configuration therefore remains
+        backward-compatible and has highest precedence.
         """
 
         resolved: dict[str, Decimal] = {}
@@ -1449,6 +1807,9 @@ class BacktestEngine:
     ) -> Decimal:
         """
         Return the resolved contract size for one symbol.
+
+        Explicit configuration takes precedence over AccountSymbol
+        metadata, preserving the previous BacktestConfig behavior.
         """
 
         normalized_symbol = self._normalize_symbol(
@@ -1464,12 +1825,25 @@ class BacktestEngine:
                 configured,
             )
 
+        specification = self.config.symbol_specification(
+            normalized_symbol,
+        )
+
+        if specification is not None:
+            if specification.contract_size is not None:
+                return self._decimal(
+                    specification.contract_size,
+                )
+
+        # Preserve the existing XAUUSD behavior until the account
+        # provides an actual contract specification.
         if normalized_symbol in {
             "XAUUSD",
             "XAUUSD.S",
         }:
             return Decimal("100")
 
+        # Preserve the existing generic fallback.
         return Decimal("1")
 
     # ==================================================================
