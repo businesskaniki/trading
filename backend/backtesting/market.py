@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import StrEnum
-from typing import Iterable, Iterator, Sequence
+from typing import Any, Iterable, Iterator, Sequence
 
 
 class BacktestMarketError(Exception):
@@ -24,9 +24,9 @@ class BacktestCandle:
     """
     Immutable OHLC candle used by the backtesting engine.
 
-    The backtesting subsystem intentionally owns this lightweight
-    representation rather than coupling the core backtest loop to
-    a particular persistence model.
+    The backtesting subsystem owns this lightweight representation
+    instead of coupling the engine loop directly to a persistence
+    model.
     """
 
     symbol: str
@@ -42,63 +42,196 @@ class BacktestCandle:
     spread: Decimal | None = None
 
     def __post_init__(self) -> None:
-        symbol = self.symbol.strip().upper()
-        timeframe = self.timeframe.strip().upper()
-
-        if not symbol:
-            raise BacktestDataValidationError("Candle symbol cannot be empty.")
-
-        if not timeframe:
-            raise BacktestDataValidationError("Candle timeframe cannot be empty.")
+        symbol = self._normalize_symbol(self.symbol)
+        timeframe = self._normalize_timeframe(self.timeframe)
 
         object.__setattr__(self, "symbol", symbol)
         object.__setattr__(self, "timeframe", timeframe)
 
-        timestamp = self.timestamp
-
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-        else:
-            timestamp = timestamp.astimezone(timezone.utc)
-
+        timestamp = self._normalize_datetime(self.timestamp)
         object.__setattr__(self, "timestamp", timestamp)
 
+        open_price = Decimal(str(self.open))
+        high_price = Decimal(str(self.high))
+        low_price = Decimal(str(self.low))
+        close_price = Decimal(str(self.close))
+        volume = Decimal(str(self.volume))
+
+        object.__setattr__(self, "open", open_price)
+        object.__setattr__(self, "high", high_price)
+        object.__setattr__(self, "low", low_price)
+        object.__setattr__(self, "close", close_price)
+        object.__setattr__(self, "volume", volume)
+
+        spread = Decimal(str(self.spread)) if self.spread is not None else None
+
+        object.__setattr__(self, "spread", spread)
+
         for name, value in (
-            ("open", self.open),
-            ("high", self.high),
-            ("low", self.low),
-            ("close", self.close),
+            ("open", open_price),
+            ("high", high_price),
+            ("low", low_price),
+            ("close", close_price),
         ):
             if value <= Decimal("0"):
                 raise BacktestDataValidationError(
                     f"Candle {name} must be greater than zero."
                 )
 
-        if self.high < max(self.open, self.close):
+        if high_price < max(open_price, close_price):
             raise BacktestDataValidationError(
                 "Candle high cannot be below open or close."
             )
 
-        if self.low > min(self.open, self.close):
+        if low_price > min(open_price, close_price):
             raise BacktestDataValidationError(
                 "Candle low cannot be above open or close."
             )
 
-        if self.volume < Decimal("0"):
+        if low_price > high_price:
+            raise BacktestDataValidationError("Candle low cannot be greater than high.")
+
+        if volume < Decimal("0"):
             raise BacktestDataValidationError("Candle volume cannot be negative.")
 
-        if self.spread is not None and self.spread < Decimal("0"):
+        if spread is not None and spread < Decimal("0"):
             raise BacktestDataValidationError("Candle spread cannot be negative.")
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        normalized = str(symbol).strip().upper()
+
+        if not normalized:
+            raise BacktestDataValidationError("Candle symbol cannot be empty.")
+
+        return normalized
+
+    @staticmethod
+    def _normalize_timeframe(timeframe: str) -> str:
+        normalized = str(timeframe).strip().upper()
+
+        if not normalized:
+            raise BacktestDataValidationError("Candle timeframe cannot be empty.")
+
+        return normalized
+
+    @staticmethod
+    def _normalize_datetime(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+
+        return value.astimezone(timezone.utc)
+
+
+@dataclass(frozen=True, slots=True)
+class BacktestMarket:
+    """
+    Current simulated market state consumed by the execution/fill layer.
+
+    The historical candle remains the primary source of OHLC data.
+
+    ``bid`` and ``ask`` are optional because a pure OHLC backtest may
+    not have a contemporaneous quote. When they are available, the
+    fill engine can use them directly for market-order execution.
+    """
+
+    candle: BacktestCandle
+
+    bid: Decimal | None = None
+    ask: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.candle, BacktestCandle):
+            raise BacktestDataValidationError(
+                "BacktestMarket requires a BacktestCandle."
+            )
+
+        bid = Decimal(str(self.bid)) if self.bid is not None else None
+
+        ask = Decimal(str(self.ask)) if self.ask is not None else None
+
+        if (bid is None) != (ask is None):
+            raise BacktestDataValidationError(
+                "Bid and ask must either both be provided or both be omitted."
+            )
+
+        if bid is not None and bid <= Decimal("0"):
+            raise BacktestDataValidationError("Market bid must be greater than zero.")
+
+        if ask is not None and ask <= Decimal("0"):
+            raise BacktestDataValidationError("Market ask must be greater than zero.")
+
+        if bid is not None and ask is not None and ask < bid:
+            raise BacktestDataValidationError("Market ask cannot be below bid.")
+
+        object.__setattr__(self, "bid", bid)
+        object.__setattr__(self, "ask", ask)
+
+    @property
+    def symbol(self) -> str:
+        """Normalized market symbol."""
+
+        return self.candle.symbol
+
+    @property
+    def timeframe(self) -> str:
+        """Normalized market timeframe."""
+
+        return self.candle.timeframe
+
+    @property
+    def timestamp(self) -> datetime:
+        """Current market timestamp."""
+
+        return self.candle.timestamp
+
+    @property
+    def open(self) -> Decimal:
+        return self.candle.open
+
+    @property
+    def high(self) -> Decimal:
+        return self.candle.high
+
+    @property
+    def low(self) -> Decimal:
+        return self.candle.low
+
+    @property
+    def close(self) -> Decimal:
+        return self.candle.close
+
+    @property
+    def volume(self) -> Decimal:
+        return self.candle.volume
+
+    @property
+    def spread(self) -> Decimal | None:
+        return self.candle.spread
+
+    @property
+    def mid(self) -> Decimal:
+        """
+        Return the best available mid/reference price.
+
+        Explicit bid/ask take precedence. Otherwise the candle close
+        is used as the market reference.
+        """
+
+        if self.bid is not None and self.ask is not None:
+            return (self.bid + self.ask) / Decimal("2")
+
+        return self.close
 
 
 @dataclass(frozen=True, slots=True)
 class BacktestMarketEvent:
     """
-    A single chronological market event.
+    Single chronological market event.
 
-    Currently the backtest engine processes candles. The event wrapper
-    leaves room for tick/replay events later without changing the
-    overall engine architecture.
+    Candles are currently the supported event type. The wrapper keeps
+    the engine extensible for future tick/replay event types without
+    changing the main event-processing architecture.
     """
 
     event_type: MarketEventType
@@ -115,6 +248,18 @@ class BacktestMarketEvent:
     @property
     def timeframe(self) -> str:
         return self.candle.timeframe
+
+    @property
+    def market(self) -> BacktestMarket:
+        """
+        Build the current market snapshot for this event.
+
+        Historical candle data does not imply a separate live quote,
+        so bid/ask remain unset here unless the caller constructs a
+        richer BacktestMarket directly.
+        """
+
+        return BacktestMarket(candle=self.candle)
 
 
 class BacktestMarketData:
@@ -147,6 +292,8 @@ class BacktestMarketData:
             list[BacktestCandle],
         ] = {}
 
+        self._finalized = False
+
         if candles is not None:
             self.add_many(candles)
 
@@ -154,7 +301,22 @@ class BacktestMarketData:
     # DATA REGISTRATION
     # ------------------------------------------------------------------
 
-    def add(self, candle: BacktestCandle) -> None:
+    def add(
+        self,
+        candle: BacktestCandle,
+    ) -> None:
+        """
+        Add one historical candle.
+
+        Data is allowed to arrive unsorted during loading. Ordering
+        and duplicate validation are performed by ``finalize()``.
+        """
+
+        if not isinstance(candle, BacktestCandle):
+            raise BacktestDataValidationError(
+                "BacktestMarketData accepts only BacktestCandle instances."
+            )
+
         self._candles.append(candle)
 
         key = (
@@ -164,6 +326,8 @@ class BacktestMarketData:
 
         self._index.setdefault(key, []).append(candle)
 
+        self._finalized = False
+
     def add_many(
         self,
         candles: Iterable[BacktestCandle],
@@ -172,14 +336,15 @@ class BacktestMarketData:
             self.add(candle)
 
     # ------------------------------------------------------------------
-    # NORMALIZATION
+    # NORMALIZATION / VALIDATION
     # ------------------------------------------------------------------
 
     def finalize(self) -> None:
         """
-        Sort and validate the loaded historical data.
+        Sort and validate all loaded historical data.
 
-        This should be called before starting a backtest.
+        Each symbol/timeframe series must have strictly increasing
+        timestamps and therefore cannot contain duplicates.
         """
 
         self._candles.sort(
@@ -198,6 +363,14 @@ class BacktestMarketData:
                 candles=candles,
             )
 
+        self._finalized = True
+
+    @property
+    def finalized(self) -> bool:
+        """Whether the market-data collection has been finalized."""
+
+        return self._finalized
+
     def _validate_series(
         self,
         key: tuple[str, str],
@@ -214,7 +387,7 @@ class BacktestMarketData:
                         "Historical candles must have strictly "
                         "increasing timestamps for "
                         f"{symbol} {timeframe}. "
-                        f"Duplicate/out-of-order timestamp: "
+                        "Duplicate/out-of-order timestamp: "
                         f"{candle.timestamp.isoformat()}"
                     )
 
@@ -235,15 +408,18 @@ class BacktestMarketData:
         """
         Iterate through historical candles chronologically.
 
-        The returned sequence is globally chronological across all
-        selected symbols.
+        Range semantics are:
 
-        Example:
+            start <= timestamp < end
 
-            09:00 XAUUSD
-            09:00 BTCUSD
-            09:15 XAUUSD
-            09:15 BTCUSD
+        This makes the backtest range consistent with database queries
+        and historical loaders using half-open intervals.
+
+        Events from multiple symbols/timeframes are globally ordered by:
+
+            timestamp
+            symbol
+            timeframe
         """
 
         normalized_symbols = self._normalize_symbols(symbols)
@@ -291,6 +467,10 @@ class BacktestMarketData:
         symbol: str,
         timeframe: str,
     ) -> list[BacktestCandle]:
+        """
+        Return all candles for one symbol/timeframe pair.
+        """
+
         key = (
             self._normalize_symbol(symbol),
             self._normalize_timeframe(timeframe),
@@ -303,6 +483,10 @@ class BacktestMarketData:
         symbol: str,
         timeframe: str,
     ) -> BacktestCandle | None:
+        """
+        Return the first candle for a symbol/timeframe series.
+        """
+
         candles = self.candles(
             symbol=symbol,
             timeframe=timeframe,
@@ -315,6 +499,10 @@ class BacktestMarketData:
         symbol: str,
         timeframe: str,
     ) -> BacktestCandle | None:
+        """
+        Return the last candle for a symbol/timeframe series.
+        """
+
         candles = self.candles(
             symbol=symbol,
             timeframe=timeframe,
@@ -327,6 +515,10 @@ class BacktestMarketData:
         symbol: str | None = None,
         timeframe: str | None = None,
     ) -> int:
+        """
+        Count candles using optional symbol/timeframe filters.
+        """
+
         if symbol is None and timeframe is None:
             return len(self._candles)
 
@@ -353,14 +545,28 @@ class BacktestMarketData:
 
     @property
     def symbols(self) -> list[str]:
+        """All symbols represented in the dataset."""
+
         return sorted({candle.symbol for candle in self._candles})
 
     @property
     def timeframes(self) -> list[str]:
+        """All timeframes represented in the dataset."""
+
         return sorted({candle.timeframe for candle in self._candles})
 
     @property
+    def series(self) -> list[tuple[str, str]]:
+        """
+        All available symbol/timeframe series.
+        """
+
+        return sorted(self._index)
+
+    @property
     def start_time(self) -> datetime | None:
+        """Earliest candle timestamp in the dataset."""
+
         if not self._candles:
             return None
 
@@ -368,6 +574,8 @@ class BacktestMarketData:
 
     @property
     def end_time(self) -> datetime | None:
+        """Latest candle timestamp in the dataset."""
+
         if not self._candles:
             return None
 
@@ -387,6 +595,10 @@ class BacktestMarketData:
     ) -> list[BacktestCandle]:
         """
         Return a bounded historical series.
+
+        Range semantics are:
+
+            start <= timestamp < end
         """
 
         normalized_symbol = self._normalize_symbol(symbol)
@@ -422,12 +634,82 @@ class BacktestMarketData:
         return result
 
     # ------------------------------------------------------------------
+    # COVERAGE
+    # ------------------------------------------------------------------
+
+    def has_series(
+        self,
+        symbol: str,
+        timeframe: str,
+    ) -> bool:
+        """
+        Return whether a symbol/timeframe series exists.
+        """
+
+        key = (
+            self._normalize_symbol(symbol),
+            self._normalize_timeframe(timeframe),
+        )
+
+        return key in self._index and bool(self._index[key])
+
+    def series_count(
+        self,
+        symbol: str | None = None,
+        timeframe: str | None = None,
+    ) -> int:
+        """
+        Count distinct symbol/timeframe series matching the filters.
+        """
+
+        normalized_symbol = (
+            self._normalize_symbol(symbol) if symbol is not None else None
+        )
+
+        normalized_timeframe = (
+            self._normalize_timeframe(timeframe) if timeframe is not None else None
+        )
+
+        return sum(
+            1
+            for current_symbol, current_timeframe in self._index
+            if (normalized_symbol is None or current_symbol == normalized_symbol)
+            and (
+                normalized_timeframe is None
+                or current_timeframe == normalized_timeframe
+            )
+        )
+
+    # ------------------------------------------------------------------
     # RESET / CLEAR
     # ------------------------------------------------------------------
 
     def clear(self) -> None:
+        """Remove all loaded market data."""
+
         self._candles.clear()
         self._index.clear()
+        self._finalized = False
+
+    # ------------------------------------------------------------------
+    # SERIALIZATION
+    # ------------------------------------------------------------------
+
+    def metadata(self) -> dict[str, Any]:
+        """
+        Return dataset-level metadata useful for diagnostics and
+        backtest reporting.
+        """
+
+        return {
+            "candle_count": len(self._candles),
+            "series_count": len(self._index),
+            "symbols": self.symbols,
+            "timeframes": self.timeframes,
+            "start_time": self.start_time,
+            "end_time": self.end_time,
+            "finalized": self._finalized,
+        }
 
     # ------------------------------------------------------------------
     # HELPERS
@@ -437,7 +719,7 @@ class BacktestMarketData:
     def _normalize_symbol(
         symbol: str,
     ) -> str:
-        normalized = symbol.strip().upper()
+        normalized = str(symbol).strip().upper()
 
         if not normalized:
             raise ValueError("Symbol cannot be empty.")
@@ -458,7 +740,7 @@ class BacktestMarketData:
     def _normalize_timeframe(
         timeframe: str,
     ) -> str:
-        normalized = timeframe.strip().upper()
+        normalized = str(timeframe).strip().upper()
 
         if not normalized:
             raise ValueError("Timeframe cannot be empty.")

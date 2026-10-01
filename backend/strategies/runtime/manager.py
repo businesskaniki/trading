@@ -23,30 +23,67 @@ logger = logging.getLogger(__name__)
 
 class StrategyManager:
     """
-    Manage the lifecycle of AQE strategy instances.
+    Manage the runtime lifecycle of AQE strategy instances.
 
-    The manager owns strategy instances and coordinates them with the
-    StrategyDispatcher, signal delivery, and strategy-account routing.
+    The manager is the primary orchestration layer for configured
+    strategy instances.
 
     Responsibilities:
-        - bootstrap strategy definitions
+        - bootstrap strategy implementations
         - create strategy instances
         - register instances with the dispatcher
-        - assign LIVE/PAPER strategies to trading accounts
+        - assign LIVE/PAPER strategies to accounts
         - initialize strategies
-        - start and stop strategies
-        - pause and resume strategies
+        - activate/deactivate strategies
+        - start/stop strategy lifecycles
+        - pause/resume strategies
         - remove strategy instances
         - expose runtime state
         - inject shared runtime dependencies
 
-    It does not:
-        - consume Redis
+    The manager does NOT:
+        - consume Redis directly
         - communicate with MT5
         - communicate with brokers
-        - execute orders
+        - perform risk checks
         - calculate position sizing
+        - execute orders
         - persist trading data
+
+    Runtime architecture:
+
+        StrategyRegistry
+              │
+              ▼
+        StrategyManager
+              │
+              ├── StrategyInstance
+              │       │
+              │       └── BaseStrategy
+              │
+              └── StrategyDispatcher
+                      │
+                      ▼
+                Market Events
+
+    Activation and lifecycle are deliberately separate.
+
+        enabled=False
+            means the strategy is administratively disabled.
+
+        status=RUNNING
+            means its lifecycle is running.
+
+        is_active
+            means enabled=True AND lifecycle is READY/RUNNING.
+
+    Therefore a strategy can legitimately be:
+
+        enabled=False + RUNNING
+
+    In that state it remains initialized/running but ignores market
+    data. This allows administrative activation/deactivation without
+    destroying strategy state.
     """
 
     def __init__(
@@ -69,7 +106,19 @@ class StrategyManager:
         self._account_router = account_router or StrategyAccountRouter()
 
         self._lock = asyncio.Lock()
+
         self._running = False
+
+        # The manager and dispatcher have separate lifecycle concerns.
+        #
+        # A manager can be running before any LIVE/PAPER strategy exists.
+        # The dispatcher is therefore started lazily when the first
+        # LIVE/PAPER strategy is created.
+        self._dispatcher_running = False
+
+    # ==================================================================
+    # PROPERTIES
+    # ==================================================================
 
     @property
     def dispatcher(self) -> StrategyDispatcher:
@@ -102,21 +151,53 @@ class StrategyManager:
         return self._running
 
     @property
+    def dispatcher_running(self) -> bool:
+        """Return whether the market-event dispatcher is running."""
+
+        return self._dispatcher_running
+
+    @property
     def instance_count(self) -> int:
         """Return the number of managed strategy instances."""
 
         return self._dispatcher.instance_count
 
+    @property
+    def active_instance_count(self) -> int:
+        """Return the number of currently active strategy instances."""
+
+        return len(self.active_instances())
+
+    # ==================================================================
+    # MANAGER LIFECYCLE
+    # ==================================================================
+
     async def start(self) -> None:
         """
-        Start the strategy runtime.
+        Start the strategy runtime infrastructure.
 
-        Strategy definitions are bootstrapped before the dispatcher
-        starts accepting live market-data events.
+        This method:
 
-        Backtest instances are intentionally excluded from the live
-        EventBus dispatcher lifecycle. Backtests drive the dispatcher
-        explicitly through BacktestEngine events.
+            1. bootstraps registered strategy implementations
+            2. marks the manager as running
+
+        The dispatcher is intentionally started lazily when a LIVE/PAPER
+        strategy instance is created.
+
+        This allows:
+
+            manager.start()
+                -> no live strategies yet
+                -> dispatcher remains stopped
+
+        followed by:
+
+            create(LIVE/PAPER strategy)
+                -> dispatcher starts
+                -> strategy can receive market events
+
+        BACKTEST/REPLAY runtimes do not require the live market-event
+        dispatcher.
         """
 
         async with self._lock:
@@ -125,34 +206,20 @@ class StrategyManager:
 
             await self._bootstrap.start()
 
-            instances = self._dispatcher.instances()
-
-            has_live_runtime = any(
-                instance.mode
-                in {
-                    StrategyMode.LIVE,
-                    StrategyMode.PAPER,
-                }
-                for instance in instances
-            )
-
-            if has_live_runtime:
-                await self._dispatcher.start()
-
             self._running = True
 
         logger.info(
-            "Strategy manager started: " "instances=%s live_runtime=%s",
+            "Strategy manager started: instances=%s active=%s",
             self.instance_count,
-            has_live_runtime,
+            self.active_instance_count,
         )
 
     async def stop(self) -> None:
         """
         Stop the strategy runtime.
 
-        All existing strategy instances are stopped before the
-        dispatcher unsubscribes from the AQE EventBus.
+        Existing strategy instances are stopped before the dispatcher
+        shuts down.
         """
 
         async with self._lock:
@@ -163,7 +230,11 @@ class StrategyManager:
 
             for instance in instances:
                 try:
-                    await instance.stop()
+                    if instance.status not in {
+                        StrategyStatus.STOPPED,
+                        StrategyStatus.CREATED,
+                    }:
+                        await instance.stop()
 
                 except Exception:
                     logger.exception(
@@ -171,21 +242,20 @@ class StrategyManager:
                         instance.strategy_id,
                     )
 
-            has_live_runtime = any(
-                instance.mode
-                in {
-                    StrategyMode.LIVE,
-                    StrategyMode.PAPER,
-                }
-                for instance in instances
-            )
+            if self._dispatcher_running:
+                try:
+                    await self._dispatcher.stop()
 
-            if has_live_runtime:
-                await self._dispatcher.stop()
+                finally:
+                    self._dispatcher_running = False
 
             self._running = False
 
         logger.info("Strategy manager stopped.")
+
+    # ==================================================================
+    # CREATE
+    # ==================================================================
 
     async def create(
         self,
@@ -198,23 +268,38 @@ class StrategyManager:
         auto_start: bool = False,
     ) -> StrategyInstance:
         """
-        Create and register a strategy instance.
+        Create and register one strategy instance.
 
-        LIVE/PAPER strategies publish signals to the global EventBus.
+        ``config.symbols`` represents the complete symbol universe for
+        this instance.
 
-        BACKTEST strategies create StrategySignalEvents locally and
-        return them to the BacktestOrchestrator. They never publish
-        simulated signals to the live EventBus.
+        The manager therefore creates:
+
+            ONE StrategyInstance
+                ├── symbol A
+                ├── symbol B
+                └── symbol C
+
+        and never:
+
+            StrategyInstance(symbol A)
+            StrategyInstance(symbol B)
+            StrategyInstance(symbol C)
+
+        LIVE/PAPER strategies use the normal strategy signal publisher.
+
+        BACKTEST strategies use the isolated backtest publisher and do
+        not publish simulated signals onto the live EventBus.
 
         Args:
             config:
-                Runtime configuration for the strategy instance.
+                Runtime strategy configuration.
 
             market_data:
-                Optional read-only market-data view.
+                Optional market-data context.
 
             positions:
-                Optional read-only position view.
+                Optional position context.
 
             state:
                 Optional strategy state store.
@@ -223,35 +308,40 @@ class StrategyManager:
                 Optional strategy clock.
 
             auto_start:
-                Start the strategy after initialization when enabled.
+                If True, initialize and start the strategy immediately.
 
-        Returns:
-            The created strategy instance.
+                Activation is still determined independently by
+                ``config.enabled``.
         """
 
         async with self._lock:
-            if (
-                self._dispatcher.get_instance(
-                    config.strategy_id,
-                )
-                is not None
-            ):
+            existing = self._dispatcher.get_instance(
+                config.strategy_id,
+            )
+
+            if existing is not None:
                 raise StrategyStateError(
-                    f"Strategy instance " f"'{config.strategy_id}' already exists."
+                    f"Strategy instance '{config.strategy_id}' " "already exists."
                 )
 
             self._validate_account_assignment(config)
 
-            if self._uses_account_router(config.mode):
-                if config.account_id is not None:
-                    self._account_router.register(
-                        strategy_id=config.strategy_id,
-                        account_id=config.account_id,
-                    )
+            uses_account_router = self._uses_account_router(
+                config.mode,
+            )
+
+            if uses_account_router and config.account_id is not None:
+                self._account_router.register(
+                    strategy_id=config.strategy_id,
+                    account_id=config.account_id,
+                )
 
             signal_publisher = self._publisher_for_mode(
                 config.mode,
             )
+
+            instance: StrategyInstance | None = None
+            instance_registered = False
 
             try:
                 instance = StrategyInstance.create(
@@ -267,10 +357,12 @@ class StrategyManager:
                     instance,
                 )
 
+                instance_registered = True
+
                 try:
                     await instance.initialize()
 
-                    if auto_start and config.enabled:
+                    if auto_start:
                         await instance.start()
 
                 except Exception:
@@ -278,23 +370,54 @@ class StrategyManager:
                         instance.strategy_id,
                     )
 
+                    instance_registered = False
                     raise
 
+                # ------------------------------------------------------
+                # A persisted LIVE/PAPER strategy may be deployed after
+                # the manager itself has already started.
+                #
+                # Therefore the dispatcher must become active before
+                # the newly-created strategy is exposed to live market
+                # events.
+                # ------------------------------------------------------
+                if self._running and uses_account_router:
+                    await self._start_dispatcher()
+
             except Exception:
-                if self._uses_account_router(config.mode):
+                if instance_registered and instance is not None:
+                    try:
+                        await self._dispatcher.remove_instance(
+                            instance.strategy_id,
+                        )
+
+                    except Exception:
+                        logger.exception(
+                            "Failed to remove partially-created "
+                            "strategy instance. id=%s",
+                            instance.strategy_id,
+                        )
+
+                if uses_account_router:
                     self._account_router.unregister(
                         config.strategy_id,
                     )
 
                 raise
 
+        # ``instance`` is guaranteed to be assigned after successful
+        # StrategyInstance.create().
+        assert instance is not None
+
         logger.info(
             "Strategy instance created: "
-            "id=%s name=%s mode=%s account_id=%s "
-            "symbols=%s timeframes=%s",
+            "id=%s name=%s mode=%s enabled=%s "
+            "active=%s account_id=%s symbols=%s timeframes=%s",
             instance.strategy_id,
             instance.strategy_name,
             instance.mode.value,
+            instance.is_enabled,
+            instance.is_active,
             instance.config.account_id,
             instance.symbols,
             instance.timeframes,
@@ -302,21 +425,92 @@ class StrategyManager:
 
         return instance
 
+    # ==================================================================
+    # ACTIVATION
+    # ==================================================================
+
+    async def activate(
+        self,
+        strategy_id: str,
+    ) -> StrategyInstance:
+        """
+        Activate a strategy instance.
+
+        Activation does not change lifecycle status.
+
+        Examples:
+
+            READY + activate()
+                -> READY + enabled
+
+            RUNNING + activate()
+                -> RUNNING + enabled
+
+        The strategy must subsequently be started if its lifecycle is
+        still READY.
+        """
+
+        instance = self._require_instance(strategy_id)
+
+        instance.activate()
+
+        logger.info(
+            "Strategy instance activated: id=%s status=%s",
+            strategy_id,
+            instance.status.value,
+        )
+
+        return instance
+
+    async def deactivate(
+        self,
+        strategy_id: str,
+    ) -> StrategyInstance:
+        """
+        Deactivate a strategy instance.
+
+        Deactivation does not stop or destroy the strategy.
+
+        A RUNNING strategy can therefore remain RUNNING while becoming
+        inactive and ignoring incoming market data.
+        """
+
+        instance = self._require_instance(strategy_id)
+
+        instance.deactivate()
+
+        logger.info(
+            "Strategy instance deactivated: id=%s status=%s",
+            strategy_id,
+            instance.status.value,
+        )
+
+        return instance
+
+    # ==================================================================
+    # INSTANCE LIFECYCLE
+    # ==================================================================
+
     async def start_instance(
         self,
         strategy_id: str,
     ) -> StrategyInstance:
-        """Start a specific strategy instance."""
+        """
+        Start a specific strategy instance.
 
-        instance = self._require_instance(
-            strategy_id,
-        )
+        Starting the lifecycle does not itself activate the strategy.
+        Activation remains controlled separately.
+        """
+
+        instance = self._require_instance(strategy_id)
 
         await instance.start()
 
         logger.info(
-            "Strategy instance started: id=%s",
+            "Strategy instance started: id=%s enabled=%s active=%s",
             strategy_id,
+            instance.is_enabled,
+            instance.is_active,
         )
 
         return instance
@@ -327,9 +521,7 @@ class StrategyManager:
     ) -> StrategyInstance:
         """Pause a specific strategy instance."""
 
-        instance = self._require_instance(
-            strategy_id,
-        )
+        instance = self._require_instance(strategy_id)
 
         await instance.pause()
 
@@ -346,15 +538,15 @@ class StrategyManager:
     ) -> StrategyInstance:
         """Resume a specific strategy instance."""
 
-        instance = self._require_instance(
-            strategy_id,
-        )
+        instance = self._require_instance(strategy_id)
 
         await instance.resume()
 
         logger.info(
-            "Strategy instance resumed: id=%s",
+            "Strategy instance resumed: id=%s enabled=%s active=%s",
             strategy_id,
+            instance.is_enabled,
+            instance.is_active,
         )
 
         return instance
@@ -365,9 +557,7 @@ class StrategyManager:
     ) -> StrategyInstance:
         """Stop a specific strategy instance."""
 
-        instance = self._require_instance(
-            strategy_id,
-        )
+        instance = self._require_instance(strategy_id)
 
         await instance.stop()
 
@@ -377,6 +567,10 @@ class StrategyManager:
         )
 
         return instance
+
+    # ==================================================================
+    # REMOVE / RESTART
+    # ==================================================================
 
     async def remove(
         self,
@@ -392,7 +586,7 @@ class StrategyManager:
                 Unique strategy instance identifier.
 
             stop:
-                Stop the strategy before removing it.
+                Stop the strategy before removal.
 
         Returns:
             Removed strategy instance, or None if it did not exist.
@@ -435,8 +629,13 @@ class StrategyManager:
         strategy_id: str,
     ) -> StrategyInstance:
         """
-        Restart a strategy instance while preserving its runtime
-        configuration and dependencies.
+        Restart a strategy instance.
+
+        The existing configuration and runtime dependencies are reused.
+
+        A fresh strategy instance is created, which means strategy state
+        owned directly by the implementation is also recreated unless
+        the supplied state store persists it.
         """
 
         instance = self._require_instance(
@@ -468,7 +667,11 @@ class StrategyManager:
         """
         Remove all strategy instances.
 
-        By default, running instances are stopped gracefully first.
+        Running instances are stopped gracefully by default.
+
+        The dispatcher remains running when the manager itself remains
+        running. This allows strategies to be dynamically deployed after
+        the clear operation.
         """
 
         instances = self._dispatcher.instances()
@@ -493,6 +696,10 @@ class StrategyManager:
 
         logger.info("All strategy instances cleared.")
 
+    # ==================================================================
+    # INSTANCE LOOKUP
+    # ==================================================================
+
     def get(
         self,
         strategy_id: str,
@@ -503,12 +710,71 @@ class StrategyManager:
             strategy_id,
         )
 
+    def contains(
+        self,
+        strategy_id: str,
+    ) -> bool:
+        """Return whether a strategy instance exists."""
+
+        return (
+            self._dispatcher.get_instance(
+                strategy_id,
+            )
+            is not None
+        )
+
     def instances(
         self,
     ) -> tuple[StrategyInstance, ...]:
-        """Return all strategy instances."""
+        """Return all managed strategy instances."""
 
         return self._dispatcher.instances()
+
+    def active_instances(
+        self,
+    ) -> tuple[StrategyInstance, ...]:
+        """
+        Return currently active strategy instances.
+
+        Active means:
+
+            enabled=True
+            AND
+            lifecycle is READY or RUNNING
+        """
+
+        return tuple(
+            instance for instance in self._dispatcher.instances() if instance.is_active
+        )
+
+    def enabled_instances(
+        self,
+    ) -> tuple[StrategyInstance, ...]:
+        """Return administratively enabled strategy instances."""
+
+        return tuple(
+            instance for instance in self._dispatcher.instances() if instance.is_enabled
+        )
+
+    def disabled_instances(
+        self,
+    ) -> tuple[StrategyInstance, ...]:
+        """Return administratively disabled strategy instances."""
+
+        return tuple(
+            instance
+            for instance in self._dispatcher.instances()
+            if not instance.is_enabled
+        )
+
+    def running_instances(
+        self,
+    ) -> tuple[StrategyInstance, ...]:
+        """Return strategy instances whose lifecycle is RUNNING."""
+
+        return tuple(
+            instance for instance in self._dispatcher.instances() if instance.is_running
+        )
 
     def instances_by_mode(
         self,
@@ -534,19 +800,47 @@ class StrategyManager:
             if instance.status is status
         )
 
-    def snapshots(
-        self,
-    ) -> list[dict[str, Any]]:
+    # ==================================================================
+    # SNAPSHOTS / MANAGEMENT
+    # ==================================================================
+
+    def snapshots(self) -> list[dict[str, Any]]:
         """Return lightweight snapshots of all strategy instances."""
 
         return [instance.snapshot() for instance in self._dispatcher.instances()]
 
-    def routing_snapshot(
-        self,
-    ) -> dict[str, object]:
+    def routing_snapshot(self) -> dict[str, object]:
         """Return strategy-account routing information."""
 
         return self._account_router.snapshot()
+
+    # ==================================================================
+    # INTERNAL HELPERS
+    # ==================================================================
+
+    async def _start_dispatcher(self) -> None:
+        """
+        Start the market-event dispatcher when necessary.
+
+        Dispatcher startup is idempotent at the manager layer, so repeated
+        strategy deployments do not repeatedly invoke the dispatcher.
+        """
+
+        if self._dispatcher_running:
+            return
+
+        try:
+            await self._dispatcher.start()
+
+        except Exception:
+            self._dispatcher_running = False
+            raise
+
+        self._dispatcher_running = True
+
+        logger.info(
+            "Strategy dispatcher started.",
+        )
 
     def _require_instance(
         self,
@@ -570,10 +864,11 @@ class StrategyManager:
         mode: StrategyMode,
     ) -> SignalPublisher:
         """
-        Resolve the signal delivery mechanism for a strategy mode.
+        Resolve signal delivery for a strategy mode.
 
-        BACKTEST is deliberately isolated from the global EventBus.
-        LIVE and PAPER use the normal runtime signal pipeline.
+        BACKTEST is isolated from the live EventBus.
+
+        LIVE/PAPER use the normal runtime publisher.
         """
 
         if mode is StrategyMode.BACKTEST:
@@ -585,7 +880,7 @@ class StrategyManager:
     def _uses_account_router(
         mode: StrategyMode,
     ) -> bool:
-        """Return whether a strategy mode uses live account routing."""
+        """Return whether a strategy mode uses account routing."""
 
         return mode in {
             StrategyMode.LIVE,
@@ -597,13 +892,13 @@ class StrategyManager:
         config: StrategyConfig,
     ) -> None:
         """
-        Validate account assignment before registering the strategy.
+        Validate account assignment before creating the strategy.
 
-        LIVE/PAPER require an account because those modes ultimately
-        route through the broker/execution pipeline.
+        LIVE/PAPER strategies require an account because their signals
+        ultimately enter the broker/execution pipeline.
 
-        BACKTEST receives its account context from BacktestConfig and
-        therefore does not require StrategyAccountRouter registration.
+        BACKTEST strategies do not require StrategyAccountRouter
+        registration.
         """
 
         mode = config.mode.value.upper()
@@ -613,3 +908,8 @@ class StrategyManager:
                 f"Strategy instance '{config.strategy_id}' running in "
                 f"{mode} mode cannot be created without an account_id."
             )
+
+
+__all__ = [
+    "StrategyManager",
+]

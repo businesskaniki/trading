@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from uuid import UUID
 
+from app.core.constants import AccountStatus
 from app.core.security import decrypt_secret, encrypt_secret
 from app.database.models.trading_account import TradingAccount
+from app.repositories.strategy_run_repository import StrategyRunRepository
 from app.repositories.trading_account_repository import (
     TradingAccountRepository,
 )
@@ -12,7 +14,8 @@ from app.schemas.trading_account import (
     TradingAccountStateUpdate,
     TradingAccountUpdate,
 )
-from app.core.constants import AccountStatus
+from strategies.synchronization import StrategySynchronizationService
+
 
 class TradingAccountService:
     """
@@ -20,13 +23,25 @@ class TradingAccountService:
 
     Broker credentials are encrypted before persistence and
     decrypted only when required for broker communication.
+
+    Strategy configuration is provisioned automatically when a
+    trading account is created. Users do not manually create the
+    StrategyDefinition or StrategyRun records.
     """
 
     def __init__(
         self,
         repository: TradingAccountRepository,
+        strategy_synchronization: StrategySynchronizationService | None = None,
     ):
         self.repository = repository
+
+        if strategy_synchronization is None:
+            strategy_synchronization = StrategySynchronizationService(
+                db=self.repository.db,
+            )
+
+        self.strategy_synchronization = strategy_synchronization
 
     async def get_owned_account(
         self,
@@ -53,9 +68,14 @@ class TradingAccountService:
         data: TradingAccountCreate,
     ) -> TradingAccount:
         """
-        Create a trading account.
+        Create a trading account and automatically provision its
+        StrategyRun records.
 
         The broker password is encrypted before being stored.
+
+        StrategyDefinitions are global system-managed records.
+        StrategyRuns are automatically created for the new account
+        from the currently available StrategyDefinitions.
         """
 
         existing = await self.repository.get_by_identity(
@@ -73,7 +93,9 @@ class TradingAccountService:
         encrypted_credentials: str | None = None
 
         if data.password:
-            encrypted_credentials = encrypt_secret(data.password)
+            encrypted_credentials = encrypt_secret(
+                data.password,
+            )
 
         account = TradingAccount(
             user_id=user_id,
@@ -86,10 +108,30 @@ class TradingAccountService:
             credentials_encrypted=encrypted_credentials,
         )
 
-        self.repository.add(account)
+        self.repository.add(
+            account,
+        )
 
         await self.repository.commit()
-        await self.repository.refresh(account)
+        await self.repository.refresh(
+            account,
+        )
+
+        # ------------------------------------------------------
+        # Automatic strategy provisioning
+        # ------------------------------------------------------
+        #
+        # StrategyDefinitions are synchronized globally during
+        # application startup. At account creation time we only
+        # provision the account-specific StrategyRuns.
+        #
+        # The synchronization service is idempotent, so calling
+        # this more than once will not create duplicates.
+        #
+        await self.strategy_synchronization.synchronize_account(
+            account_id=account.id,
+            user_id=user_id,
+        )
 
         return account
 
@@ -101,17 +143,27 @@ class TradingAccountService:
         Return all trading accounts belonging to a user.
         """
 
-        return await self.repository.list_by_user(user_id=user_id)
+        return await self.repository.list_by_user(
+            user_id=user_id,
+        )
 
     async def reconcile_bridge_state(
         self,
         user_id: UUID,
         bridge_status: dict | None,
     ) -> list[TradingAccount]:
-        """Synchronize persisted account status with the live bridge session."""
-        accounts = await self.repository.list_by_user(user_id=user_id)
+        """
+        Synchronize persisted account status with the live bridge session.
+        """
+
+        accounts = await self.repository.list_by_user(
+            user_id=user_id,
+        )
+
         bridge_connected = bool(bridge_status and bridge_status.get("connected"))
+
         bridge_login = bridge_status.get("login") if bridge_status else None
+
         bridge_server = bridge_status.get("server") if bridge_status else None
 
         for account in accounts:
@@ -119,22 +171,35 @@ class TradingAccountService:
                 continue
 
             if not bridge_status:
-                next_status = AccountStatus.ERROR if account.status == AccountStatus.CONNECTED else account.status
+                next_status = (
+                    AccountStatus.ERROR
+                    if account.status == AccountStatus.CONNECTED
+                    else account.status
+                )
+
             elif not bridge_connected:
                 next_status = AccountStatus.DISCONNECTED
+
             else:
                 matches = (
                     bridge_login is not None
                     and int(bridge_login) == account.login
                     and (bridge_server is None or bridge_server == account.server)
                 )
-                next_status = AccountStatus.CONNECTED if matches else AccountStatus.DISCONNECTED
+
+                next_status = (
+                    AccountStatus.CONNECTED if matches else AccountStatus.DISCONNECTED
+                )
 
             if account.status != next_status:
                 account.status = next_status
-                self.repository.update(account)
+
+                self.repository.update(
+                    account,
+                )
 
         await self.repository.commit()
+
         return accounts
 
     async def update_account(
@@ -157,7 +222,9 @@ class TradingAccountService:
 
         update_data = data.model_dump(
             exclude_unset=True,
-            exclude={"password"},
+            exclude={
+                "password",
+            },
         )
 
         for field, value in update_data.items():
@@ -168,12 +235,18 @@ class TradingAccountService:
             )
 
         if data.password:
-            account.credentials_encrypted = encrypt_secret(data.password)
+            account.credentials_encrypted = encrypt_secret(
+                data.password,
+            )
 
-        self.repository.update(account)
+        self.repository.update(
+            account,
+        )
 
         await self.repository.commit()
-        await self.repository.refresh(account)
+        await self.repository.refresh(
+            account,
+        )
 
         return account
 
@@ -199,7 +272,9 @@ class TradingAccountService:
             raise ValueError("Trading account credentials are not configured.")
 
         try:
-            return decrypt_secret(account.credentials_encrypted)
+            return decrypt_secret(
+                account.credentials_encrypted,
+            )
 
         except Exception as exc:
             raise ValueError("Unable to decrypt trading account credentials.") from exc
@@ -216,12 +291,16 @@ class TradingAccountService:
         synchronization from broker/bridge data.
         """
 
-        account = await self.repository.get_by_id(account_id)
+        account = await self.repository.get_by_id(
+            account_id,
+        )
 
         if account is None:
             raise ValueError("Trading account not found.")
 
-        state_data = state.model_dump(exclude_unset=True)
+        state_data = state.model_dump(
+            exclude_unset=True,
+        )
 
         for field, value in state_data.items():
             setattr(
@@ -230,10 +309,14 @@ class TradingAccountService:
                 value,
             )
 
-        self.repository.update(account)
+        self.repository.update(
+            account,
+        )
 
         await self.repository.commit()
-        await self.repository.refresh(account)
+        await self.repository.refresh(
+            account,
+        )
 
         return account
 
@@ -254,10 +337,14 @@ class TradingAccountService:
 
         account.active = active
 
-        self.repository.update(account)
+        self.repository.update(
+            account,
+        )
 
         await self.repository.commit()
-        await self.repository.refresh(account)
+        await self.repository.refresh(
+            account,
+        )
 
         return account
 
@@ -275,7 +362,9 @@ class TradingAccountService:
             user_id=user_id,
         )
 
-        await self.repository.delete(account)
+        await self.repository.delete(
+            account,
+        )
 
         await self.repository.commit()
 
@@ -298,18 +387,18 @@ class TradingAccountService:
         active_accounts = [
             account
             for account in accounts
-            if account.active
-            and account.status == AccountStatus.CONNECTED
+            if account.active and account.status == AccountStatus.CONNECTED
         ]
 
         if not active_accounts:
-            raise ValueError(
-                "No active connected trading account found."
-            )
+            raise ValueError("No active connected trading account found.")
 
         if len(active_accounts) > 1:
-            raise ValueError(
-                "Multiple active connected trading accounts found."
-            )
+            raise ValueError("Multiple active connected trading accounts found.")
 
         return active_accounts[0]
+
+
+__all__ = [
+    "TradingAccountService",
+]

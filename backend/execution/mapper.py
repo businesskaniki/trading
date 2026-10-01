@@ -18,7 +18,7 @@ from .exceptions import ExecutionValidationError
 
 class RiskDecisionMapper:
     """
-    Converts an approved RiskDecision into an ExecutionOrder.
+    Convert an approved RiskDecision into an ExecutionOrder.
 
     Architectural flow:
 
@@ -35,27 +35,29 @@ class RiskDecisionMapper:
         ExecutionEngine
             ↓
         BrokerManager
+            ↓
+        BrokerAdapter
 
     RiskDecision represents the Risk Engine's approved trading decision.
 
-    ExecutionOrder represents the broker-agnostic instruction consumed
-    by the Execution Engine and BrokerAdapter.
+    ExecutionOrder represents the broker-agnostic execution instruction
+    consumed by the Execution Engine and BrokerAdapter.
 
-    This mapper is deliberately deterministic. It performs translation
-    only and never changes the economic intent of an approved decision.
+    This mapper is deliberately deterministic. It translates an approved
+    decision without changing its economic intent.
 
     This mapper does NOT:
 
-        - calculate position size
-        - recalculate risk
-        - change stop loss
-        - change take profit
-        - generate signals
-        - resolve trading-account ownership
-        - query PostgreSQL
-        - resolve AccountSymbol
-        - communicate with a broker
-        - communicate with MT5
+        - calculate position size;
+        - recalculate risk;
+        - change stop loss;
+        - change take profit;
+        - generate signals;
+        - resolve trading-account ownership;
+        - query PostgreSQL;
+        - resolve AccountSymbol;
+        - communicate with a broker;
+        - communicate with MT5.
     """
 
     @staticmethod
@@ -86,15 +88,19 @@ class RiskDecisionMapper:
                 "Approved RiskDecision is missing account_id."
             )
 
-        if not decision.symbol or not decision.symbol.strip():
+        symbol = str(decision.symbol).strip()
+
+        if not symbol:
             raise ExecutionValidationError("Approved RiskDecision is missing symbol.")
 
-        if decision.position_size is None:
+        position_size = decision.position_size
+
+        if position_size is None:
             raise ExecutionValidationError(
                 "Approved RiskDecision is missing position_size."
             )
 
-        if decision.position_size <= Decimal("0"):
+        if position_size <= Decimal("0"):
             raise ExecutionValidationError(
                 "Approved RiskDecision contains an invalid " "position_size."
             )
@@ -112,21 +118,35 @@ class RiskDecisionMapper:
             order_type,
         )
 
+        stop_loss = RiskDecisionMapper._validate_optional_price(
+            decision.stop_loss,
+            field_name="stop_loss",
+        )
+
+        take_profit = RiskDecisionMapper._validate_optional_price(
+            decision.take_profit,
+            field_name="take_profit",
+        )
+
         comment = RiskDecisionMapper._build_comment(
             decision,
         )
 
         return ExecutionOrder(
-            symbol=decision.symbol.strip(),
+            symbol=symbol,
             account_id=account_id,
             side=side,
             order_type=order_type,
-            volume=decision.position_size,
+            volume=position_size,
             price=price,
-            stop_loss=decision.stop_loss,
-            take_profit=decision.take_profit,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
             comment=comment,
         )
+
+    # ======================================================================
+    # SIDE MAPPING
+    # ======================================================================
 
     @staticmethod
     def _map_side(
@@ -136,13 +156,17 @@ class RiskDecisionMapper:
         Map strategy direction to the broker-agnostic execution side.
         """
 
-        if direction == SignalDirection.LONG:
+        if direction is SignalDirection.LONG:
             return ExecutionOrderSide.BUY
 
-        if direction == SignalDirection.SHORT:
+        if direction is SignalDirection.SHORT:
             return ExecutionOrderSide.SELL
 
         raise ExecutionValidationError(f"Unsupported signal direction: {direction!r}")
+
+    # ======================================================================
+    # ORDER TYPE MAPPING
+    # ======================================================================
 
     @staticmethod
     def _map_order_type(
@@ -151,9 +175,8 @@ class RiskDecisionMapper:
         """
         Map strategy/Risk Engine order type to the execution contract.
 
-        Explicit mapping is intentional because the strategy signal
-        enums and execution enums belong to different architectural
-        layers.
+        Explicit mapping is intentional because strategy signal enums
+        and execution enums belong to different architectural layers.
         """
 
         mapping: dict[
@@ -167,11 +190,14 @@ class RiskDecisionMapper:
 
         try:
             return mapping[order_type]
-
         except KeyError as exc:
             raise ExecutionValidationError(
                 f"Unsupported order type: {order_type!r}"
             ) from exc
+
+    # ======================================================================
+    # PRICE RESOLUTION
+    # ======================================================================
 
     @staticmethod
     def _resolve_price(
@@ -191,7 +217,7 @@ class RiskDecisionMapper:
         The mapper never calculates or changes the price.
         """
 
-        if order_type == ExecutionOrderType.MARKET:
+        if order_type is ExecutionOrderType.MARKET:
             return None
 
         if decision.entry_price is None:
@@ -207,6 +233,40 @@ class RiskDecisionMapper:
 
         return decision.entry_price
 
+    # ======================================================================
+    # OPTIONAL PRICE VALIDATION
+    # ======================================================================
+
+    @staticmethod
+    def _validate_optional_price(
+        value: Decimal | None,
+        *,
+        field_name: str,
+    ) -> Decimal | None:
+        """
+        Validate an optional stop-loss or take-profit price.
+
+        The mapper does not determine whether the level is economically
+        appropriate for BUY/SELL or for a particular broker symbol.
+        That belongs to the Risk Engine and broker validation layers.
+
+        This method only prevents obviously invalid execution contracts.
+        """
+
+        if value is None:
+            return None
+
+        if value <= Decimal("0"):
+            raise ExecutionValidationError(
+                f"Approved RiskDecision contains an invalid " f"{field_name}: {value}."
+            )
+
+        return value
+
+    # ======================================================================
+    # COMMENT
+    # ======================================================================
+
     @staticmethod
     def _build_comment(
         decision: RiskDecision,
@@ -214,13 +274,24 @@ class RiskDecisionMapper:
         """
         Build a bounded execution comment.
 
-        The comment is informational only. It must never be used as
-        the source of account, strategy, risk, or order-routing state.
+        The comment is informational only.
+
+        It must never be used as the source of:
+            - account state;
+            - strategy state;
+            - risk state;
+            - execution state;
+            - order-routing state.
         """
 
-        strategy_name = decision.strategy_name.strip()
+        strategy_name = str(decision.strategy_name or "").strip()
 
         if not strategy_name:
             return "AQE"
 
         return f"AQE:{strategy_name}"[:255]
+
+
+__all__ = [
+    "RiskDecisionMapper",
+]

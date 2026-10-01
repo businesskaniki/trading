@@ -1,4 +1,3 @@
-
 """Strategy registration and discovery for the AQE Strategy Engine."""
 
 from __future__ import annotations
@@ -6,14 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import TypeVar
 
-from .base import BaseStrategy
+from .base import BaseStrategy, StrategyDefinition
 from .exceptions import (
     StrategyAlreadyRegisteredError,
     StrategyNotFoundError,
 )
 
 
-StrategyType = TypeVar("StrategyType", bound=type[BaseStrategy])
+StrategyType = TypeVar(
+    "StrategyType",
+    bound=type[BaseStrategy],
+)
 
 
 class StrategyRegistry:
@@ -21,8 +23,17 @@ class StrategyRegistry:
     Registry of available AQE strategy implementations.
 
     The registry stores strategy classes, not strategy instances.
-    Runtime configuration is responsible for creating individual
-    instances with their own symbols, timeframes, parameters, and mode.
+
+    Its responsibility is to answer:
+
+        "What strategy implementations exist?"
+
+    It does NOT answer:
+
+        "Which strategies are currently active?"
+
+    Runtime activation, configuration, lifecycle, selected symbols,
+    parameters, and execution mode belong to the strategy runtime layer.
     """
 
     def __init__(self) -> None:
@@ -30,9 +41,22 @@ class StrategyRegistry:
 
         self._strategies: dict[str, type[BaseStrategy]] = {}
 
+    # ==================================================================
+    # NORMALIZATION
+    # ==================================================================
+
     @staticmethod
     def _normalize_name(name: str) -> str:
-        """Normalize a strategy registration name."""
+        """
+        Normalize a strategy registration name.
+
+        Strategy names are case-insensitive at the registry boundary.
+        """
+
+        if not isinstance(name, str):
+            raise TypeError(
+                "Strategy registration name must be a string."
+            )
 
         normalized = name.strip().lower()
 
@@ -43,6 +67,57 @@ class StrategyRegistry:
 
         return normalized
 
+    # ==================================================================
+    # VALIDATION
+    # ==================================================================
+
+    @staticmethod
+    def _validate_strategy_class(
+        strategy_class: type[BaseStrategy],
+    ) -> StrategyDefinition:
+        """
+        Validate a strategy implementation class.
+
+        Returns:
+            The strategy's static definition.
+
+        Raises:
+            TypeError:
+                If the supplied object is not a BaseStrategy subclass.
+
+            TypeError:
+                If the class does not expose a valid
+                StrategyDefinition.
+        """
+
+        if not isinstance(strategy_class, type):
+            raise TypeError(
+                "Only strategy classes can be registered."
+            )
+
+        if not issubclass(strategy_class, BaseStrategy):
+            raise TypeError(
+                "Only BaseStrategy subclasses can be registered."
+            )
+
+        definition = getattr(
+            strategy_class,
+            "definition",
+            None,
+        )
+
+        if not isinstance(definition, StrategyDefinition):
+            raise TypeError(
+                f"Strategy class '{strategy_class.__name__}' must "
+                "define a class-level StrategyDefinition."
+            )
+
+        return definition
+
+    # ==================================================================
+    # REGISTRATION
+    # ==================================================================
+
     def register(
         self,
         strategy_class: type[BaseStrategy],
@@ -51,54 +126,100 @@ class StrategyRegistry:
         replace: bool = False,
     ) -> type[BaseStrategy]:
         """
-        Register a strategy class.
+        Register a strategy implementation class.
 
         Args:
             strategy_class:
-                Strategy implementation class to register.
+                Concrete BaseStrategy implementation.
 
             name:
-                Optional registry name. When omitted, the strategy
-                definition name is used.
+                Optional registry name.
+
+                When omitted, ``strategy_class.definition.name`` is
+                used as the canonical registration name.
+
+                When supplied, it is treated as the registry name for
+                this implementation. The class definition itself remains
+                the source of truth for strategy metadata.
 
             replace:
-                Whether an existing registration may be replaced.
+                Allow an existing registration to be replaced.
 
         Returns:
             The original strategy class.
 
         Raises:
+            TypeError:
+                If the class is not a valid strategy implementation.
+
             StrategyAlreadyRegisteredError:
-                If the name is already registered and replace=False.
+                If the registration name already exists and replacement
+                is not explicitly allowed.
         """
 
-        if not issubclass(strategy_class, BaseStrategy):
-            raise TypeError(
-                "Only BaseStrategy subclasses can be registered."
-            )
+        definition = self._validate_strategy_class(
+            strategy_class,
+        )
 
-        registration_name = name or strategy_class.definition.name
-        registration_name = self._normalize_name(registration_name)
+        registration_name = (
+            name
+            if name is not None
+            else definition.name
+        )
+
+        registration_name = self._normalize_name(
+            registration_name,
+        )
 
         if (
             registration_name in self._strategies
             and not replace
         ):
+            existing_class = self._strategies[
+                registration_name
+            ]
+
             raise StrategyAlreadyRegisteredError(
-                f"Strategy '{registration_name}' is already registered."
+                f"Strategy '{registration_name}' is already "
+                f"registered by "
+                f"'{existing_class.__name__}'."
             )
 
         self._strategies[registration_name] = strategy_class
 
+        logger_name = (
+            strategy_class.__module__
+            + "."
+            + strategy_class.__qualname__
+        )
+
+        # Keep registration side-effect free apart from storing the
+        # class. Logging is intentionally lightweight because discovery
+        # may import several strategy modules during application startup.
+        import logging
+
+        logging.getLogger(__name__).debug(
+            "Strategy registered: name=%s implementation=%s "
+            "definition=%s version=%s",
+            registration_name,
+            logger_name,
+            definition.name,
+            definition.version,
+        )
+
         return strategy_class
 
-    def unregister(self, name: str) -> None:
+    def unregister(
+        self,
+        name: str,
+    ) -> None:
         """
-        Remove a strategy from the registry.
+        Remove a strategy implementation from the registry.
 
-        Raises:
-            StrategyNotFoundError:
-                If the strategy is not registered.
+        This only removes the implementation from discovery.
+
+        It does not stop or deactivate an already-created runtime
+        strategy instance.
         """
 
         registration_name = self._normalize_name(name)
@@ -110,48 +231,139 @@ class StrategyRegistry:
 
         del self._strategies[registration_name]
 
-    def get(self, name: str) -> type[BaseStrategy]:
-        """
-        Return a registered strategy class.
+    # ==================================================================
+    # LOOKUP
+    # ==================================================================
 
-        Raises:
-            StrategyNotFoundError:
-                If the strategy is not registered.
+    def get(
+        self,
+        name: str,
+    ) -> type[BaseStrategy]:
+        """
+        Return a registered strategy implementation class.
+
+        The returned object is a class, not an instantiated strategy.
         """
 
         registration_name = self._normalize_name(name)
 
         try:
             return self._strategies[registration_name]
+
         except KeyError as exc:
             raise StrategyNotFoundError(
                 f"Strategy '{registration_name}' is not registered."
             ) from exc
 
-    def contains(self, name: str) -> bool:
+    def get_definition(
+        self,
+        name: str,
+    ) -> StrategyDefinition:
+        """
+        Return the static definition of a registered strategy.
+
+        No strategy instance is created.
+        """
+
+        strategy_class = self.get(name)
+
+        return strategy_class.definition
+
+    def contains(
+        self,
+        name: str,
+    ) -> bool:
         """Return whether a strategy is registered."""
 
         registration_name = self._normalize_name(name)
 
         return registration_name in self._strategies
 
+    # ==================================================================
+    # DISCOVERY INFORMATION
+    # ==================================================================
+
     def names(self) -> tuple[str, ...]:
-        """Return all registered strategy names."""
-
-        return tuple(sorted(self._strategies))
-
-    def all(self) -> dict[str, type[BaseStrategy]]:
         """
-        Return a shallow copy of the registered strategies.
+        Return all registered strategy names.
 
-        The registry's internal mapping cannot be modified through
-        the returned dictionary.
+        Names are returned in deterministic alphabetical order.
+        """
+
+        return tuple(
+            sorted(self._strategies),
+        )
+
+    def definitions(self) -> tuple[StrategyDefinition, ...]:
+        """
+        Return definitions for all registered strategies.
+
+        Definitions are returned in the same deterministic order as
+        ``names()``.
+        """
+
+        return tuple(
+            self._strategies[name].definition
+            for name in self.names()
+        )
+
+    def describe(
+        self,
+        name: str,
+    ) -> dict[str, object]:
+        """
+        Return a serializable description of a registered strategy.
+
+        This is useful for management APIs and frontend discovery.
+        """
+
+        strategy_class = self.get(name)
+        definition = strategy_class.definition
+
+        return {
+            "name": definition.name,
+            "version": definition.version,
+            "description": definition.description,
+            "author": definition.author,
+            "tags": list(definition.tags),
+            "implementation": (
+                f"{strategy_class.__module__}."
+                f"{strategy_class.__qualname__}"
+            ),
+        }
+
+    def all_descriptions(self) -> tuple[dict[str, object], ...]:
+        """
+        Return descriptions of all registered strategies.
+        """
+
+        return tuple(
+            self.describe(name)
+            for name in self.names()
+        )
+
+    def all(
+        self,
+    ) -> dict[str, type[BaseStrategy]]:
+        """
+        Return a shallow copy of the registered strategy mapping.
+
+        Modifying the returned dictionary does not modify the registry.
         """
 
         return dict(self._strategies)
 
+    # ==================================================================
+    # REGISTRY MANAGEMENT
+    # ==================================================================
+
     def clear(self) -> None:
-        """Remove all registered strategies."""
+        """
+        Remove all registered strategy implementations.
+
+        This is primarily useful for tests and controlled discovery
+        reloads.
+        """
 
         self._strategies.clear()
 
@@ -160,14 +372,30 @@ class StrategyRegistry:
 
         return len(self._strategies)
 
-    def __contains__(self, name: str) -> bool:
-        """Support the ``name in registry`` syntax."""
+    def __contains__(
+        self,
+        name: str,
+    ) -> bool:
+        """Support ``name in registry`` syntax."""
 
         return self.contains(name)
 
+    def __iter__(self):
+        """Iterate over registered strategy names."""
+
+        return iter(self.names())
+
+
+# ======================================================================
+# GLOBAL REGISTRY
+# ======================================================================
 
 registry = StrategyRegistry()
 
+
+# ======================================================================
+# REGISTRATION DECORATOR
+# ======================================================================
 
 def register_strategy(
     name: str | None = None,
@@ -179,12 +407,24 @@ def register_strategy(
 
     Example:
 
-        @register_strategy("ema_cross")
-        class EMACrossStrategy(BaseStrategy):
+        @register_strategy()
+        class EMATrendStrategy(BaseStrategy):
+            definition = StrategyDefinition(
+                name="ema_trend",
+                ...
+            )
+
+    Or explicitly:
+
+        @register_strategy("ema_trend")
+        class EMATrendStrategy(BaseStrategy):
             ...
 
     The decorated class is returned unchanged, allowing normal class
-    usage while registering it with the global strategy registry.
+    usage while registering it with the global registry.
+
+    Registration does not instantiate, initialize, activate, or start
+    the strategy.
     """
 
     def decorator(

@@ -1,3 +1,5 @@
+"""API routes for account-level AQE backtesting."""
+
 from __future__ import annotations
 
 import logging
@@ -5,11 +7,22 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
-from pydantic import BaseModel, ConfigDict, Field
+from fastapi import APIRouter
+from fastapi import Depends
+from fastapi import HTTPException
+from fastapi import Response
+from fastapi import status
+from pydantic import BaseModel
+from pydantic import ConfigDict
+from pydantic import Field
 
 from backtesting.engine import BacktestConfig
 from backtesting.service import BacktestService
+
+from app.api.dependencies import get_current_user
+from app.api.dependencies import get_trading_account_service
+from app.database.models.user import User
+from app.services.trading_account_service import TradingAccountService
 
 logger = logging.getLogger(__name__)
 
@@ -27,13 +40,17 @@ router = APIRouter(
 
 class BacktestCreateRequest(BaseModel):
     """
-    API request used to create a backtest.
+    Public API request for an account-level backtest.
 
-    The request describes the simulation. BacktestService owns the
-    lifecycle and BacktestOrchestrator owns strategy/risk/execution.
+    Strategy configuration, account symbols, timeframes, and instrument
+    metadata are resolved internally from the persisted account state.
+
+    The authenticated user is never supplied by the client.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+    )
 
     account_id: UUID
 
@@ -41,32 +58,11 @@ class BacktestCreateRequest(BaseModel):
         gt=Decimal("0"),
     )
 
-    symbols: list[str] = Field(
-        min_length=1,
-    )
+    start: datetime
 
-    timeframes: list[str] = Field(
-        min_length=1,
-    )
-
-    start: datetime | None = None
-    end: datetime | None = None
-
-    strategy_id: str = Field(
-        min_length=1,
-        max_length=128,
-    )
-
-    strategy_name: str = Field(
-        min_length=1,
-        max_length=128,
-    )
+    end: datetime
 
     close_positions_at_end: bool = True
-
-    contract_sizes: dict[str, Decimal] = Field(
-        default_factory=dict,
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -79,106 +75,73 @@ def get_backtest_service() -> BacktestService:
     Return the application-level BacktestService.
     """
 
-    from app.core.backtesting import get_backtest_service as get_service
+    from app.core.backtesting import (
+        get_backtest_service as get_service,
+    )
 
     return get_service()
 
 
 # ---------------------------------------------------------------------------
-# Request → domain conversion
+# Validation
 # ---------------------------------------------------------------------------
 
 
-def _build_backtest_config(
-    request: BacktestCreateRequest,
-) -> BacktestConfig:
+def _validate_period(
+    *,
+    start: datetime,
+    end: datetime,
+) -> None:
     """
-    Convert the HTTP request into the immutable BacktestConfig domain
-    object.
+    Validate the requested historical simulation period.
     """
 
-    symbols = tuple(
-        symbol.strip().upper()
-        for symbol in request.symbols
-        if symbol and symbol.strip()
-    )
-
-    timeframes = tuple(
-        timeframe.strip().upper()
-        for timeframe in request.timeframes
-        if timeframe and timeframe.strip()
-    )
-
-    if not symbols:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="At least one symbol is required.",
-        )
-
-    if not timeframes:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="At least one timeframe is required.",
-        )
-
-    if (
-        request.start is not None
-        and request.end is not None
-        and request.start >= request.end
-    ):
+    if start >= end:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="The backtest start time must be before the end time.",
         )
 
-    strategy_id = request.strategy_id.strip()
-    strategy_name = request.strategy_name.strip()
 
-    if not strategy_id:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="strategy_id cannot be empty.",
-        )
+# ---------------------------------------------------------------------------
+# Request -> domain conversion
+# ---------------------------------------------------------------------------
 
-    if not strategy_name:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="strategy_name cannot be empty.",
-        )
 
-    contract_sizes: dict[str, Decimal] = {}
+def _build_backtest_config(
+    request: BacktestCreateRequest,
+    *,
+    user_id: UUID,
+) -> BacktestConfig:
+    """
+    Convert the public API request into the internal BacktestConfig.
 
-    for symbol, contract_size in request.contract_sizes.items():
-        normalized_symbol = symbol.strip().upper()
+    The API deliberately provides no strategy or symbol selection.
 
-        if not normalized_symbol:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Contract-size symbols cannot be empty.",
-            )
+    Those values are resolved later by BacktestComposition from:
 
-        if contract_size <= Decimal("0"):
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=(
-                    f"Contract size for '{normalized_symbol}' "
-                    "must be greater than zero."
-                ),
-            )
+        StrategyRun
+            +
+        AccountSymbol
+    """
 
-        contract_sizes[normalized_symbol] = contract_size
+    _validate_period(
+        start=request.start,
+        end=request.end,
+    )
 
     return BacktestConfig(
         account_id=request.account_id,
-        initial_balance=request.initial_balance,
-        symbols=symbols,
-        timeframes=timeframes,
+        initial_balance=Decimal(
+            str(request.initial_balance),
+        ),
+        symbols=(),
+        timeframes=(),
         start=request.start,
         end=request.end,
-        strategy_id=strategy_id,
-        strategy_name=strategy_name,
+        contract_sizes={},
         close_positions_at_end=request.close_positions_at_end,
-        contract_sizes=contract_sizes,
+        user_id=user_id,
     )
 
 
@@ -193,45 +156,87 @@ def _build_backtest_config(
 )
 async def create_backtest(
     request: BacktestCreateRequest,
-    service: BacktestService = Depends(get_backtest_service),
+    current_user: User = Depends(get_current_user),
+    trading_account_service: TradingAccountService = Depends(
+        get_trading_account_service,
+    ),
+    service: BacktestService = Depends(
+        get_backtest_service,
+    ),
 ) -> dict:
     """
-    Create a backtest without starting it.
+    Create an account-level backtest without starting it.
 
-    The returned run remains in CREATED state until /start is called.
+    The requested trading account must belong to the authenticated user.
+
+    The created run remains in CREATED state until /start is called.
     """
 
-    config = _build_backtest_config(request)
+    # ==============================================================
+    # 1. Validate requested period
+    # ==============================================================
+
+    _validate_period(
+        start=request.start,
+        end=request.end,
+    )
+
+    # ==============================================================
+    # 2. Verify account ownership
+    # ==============================================================
+
+    try:
+        account = await trading_account_service.get_owned_account(
+            account_id=request.account_id,
+            user_id=current_user.id,
+        )
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+
+    # ==============================================================
+    # 3. Build internal domain configuration
+    # ==============================================================
+
+    config = _build_backtest_config(
+        request,
+        user_id=current_user.id,
+    )
 
     logger.info(
-        "Creating backtest: "
-        "account_id=%s strategy_id=%s strategy_name=%s "
-        "symbols=%s timeframes=%s start=%s end=%s",
+        "Creating account-level backtest: "
+        "account_id=%s user_id=%s start=%s end=%s "
+        "initial_balance=%s close_positions_at_end=%s",
         config.account_id,
-        config.strategy_id,
-        config.strategy_name,
-        config.symbols,
-        config.timeframes,
+        current_user.id,
         config.start,
         config.end,
+        config.initial_balance,
+        config.close_positions_at_end,
     )
 
     try:
-        result = await service.create(config)
+        result = await service.create(
+            config,
+        )
 
         logger.info(
-            "Backtest created successfully: " "account_id=%s strategy_id=%s",
-            config.account_id,
-            config.strategy_id,
+            "Backtest created successfully: " "account_id=%s user_id=%s backtest=%s",
+            account.id,
+            current_user.id,
+            result,
         )
 
         return result
 
     except ValueError as exc:
         logger.warning(
-            "Backtest validation failed: " "account_id=%s strategy_id=%s error=%s",
+            "Backtest validation failed: " "account_id=%s user_id=%s error=%s",
             config.account_id,
-            config.strategy_id,
+            current_user.id,
             exc,
         )
 
@@ -242,9 +247,9 @@ async def create_backtest(
 
     except RuntimeError as exc:
         logger.warning(
-            "Backtest creation conflict: " "account_id=%s strategy_id=%s error=%s",
+            "Backtest creation conflict: " "account_id=%s user_id=%s error=%s",
             config.account_id,
-            config.strategy_id,
+            current_user.id,
             exc,
         )
 
@@ -254,16 +259,10 @@ async def create_backtest(
         ) from exc
 
     except Exception as exc:
-        # This is the important change.
-        #
-        # logger.exception() records the complete traceback, including
-        # the exact file and line where the backtest creation failed.
         logger.exception(
-            "Unexpected error while creating backtest: "
-            "account_id=%s strategy_id=%s strategy_name=%s",
+            "Unexpected error while creating backtest: " "account_id=%s user_id=%s",
             config.account_id,
-            config.strategy_id,
-            config.strategy_name,
+            current_user.id,
         )
 
         raise HTTPException(
@@ -279,13 +278,20 @@ async def create_backtest(
     "",
 )
 async def list_backtests(
-    service: BacktestService = Depends(get_backtest_service),
+    current_user: User = Depends(get_current_user),
+    service: BacktestService = Depends(
+        get_backtest_service,
+    ),
 ) -> list[dict]:
     """
-    Return all registered backtests.
+    Return backtests currently registered by the application.
 
-    Newest runs are returned first.
+    BacktestService currently owns an application-level in-memory
+    registry. User-level filtering can be added there once persistent
+    backtest ownership is introduced.
     """
+
+    del current_user
 
     return await service.list()
 
@@ -295,14 +301,24 @@ async def list_backtests(
 )
 async def get_backtest(
     backtest_id: UUID,
-    service: BacktestService = Depends(get_backtest_service),
+    current_user: User = Depends(get_current_user),
+    service: BacktestService = Depends(
+        get_backtest_service,
+    ),
 ) -> dict:
     """
     Return the current state of one backtest.
+
+    Ownership enforcement for persisted backtest records should be added
+    once BacktestRun persistence is introduced.
     """
 
+    del current_user
+
     try:
-        return await service.get(backtest_id)
+        return await service.get(
+            backtest_id,
+        )
 
     except KeyError as exc:
         raise HTTPException(
@@ -316,14 +332,23 @@ async def get_backtest(
 )
 async def start_backtest(
     backtest_id: UUID,
-    service: BacktestService = Depends(get_backtest_service),
+    current_user: User = Depends(get_current_user),
+    service: BacktestService = Depends(
+        get_backtest_service,
+    ),
 ) -> dict:
     """
-    Start a CREATED backtest in the background.
+    Start a CREATED backtest.
+
+    BacktestService owns the execution lifecycle.
     """
 
+    del current_user
+
     try:
-        return await service.start(backtest_id)
+        return await service.start(
+            backtest_id,
+        )
 
     except KeyError as exc:
         raise HTTPException(
@@ -337,7 +362,7 @@ async def start_backtest(
             detail=str(exc),
         ) from exc
 
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Unexpected error while starting backtest: " "backtest_id=%s",
             backtest_id,
@@ -349,7 +374,7 @@ async def start_backtest(
                 "Failed to start backtest. "
                 "Check backend logs for the full exception."
             ),
-        )
+        ) from exc
 
 
 @router.post(
@@ -357,14 +382,21 @@ async def start_backtest(
 )
 async def stop_backtest(
     backtest_id: UUID,
-    service: BacktestService = Depends(get_backtest_service),
+    current_user: User = Depends(get_current_user),
+    service: BacktestService = Depends(
+        get_backtest_service,
+    ),
 ) -> dict:
     """
     Request cooperative shutdown of a running backtest.
     """
 
+    del current_user
+
     try:
-        return await service.stop(backtest_id)
+        return await service.stop(
+            backtest_id,
+        )
 
     except KeyError as exc:
         raise HTTPException(
@@ -378,7 +410,7 @@ async def stop_backtest(
             detail=str(exc),
         ) from exc
 
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Unexpected error while stopping backtest: " "backtest_id=%s",
             backtest_id,
@@ -389,7 +421,7 @@ async def stop_backtest(
             detail=(
                 "Failed to stop backtest. " "Check backend logs for the full exception."
             ),
-        )
+        ) from exc
 
 
 @router.delete(
@@ -398,15 +430,22 @@ async def stop_backtest(
 )
 async def delete_backtest(
     backtest_id: UUID,
-    service: BacktestService = Depends(get_backtest_service),
+    current_user: User = Depends(get_current_user),
+    service: BacktestService = Depends(
+        get_backtest_service,
+    ),
 ) -> Response:
     """
     Remove a completed, stopped, or failed backtest from the
     in-memory registry.
     """
 
+    del current_user
+
     try:
-        await service.remove(backtest_id)
+        await service.remove(
+            backtest_id,
+        )
 
     except KeyError as exc:
         raise HTTPException(
@@ -420,7 +459,7 @@ async def delete_backtest(
             detail=str(exc),
         ) from exc
 
-    except Exception:
+    except Exception as exc:
         logger.exception(
             "Unexpected error while deleting backtest: " "backtest_id=%s",
             backtest_id,
@@ -432,7 +471,7 @@ async def delete_backtest(
                 "Failed to delete backtest. "
                 "Check backend logs for the full exception."
             ),
-        )
+        ) from exc
 
     return Response(
         status_code=status.HTTP_204_NO_CONTENT,

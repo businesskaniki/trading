@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import Boolean
 from sqlalchemy import Enum
@@ -19,6 +22,9 @@ from app.core.constants import BrokerType
 from app.database.base import Base
 from app.database.base import TimestampMixin
 from app.database.base import UUIDMixin
+
+if TYPE_CHECKING:
+    from .strategy_run import StrategyRun
 
 
 class TradingAccount(UUIDMixin, TimestampMixin, Base):
@@ -236,6 +242,12 @@ class TradingAccount(UUIDMixin, TimestampMixin, Base):
         "AccountSymbol",
         back_populates="account",
         cascade="all, delete-orphan",
+        lazy="selectin",
+    )
+
+    strategy_runs: Mapped[list["StrategyRun"]] = relationship(
+        "StrategyRun",
+        back_populates="account",
         lazy="selectin",
     )
 

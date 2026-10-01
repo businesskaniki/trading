@@ -1,34 +1,71 @@
+"""Pydantic schemas for AQE strategy runs and configurations."""
+
+from __future__ import annotations
+
 from datetime import datetime
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel
-from pydantic import ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
-from app.core.constants import StrategyRunStatus
-from app.core.constants import StrategyRunType
-
+from app.core.constants import StrategyRunStatus, StrategyRunType
 
 # ==========================================================
-# Base Schema
+# RESPONSE / SHARED SCHEMA
 # ==========================================================
+
 
 class StrategyRunBase(BaseModel):
     """
-    Shared Strategy Run fields.
+    Shared StrategyRun fields exposed by the API.
+
+    A StrategyRun represents an account-specific assignment and
+    configuration of an installed StrategyDefinition.
+
+    ``strategy_definition_id`` is the authoritative strategy identity.
+
+    ``strategy_name`` and ``strategy_version`` are persisted snapshots
+    of the selected StrategyDefinition and are not client-controlled.
+
+    ``symbols`` is retained as a historical configuration snapshot.
+    The live and backtest runtimes resolve the effective trading
+    universe from AccountSymbol.
     """
 
     # ======================================================
-    # Strategy Information
+    # Ownership
+    # ======================================================
+
+    account_id: UUID
+
+    # ======================================================
+    # Strategy Identity
+    # ======================================================
+
+    strategy_definition_id: UUID
+
+    # ======================================================
+    # Strategy Snapshot
     # ======================================================
 
     strategy_name: str
 
     strategy_version: str
 
+    # ======================================================
+    # Run Identity
+    # ======================================================
+
     run_name: str
 
     description: str | None = None
+
+    # ======================================================
+    # Configuration State
+    # ======================================================
+
+    enabled: bool = True
 
     # ======================================================
     # Execution
@@ -42,9 +79,17 @@ class StrategyRunBase(BaseModel):
     # Configuration
     # ======================================================
 
-    parameters: dict = {}
+    parameters: dict[str, Any] = Field(
+        default_factory=dict,
+    )
 
-    symbols: list[str] = []
+    # ------------------------------------------------------
+    # Historical symbol snapshot
+    # ------------------------------------------------------
+
+    symbols: list[str] = Field(
+        default_factory=list,
+    )
 
     timeframe: str
 
@@ -72,7 +117,7 @@ class StrategyRunBase(BaseModel):
     # Timing
     # ======================================================
 
-    started_at: datetime
+    started_at: datetime | None = None
 
     ended_at: datetime | None = None
 
@@ -84,43 +129,169 @@ class StrategyRunBase(BaseModel):
 
 
 # ==========================================================
-# Create Schema
+# CREATE SCHEMA
 # ==========================================================
 
-class StrategyRunCreate(StrategyRunBase):
+
+class StrategyRunCreate(BaseModel):
     """
-    Payload used when creating a strategy run.
+    Client payload used to create a StrategyRun.
+
+    The client selects:
+
+        - account_id
+        - strategy_definition_id
+        - run configuration
+
+    The service resolves the selected StrategyDefinition and
+    derives:
+
+        - strategy_name
+        - strategy_version
+
+    Those values are persisted on the StrategyRun as immutable
+    historical snapshots.
+
+    The effective live/backtest symbol universe is resolved from
+    AccountSymbol. ``symbols`` is therefore only an optional
+    historical snapshot supplied by the client.
     """
 
-    pass
+    # ======================================================
+    # Ownership
+    # ======================================================
+
+    account_id: UUID
+
+    # ======================================================
+    # Strategy Identity
+    # ======================================================
+
+    strategy_definition_id: UUID
+
+    # ======================================================
+    # Run Identity
+    # ======================================================
+
+    run_name: str = Field(
+        min_length=1,
+        max_length=255,
+    )
+
+    description: str | None = None
+
+    # ======================================================
+    # Configuration State
+    # ======================================================
+
+    enabled: bool = True
+
+    # ======================================================
+    # Execution
+    # ======================================================
+
+    run_type: StrategyRunType
+
+    # ======================================================
+    # Configuration
+    # ======================================================
+
+    parameters: dict[str, Any] = Field(
+        default_factory=dict,
+    )
+
+    # ------------------------------------------------------
+    # Historical symbol snapshot
+    # ------------------------------------------------------
+
+    symbols: list[str] = Field(
+        default_factory=list,
+    )
+
+    timeframe: str = Field(
+        min_length=1,
+        max_length=32,
+    )
+
+    # ======================================================
+    # Notes
+    # ======================================================
+
+    notes: str | None = None
 
 
 # ==========================================================
-# Update Schema
+# UPDATE SCHEMA
 # ==========================================================
+
 
 class StrategyRunUpdate(BaseModel):
     """
-    Payload used when updating a strategy run.
+    Payload used to update mutable StrategyRun configuration.
+
+    The following fields are intentionally immutable:
+
+        - account_id
+        - strategy_definition_id
+        - strategy_name
+        - strategy_version
+
+    Changing the account or strategy implementation creates a new
+    StrategyRun rather than mutating the identity of an existing run.
+
+    Runtime statistics and lifecycle timestamps are included because
+    the existing service/repository contract supports persistence of
+    those values. The execution engine should remain the authority
+    that changes runtime-owned fields.
     """
 
-    strategy_name: str | None = None
+    # ======================================================
+    # Run Configuration
+    # ======================================================
 
-    strategy_version: str | None = None
-
-    run_name: str | None = None
+    run_name: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+    )
 
     description: str | None = None
+
+    # ======================================================
+    # Configuration State
+    # ======================================================
+
+    enabled: bool | None = None
+
+    # ======================================================
+    # Execution
+    # ======================================================
 
     run_type: StrategyRunType | None = None
 
     status: StrategyRunStatus | None = None
 
-    parameters: dict | None = None
+    # ======================================================
+    # Configuration
+    # ======================================================
+
+    parameters: dict[str, Any] | None = None
+
+    # ------------------------------------------------------
+    # Historical symbol snapshot
+    # ------------------------------------------------------
 
     symbols: list[str] | None = None
 
-    timeframe: str | None = None
+    timeframe: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=32,
+    )
+
+    # ======================================================
+    # Statistics
+    # ======================================================
 
     total_trades: int | None = None
 
@@ -138,23 +309,42 @@ class StrategyRunUpdate(BaseModel):
 
     expectancy: Decimal | None = None
 
+    # ======================================================
+    # Timing
+    # ======================================================
+
     started_at: datetime | None = None
 
     ended_at: datetime | None = None
+
+    # ======================================================
+    # Notes
+    # ======================================================
 
     notes: str | None = None
 
 
 # ==========================================================
-# Response Schema
+# RESPONSE SCHEMA
 # ==========================================================
+
 
 class StrategyRunResponse(StrategyRunBase):
     """
-    Returned to API clients.
+    StrategyRun returned to API clients.
+
+    The response exposes both:
+
+        strategy_definition_id
+            authoritative installed-strategy identity
+
+        strategy_name / strategy_version
+            immutable historical snapshots of that definition
     """
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(
+        from_attributes=True,
+    )
 
     id: UUID
 

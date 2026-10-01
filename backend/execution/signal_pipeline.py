@@ -6,6 +6,7 @@ from typing import Any
 
 from app.events import EventBus, event_bus
 from app.events.strategy import StrategySignalEvent
+from app.schemas.execution import ExecutionStatus
 from risk.engine import RiskEngine
 from risk.models import RiskContext, RiskDecision
 from strategies.core.signal import TradingSignal
@@ -26,7 +27,9 @@ class SignalContextError(SignalPipelineError):
 
 @dataclass(slots=True)
 class SignalPipelineStats:
-    """Runtime statistics for the signal → risk → execution pipeline."""
+    """
+    Runtime statistics for the signal → risk → execution pipeline.
+    """
 
     received: int = 0
     context_failures: int = 0
@@ -50,7 +53,7 @@ class SignalPipelineStats:
 
 class SignalRiskExecutionPipeline:
     """
-    Coordinates:
+    Coordinate the runtime Strategy → Risk → Execution flow.
 
         StrategySignalEvent
                 ↓
@@ -61,26 +64,35 @@ class SignalRiskExecutionPipeline:
           RiskDecision
                 ↓
          ExecutionEngine
+                ↓
+          BrokerManager
+                ↓
+          BrokerAdapter
 
     This is the primary runtime path from strategy intent to execution.
 
     Responsibilities:
-        - receive StrategySignalEvent
-        - construct RiskContext
-        - evaluate the signal through RiskEngine
-        - reject execution when RiskEngine rejects the signal
-        - forward approved RiskDecision objects to ExecutionEngine
-        - isolate individual signal failures
-        - maintain runtime statistics
+
+        - receive StrategySignalEvent;
+        - construct RiskContext;
+        - evaluate the signal through RiskEngine;
+        - reject execution when RiskEngine rejects the signal;
+        - forward approved RiskDecision objects to ExecutionEngine;
+        - isolate individual signal failures;
+        - maintain runtime statistics.
 
     This component does NOT:
-        - generate signals
-        - calculate risk itself
-        - calculate position size itself
-        - modify RiskDecision objects
-        - communicate directly with MT5
-        - communicate directly with Redis
-        - write to PostgreSQL
+
+        - generate signals;
+        - calculate risk;
+        - calculate position size;
+        - modify RiskDecision objects;
+        - map RiskDecision into ExecutionOrder;
+        - resolve broker symbols;
+        - persist orders;
+        - communicate directly with MT5;
+        - communicate directly with Redis;
+        - write to PostgreSQL.
     """
 
     def __init__(
@@ -99,6 +111,10 @@ class SignalRiskExecutionPipeline:
         self._started = False
         self._stats = SignalPipelineStats()
 
+    # ======================================================================
+    # PROPERTIES
+    # ======================================================================
+
     @property
     def started(self) -> bool:
         """Return whether the pipeline is subscribed to strategy signals."""
@@ -111,19 +127,29 @@ class SignalRiskExecutionPipeline:
 
         return self._stats
 
+    # ======================================================================
+    # SNAPSHOT
+    # ======================================================================
+
     def snapshot(self) -> dict[str, Any]:
-        """Return a serializable runtime snapshot."""
+        """
+        Return a serializable runtime snapshot.
+        """
 
         return {
             "started": self._started,
             "stats": self._stats.as_dict(),
         }
 
+    # ======================================================================
+    # LIFECYCLE
+    # ======================================================================
+
     async def start(self) -> None:
         """
         Subscribe to StrategySignalEvent.
 
-        Starting an already-running pipeline is intentionally idempotent.
+        Starting an already-running pipeline is idempotent.
         """
 
         if self._started:
@@ -142,7 +168,7 @@ class SignalRiskExecutionPipeline:
         """
         Unsubscribe from StrategySignalEvent.
 
-        Stopping an already-stopped pipeline is intentionally idempotent.
+        Stopping an already-stopped pipeline is idempotent.
         """
 
         if not self._started:
@@ -157,36 +183,62 @@ class SignalRiskExecutionPipeline:
 
         logger.info("Signal risk execution pipeline stopped.")
 
+    # ======================================================================
+    # DIRECT PROCESSING
+    # ======================================================================
+
     async def process(
         self,
         event: StrategySignalEvent,
     ) -> RiskDecision | None:
         """
-        Process one strategy signal directly.
+        Process one StrategySignalEvent directly.
 
-        This method is useful for deterministic tests and for callers
-        that already have a StrategySignalEvent.
+        This is useful for deterministic tests, replay, and callers that
+        already possess a StrategySignalEvent.
 
         Returns:
-            Approved or rejected RiskDecision.
 
-        Returns None only when context construction fails before the
-        Risk Engine can evaluate the signal.
+            RiskDecision:
+                When RiskEngine successfully evaluates the signal.
+
+            None:
+                When context construction or RiskEngine evaluation fails.
+
+        Execution failures do not produce a new decision. The original
+        approved RiskDecision is returned so callers can inspect the
+        decision independently from execution state.
         """
 
         return await self._handle_signal(event)
+
+    # ======================================================================
+    # MAIN PIPELINE
+    # ======================================================================
 
     async def _handle_signal(
         self,
         event: StrategySignalEvent,
     ) -> RiskDecision | None:
         """
-        Execute the complete signal → risk → execution flow.
+        Execute the complete:
+
+            Strategy → Risk → Execution
+
+        flow for one strategy signal.
 
         Individual signal failures are isolated so that one malformed
         signal, unavailable account, risk failure, or broker execution
         failure cannot terminate the EventBus subscription.
         """
+
+        if not isinstance(event, StrategySignalEvent):
+            logger.error(
+                "Signal pipeline received invalid event: expected=%s " "received=%s",
+                StrategySignalEvent.__name__,
+                type(event).__name__,
+            )
+            return None
 
         signal = event.signal
 
@@ -205,6 +257,10 @@ class SignalRiskExecutionPipeline:
             signal.signal_type.value,
         )
 
+        # --------------------------------------------------------------
+        # 1. BUILD RISK CONTEXT
+        # --------------------------------------------------------------
+
         try:
             context = await self._build_context(signal)
 
@@ -220,6 +276,10 @@ class SignalRiskExecutionPipeline:
             )
 
             return None
+
+        # --------------------------------------------------------------
+        # 2. RUN RISK ENGINE
+        # --------------------------------------------------------------
 
         try:
             self._stats.risk_evaluations += 1
@@ -247,6 +307,24 @@ class SignalRiskExecutionPipeline:
 
             return None
 
+        # --------------------------------------------------------------
+        # 3. VALIDATE DECISION STATE
+        # --------------------------------------------------------------
+
+        if decision.approved and decision.rejected:
+            logger.error(
+                "Risk Engine returned an internally inconsistent decision: "
+                "signal_id=%s decision_id=%s",
+                signal.signal_id,
+                decision.decision_id,
+            )
+
+            return decision
+
+        # --------------------------------------------------------------
+        # 4. RISK REJECTION
+        # --------------------------------------------------------------
+
         if decision.rejected:
             self._stats.risk_rejections += 1
 
@@ -263,6 +341,10 @@ class SignalRiskExecutionPipeline:
 
             return decision
 
+        # --------------------------------------------------------------
+        # 5. INVALID RISK STATE
+        # --------------------------------------------------------------
+
         if not decision.approved:
             logger.error(
                 "Risk Engine returned a decision that is neither "
@@ -270,10 +352,14 @@ class SignalRiskExecutionPipeline:
                 "signal_id=%s decision_id=%s status=%s",
                 signal.signal_id,
                 decision.decision_id,
-                decision.status.value,
+                getattr(decision.status, "value", decision.status),
             )
 
             return decision
+
+        # --------------------------------------------------------------
+        # 6. APPROVED
+        # --------------------------------------------------------------
 
         self._stats.approved += 1
 
@@ -287,6 +373,10 @@ class SignalRiskExecutionPipeline:
             signal.symbol,
             decision.position_size,
         )
+
+        # --------------------------------------------------------------
+        # 7. EXECUTION
+        # --------------------------------------------------------------
 
         try:
             result = await self._execution_engine.execute(decision)
@@ -305,6 +395,36 @@ class SignalRiskExecutionPipeline:
 
             return decision
 
+        # --------------------------------------------------------------
+        # 8. VERIFY EXECUTION RESULT
+        # --------------------------------------------------------------
+
+        execution_status = getattr(
+            result,
+            "status",
+            None,
+        )
+
+        if execution_status is not ExecutionStatus.SUCCESS:
+            self._stats.execution_failures += 1
+
+            logger.error(
+                "Execution Engine returned a non-success result: "
+                "signal_id=%s decision_id=%s strategy_id=%s "
+                "symbol=%s execution_status=%s",
+                signal.signal_id,
+                decision.decision_id,
+                signal.strategy_id,
+                signal.symbol,
+                execution_status,
+            )
+
+            return decision
+
+        # --------------------------------------------------------------
+        # 9. CONFIRMED SUCCESS
+        # --------------------------------------------------------------
+
         self._stats.execution_successes += 1
 
         logger.info(
@@ -315,10 +435,14 @@ class SignalRiskExecutionPipeline:
             decision.decision_id,
             signal.strategy_id,
             signal.symbol,
-            getattr(result, "status", None),
+            execution_status,
         )
 
         return decision
+
+    # ======================================================================
+    # RISK CONTEXT
+    # ======================================================================
 
     async def _build_context(
         self,
@@ -326,6 +450,9 @@ class SignalRiskExecutionPipeline:
     ) -> RiskContext:
         """
         Build and validate the RiskContext for a strategy signal.
+
+        The returned context must contain the exact same signal identity
+        that entered the pipeline.
         """
 
         try:
@@ -345,25 +472,35 @@ class SignalRiskExecutionPipeline:
                 f"Expected RiskContext, got {type(context).__name__}."
             )
 
-        if context.signal.signal_id != signal.signal_id:
+        context_signal = context.signal
+
+        if context_signal.signal_id != signal.signal_id:
             raise SignalContextError(
                 "RiskContext contains a different signal. "
                 f"expected={signal.signal_id}, "
-                f"received={context.signal.signal_id}."
+                f"received={context_signal.signal_id}."
             )
 
-        if context.signal.strategy_id != signal.strategy_id:
+        if context_signal.strategy_id != signal.strategy_id:
             raise SignalContextError(
                 "RiskContext contains a signal belonging to a different "
                 f"strategy. expected={signal.strategy_id!r}, "
-                f"received={context.signal.strategy_id!r}."
+                f"received={context_signal.strategy_id!r}."
             )
 
-        if context.signal.symbol != signal.symbol:
+        if context_signal.symbol != signal.symbol:
             raise SignalContextError(
                 "RiskContext contains a signal for a different symbol. "
                 f"expected={signal.symbol!r}, "
-                f"received={context.signal.symbol!r}."
+                f"received={context_signal.symbol!r}."
             )
 
         return context
+
+
+__all__ = [
+    "SignalPipelineError",
+    "SignalContextError",
+    "SignalPipelineStats",
+    "SignalRiskExecutionPipeline",
+]

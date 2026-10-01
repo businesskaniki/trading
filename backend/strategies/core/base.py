@@ -1,442 +1,849 @@
-"""Base strategy contract for the AQE Strategy Engine."""
+"""Base strategy abstractions and runtime configuration for the AQE Strategy Engine."""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from collections.abc import Sequence
-from typing import Any
+import logging
+from abc import ABC
+from dataclasses import dataclass, field
+from typing import Any, ClassVar
 from uuid import UUID
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    field_validator,
-    model_validator,
-)
-
 from app.events.market import MarketCandleEvent, MarketTickEvent
+from app.market_data.models import MarketCandle, MarketTick
 
 from .context import StrategyContext
 from .enums import StrategyMode, StrategyStatus
 from .exceptions import (
     StrategyConfigurationError,
     StrategyExecutionError,
-    StrategyInitializationError,
     StrategyStateError,
 )
 from .signal import TradingSignal
 
-
-StrategySignalResult = TradingSignal | Sequence[TradingSignal] | None
-
-
-class StrategyDefinition(BaseModel):
-    """Static metadata describing a strategy implementation."""
-
-    model_config = ConfigDict(extra="allow")
-
-    name: str = Field(min_length=1, max_length=128)
-    version: str = Field(default="1.0.0", min_length=1, max_length=32)
-    description: str = ""
-    author: str = ""
-    tags: list[str] = Field(default_factory=list)
-
-    @field_validator("name", "version", "description", "author")
-    @classmethod
-    def normalize_strings(cls, value: str) -> str:
-        """Normalize string metadata."""
-        return value.strip()
+logger = logging.getLogger(__name__)
 
 
-class StrategyConfig(BaseModel):
+@dataclass(slots=True)
+class StrategyConfig:
     """
-    Runtime configuration for a strategy instance.
+    Runtime configuration for one strategy instance.
 
-    One strategy implementation can have many independent instances,
-    each with its own symbols, timeframes, parameters, execution mode,
-    and trading-account assignment.
+    StrategyConfig describes how one strategy implementation is deployed
+    at runtime.
 
-    Account assignment is a runtime concern and is intentionally kept
-    out of TradingSignal. A signal identifies the strategy instance;
-    the execution pipeline resolves that strategy instance to its
-    configured trading account.
+    One StrategyConfig represents one strategy instance operating across
+    its complete configured symbol universe:
+
+        EMA Trend
+            ├── XAUUSD.s
+            ├── AUDCAD.s
+            └── EURUSD
+
+    The configuration is intentionally separate from StrategyDefinition.
+
+    StrategyDefinition describes the implementation itself:
+
+        name
+        version
+        description
+        author
+        tags
+
+    StrategyConfig describes one runtime deployment:
+
+        strategy_id
+        strategy_name
+        mode
+        account_id
+        symbols
+        timeframes
+        parameters
+        metadata
+        enabled
     """
 
-    model_config = ConfigDict(
-        extra="allow",
-        validate_assignment=True,
-    )
+    strategy_id: str
+    strategy_name: str
+    mode: StrategyMode
 
-    strategy_id: str = Field(min_length=1, max_length=128)
-    strategy_name: str = Field(min_length=1, max_length=128)
-
-    mode: StrategyMode = StrategyMode.PAPER
     enabled: bool = True
-
     account_id: UUID | None = None
 
-    symbols: list[str] = Field(min_length=1)
-    timeframes: list[str] = Field(min_length=1)
+    symbols: list[str] = field(default_factory=list)
+    timeframes: list[str] = field(default_factory=list)
 
-    parameters: dict[str, Any] = Field(default_factory=dict)
-    metadata: dict[str, Any] = Field(default_factory=dict)
+    parameters: dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    @field_validator("strategy_id", "strategy_name")
-    @classmethod
-    def normalize_identifiers(cls, value: str) -> str:
-        """Normalize strategy identifiers."""
-        value = value.strip()
+    def __post_init__(self) -> None:
+        """Validate and normalize runtime configuration."""
 
-        if not value:
+        # --------------------------------------------------------------
+        # Identity
+        # --------------------------------------------------------------
+
+        self.strategy_id = str(self.strategy_id).strip()
+        self.strategy_name = str(self.strategy_name).strip().lower()
+
+        if not self.strategy_id:
             raise StrategyConfigurationError(
-                "Strategy identifiers cannot be empty."
+                "Strategy configuration requires a non-empty strategy_id."
             )
 
-        return value
-
-    @model_validator(mode="after")
-    def validate_account_assignment(self) -> StrategyConfig:
-        """
-        Validate account assignment for broker-backed execution modes.
-
-        LIVE and PAPER strategies participate in the risk/execution
-        pipeline and therefore require an explicit trading account.
-
-        BACKTEST and REPLAY runtimes may operate without a live
-        TradingAccount, so account_id remains optional for those modes.
-        """
-
-        mode = self.mode.value.upper()
-
-        if mode in {"LIVE", "PAPER"} and self.account_id is None:
+        if not self.strategy_name:
             raise StrategyConfigurationError(
-                f"Strategy '{self.strategy_id}' running in "
-                f"{mode} mode requires an account_id."
+                "Strategy configuration requires a non-empty strategy_name."
             )
 
-        return self
+        # --------------------------------------------------------------
+        # Mode
+        # --------------------------------------------------------------
 
-    @field_validator("symbols")
-    @classmethod
-    def normalize_symbols(
-        cls,
-        values: list[str],
-    ) -> list[str]:
-        """Normalize configured symbols and remove duplicates."""
+        if not isinstance(self.mode, StrategyMode):
+            try:
+                self.mode = StrategyMode(str(self.mode).strip().lower())
+            except (TypeError, ValueError) as exc:
+                raise StrategyConfigurationError(
+                    f"Unsupported strategy mode: {self.mode!r}."
+                ) from exc
 
-        normalized: list[str] = []
+        # --------------------------------------------------------------
+        # Account
+        # --------------------------------------------------------------
 
-        for symbol in values:
-            symbol = symbol.strip()
+        if self.account_id is not None:
+            if not isinstance(self.account_id, UUID):
+                try:
+                    self.account_id = UUID(str(self.account_id))
+                except (TypeError, ValueError) as exc:
+                    raise StrategyConfigurationError(
+                        "account_id must be a valid UUID or None."
+                    ) from exc
 
-            if not symbol:
-                continue
+        # --------------------------------------------------------------
+        # Symbols
+        # --------------------------------------------------------------
 
-            if symbol not in normalized:
-                normalized.append(symbol)
+        if self.symbols is None:
+            self.symbols = []
 
-        if not normalized:
+        try:
+            normalized_symbols = [
+                str(symbol).strip() for symbol in self.symbols if str(symbol).strip()
+            ]
+        except TypeError as exc:
             raise StrategyConfigurationError(
-                "A strategy must contain at least one symbol."
+                "symbols must be an iterable of symbol identifiers."
+            ) from exc
+
+        if not normalized_symbols:
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' must define at least one symbol."
             )
 
-        return normalized
+        self.symbols = normalized_symbols
 
-    @field_validator("timeframes")
-    @classmethod
-    def normalize_timeframes(
-        cls,
-        values: list[str],
-    ) -> list[str]:
-        """Normalize configured timeframes and remove duplicates."""
+        # --------------------------------------------------------------
+        # Timeframes
+        # --------------------------------------------------------------
 
-        normalized: list[str] = []
+        if self.timeframes is None:
+            self.timeframes = []
 
-        for timeframe in values:
-            timeframe = timeframe.strip().upper()
-
-            if not timeframe:
-                continue
-
-            if timeframe not in normalized:
-                normalized.append(timeframe)
-
-        if not normalized:
+        try:
+            normalized_timeframes = [
+                str(timeframe).strip().upper()
+                for timeframe in self.timeframes
+                if str(timeframe).strip()
+            ]
+        except TypeError as exc:
             raise StrategyConfigurationError(
-                "A strategy must contain at least one timeframe."
+                "timeframes must be an iterable of timeframe identifiers."
+            ) from exc
+
+        if not normalized_timeframes:
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' must define at least one timeframe."
             )
 
-        return normalized
+        self.timeframes = normalized_timeframes
+
+        # --------------------------------------------------------------
+        # Parameters
+        # --------------------------------------------------------------
+
+        if self.parameters is None:
+            self.parameters = {}
+
+        if not isinstance(self.parameters, dict):
+            raise StrategyConfigurationError(
+                "strategy parameters must be a dictionary."
+            )
+
+        self.parameters = dict(self.parameters)
+
+        # --------------------------------------------------------------
+        # Metadata
+        # --------------------------------------------------------------
+
+        if self.metadata is None:
+            self.metadata = {}
+
+        if not isinstance(self.metadata, dict):
+            raise StrategyConfigurationError("strategy metadata must be a dictionary.")
+
+        self.metadata = dict(self.metadata)
+
+        # --------------------------------------------------------------
+        # Enabled
+        # --------------------------------------------------------------
+
+        self.enabled = bool(self.enabled)
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a serializable runtime configuration snapshot."""
+
+        return {
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
+            "mode": self.mode.value,
+            "enabled": self.enabled,
+            "account_id": (
+                str(self.account_id) if self.account_id is not None else None
+            ),
+            "symbols": list(self.symbols),
+            "timeframes": list(self.timeframes),
+            "parameters": dict(self.parameters),
+            "metadata": dict(self.metadata),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StrategyDefinition:
+    """
+    Static metadata describing a strategy implementation.
+
+    A StrategyDefinition belongs to the strategy class, not to an
+    individual runtime instance.
+    """
+
+    name: str
+    version: str = "1.0.0"
+    description: str = ""
+    author: str = "AQE"
+    tags: tuple[str, ...] = field(default_factory=tuple)
+
+    def __post_init__(self) -> None:
+        """Validate and normalize strategy definition metadata."""
+
+        normalized_name = self.name.strip().lower()
+        normalized_version = self.version.strip()
+        normalized_description = self.description.strip()
+        normalized_author = self.author.strip()
+
+        if not normalized_name:
+            raise ValueError("Strategy definition name cannot be empty.")
+
+        if not normalized_version:
+            raise ValueError("Strategy definition version cannot be empty.")
+
+        if not normalized_author:
+            raise ValueError("Strategy definition author cannot be empty.")
+
+        normalized_tags = tuple(
+            tag.strip().lower() for tag in self.tags if tag and tag.strip()
+        )
+
+        object.__setattr__(
+            self,
+            "name",
+            normalized_name,
+        )
+        object.__setattr__(
+            self,
+            "version",
+            normalized_version,
+        )
+        object.__setattr__(
+            self,
+            "description",
+            normalized_description,
+        )
+        object.__setattr__(
+            self,
+            "author",
+            normalized_author,
+        )
+        object.__setattr__(
+            self,
+            "tags",
+            normalized_tags,
+        )
+
+    def snapshot(self) -> dict[str, Any]:
+        """Return a serializable representation of the definition."""
+
+        return {
+            "name": self.name,
+            "version": self.version,
+            "description": self.description,
+            "author": self.author,
+            "tags": list(self.tags),
+        }
 
 
 class BaseStrategy(ABC):
     """
     Abstract base class for all AQE trading strategies.
 
-    Strategy implementations receive normalized AQE market-data events
-    and return TradingSignal objects representing trading intent.
+    A strategy is responsible only for:
 
-    Strategies do not:
-        - publish EventBus events
-        - consume Redis
-        - communicate with MT5
-        - communicate with brokers
-        - perform order execution
-        - calculate final position sizing
+        - analysing market data
+        - maintaining strategy-specific state
+        - generating TradingSignal objects
+
+    A strategy must never:
+
+        - place broker orders
+        - communicate directly with MT5
+        - communicate directly with Redis
+        - perform risk checks
+        - perform position sizing
+        - bypass the AQE execution pipeline
+
+    The strategy receives normalized domain market data through the
+    runtime boundary and returns TradingSignal objects to the runtime
+    layer.
+
+    Event envelopes such as MarketCandleEvent and MarketTickEvent remain
+    infrastructure/runtime concerns. Concrete strategies receive the
+    underlying MarketCandle or MarketTick objects.
+
+    ------------------------------------------------------------------
+    STRATEGY DEFINITION
+    ------------------------------------------------------------------
+
+    Every concrete strategy must provide a class-level
+    ``StrategyDefinition``:
+
+        class MyStrategy(BaseStrategy):
+            definition = StrategyDefinition(
+                name="my_strategy",
+                ...
+            )
+
+    ------------------------------------------------------------------
+    RUNTIME CONFIGURATION
+    ------------------------------------------------------------------
+
+    Each strategy instance receives its own StrategyConfig and context.
+
+    The instance can therefore represent one strategy operating across
+    multiple selected symbols.
+
+    ------------------------------------------------------------------
+    ACTIVATION
+    ------------------------------------------------------------------
+
+    Registration and activation are separate concerns.
+
+    Lifecycle:
+
+        CREATED -> READY -> RUNNING -> PAUSED -> STOPPED
+
+    Activation:
+
+        enabled / disabled
+
+    A disabled strategy remains present in the runtime but does not
+    process market-data events.
     """
 
-    definition: StrategyDefinition
+    definition: ClassVar[StrategyDefinition]
 
     def __init__(
         self,
+        *,
         config: StrategyConfig,
         context: StrategyContext,
     ) -> None:
-        """Create a strategy instance."""
+        """
+        Initialize a strategy instance.
 
-        if config.strategy_id != context.strategy_id:
+        Args:
+            config:
+                Runtime strategy configuration.
+
+            context:
+                Runtime context containing market data, positions,
+                state, clock, parameters, symbols, and metadata.
+        """
+
+        if not isinstance(config, StrategyConfig):
             raise StrategyConfigurationError(
-                "Strategy configuration and context IDs do not match."
+                "Strategy config must be a StrategyConfig instance."
             )
 
-        if config.strategy_name != context.strategy_name:
+        if not isinstance(context, StrategyContext):
             raise StrategyConfigurationError(
-                "Strategy configuration and context names do not match."
+                "Strategy context must be a StrategyContext instance."
             )
 
-        if config.mode != context.mode:
+        self._config = config
+        self._context = context
+
+        self._status = StrategyStatus.CREATED
+
+        # Activation is runtime state.
+        #
+        # The initial value comes from configuration, while subsequent
+        # activate()/deactivate() calls are controlled by the runtime
+        # manager.
+        self._enabled = bool(config.enabled)
+
+        self._validate_definition()
+        self._validate_configuration()
+
+        logger.debug(
+            "Strategy created: id=%s name=%s definition=%s "
+            "mode=%s enabled=%s symbols=%s timeframes=%s",
+            self.strategy_id,
+            self.strategy_name,
+            self.definition.name,
+            self.mode.value,
+            self.is_enabled,
+            self.symbols,
+            self.timeframes,
+        )
+
+    # ==================================================================
+    # CLASS-LEVEL DEFINITION
+    # ==================================================================
+
+    @classmethod
+    def get_definition(cls) -> StrategyDefinition:
+        """
+        Return the static definition of the strategy implementation.
+
+        This method is safe to call on the class without constructing
+        a strategy instance.
+        """
+
+        definition = getattr(
+            cls,
+            "definition",
+            None,
+        )
+
+        if not isinstance(
+            definition,
+            StrategyDefinition,
+        ):
             raise StrategyConfigurationError(
-                "Strategy configuration and context modes do not match."
+                f"Strategy class '{cls.__name__}' must define a "
+                "StrategyDefinition in the 'definition' class attribute."
             )
 
-        self.config = config
-        self.context = context
-        self.status = StrategyStatus.CREATED
+        return definition
+
+    # ==================================================================
+    # CORE PROPERTIES
+    # ==================================================================
+
+    @property
+    def config(self) -> StrategyConfig:
+        """Return the strategy runtime configuration."""
+
+        return self._config
+
+    @property
+    def context(self) -> StrategyContext:
+        """Return the strategy runtime context."""
+
+        return self._context
 
     @property
     def strategy_id(self) -> str:
-        """Return unique strategy instance identifier."""
+        """Return the unique runtime strategy instance identifier."""
 
         return self.config.strategy_id
 
     @property
     def strategy_name(self) -> str:
-        """Return registered strategy name."""
+        """
+        Return the runtime strategy name.
+
+        The runtime configuration normally contains the registered
+        strategy name. The implementation definition remains available
+        separately through ``definition``.
+        """
 
         return self.config.strategy_name
 
     @property
     def mode(self) -> StrategyMode:
-        """Return execution mode."""
+        """Return the strategy execution mode."""
 
         return self.config.mode
 
     @property
-    def account_id(self) -> UUID | None:
-        """Return the trading account assigned to this strategy instance."""
+    def status(self) -> StrategyStatus:
+        """Return the current strategy lifecycle state."""
 
-        return self.config.account_id
+        return self._status
 
     @property
     def symbols(self) -> tuple[str, ...]:
-        """Return symbols monitored by this strategy instance."""
+        """
+        Return all symbols monitored by this strategy instance.
+        """
 
-        return self.context.symbols
+        return tuple(self.config.symbols)
 
     @property
     def timeframes(self) -> tuple[str, ...]:
-        """Return candle timeframes monitored by this strategy instance."""
+        """Return all timeframes monitored by this strategy."""
 
-        return self.context.timeframes
+        return tuple(self.config.timeframes)
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        """Return strategy-specific parameters."""
+
+        return dict(self.config.parameters)
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        """Return strategy metadata."""
+
+        return dict(self.config.metadata)
+
+    @property
+    def is_enabled(self) -> bool:
+        """
+        Return whether this strategy instance is administratively enabled.
+        """
+
+        return self._enabled
 
     @property
     def is_running(self) -> bool:
-        """Return whether strategy is currently running."""
+        """Return whether the strategy lifecycle is RUNNING."""
 
         return self.status is StrategyStatus.RUNNING
 
     @property
     def is_active(self) -> bool:
-        """Return whether strategy can process market data."""
+        """
+        Return whether the strategy is currently allowed to process
+        market data.
 
-        return self.status in {
+        A strategy must be:
+
+            1. enabled
+            2. READY or RUNNING
+
+        PAUSED strategies are inactive even when enabled.
+        """
+
+        return self.is_enabled and self.status in {
             StrategyStatus.READY,
             StrategyStatus.RUNNING,
         }
 
-    def supports_symbol(
-        self,
-        symbol: str,
-    ) -> bool:
-        """Return whether strategy monitors a symbol."""
+    # ==================================================================
+    # ACTIVATION
+    # ==================================================================
 
-        return self.context.supports_symbol(symbol)
-
-    def supports_timeframe(
-        self,
-        timeframe: str,
-    ) -> bool:
-        """Return whether strategy monitors a timeframe."""
-
-        return self.context.supports_timeframe(timeframe)
-
-    def supports_tick(
-        self,
-        symbol: str,
-    ) -> bool:
+    def activate(self) -> None:
         """
-        Return whether strategy should receive a tick event.
+        Activate the strategy for market-data processing.
 
-        Tick processing is enabled when TICK is included in the
-        configured timeframes.
+        Activation does not start the lifecycle.
         """
 
-        return (
-            self.supports_symbol(symbol)
-            and "TICK" in self.timeframes
+        if self.status is StrategyStatus.STOPPED:
+            raise StrategyStateError(
+                f"Strategy '{self.strategy_id}' cannot be activated "
+                "because it is STOPPED."
+            )
+
+        if self.status is StrategyStatus.ERROR:
+            raise StrategyStateError(
+                f"Strategy '{self.strategy_id}' cannot be activated "
+                "because it is in ERROR state."
+            )
+
+        if self._enabled:
+            return
+
+        self._enabled = True
+
+        logger.info(
+            "Strategy activated: id=%s name=%s status=%s",
+            self.strategy_id,
+            self.strategy_name,
+            self.status.value,
         )
 
-    def supports_candle(
-        self,
-        symbol: str,
-        timeframe: str,
-    ) -> bool:
-        """Return whether strategy should receive a candle event."""
+    def deactivate(self) -> None:
+        """
+        Deactivate the strategy.
 
-        return (
-            self.supports_symbol(symbol)
-            and self.supports_timeframe(timeframe)
+        Deactivation does not stop the lifecycle or destroy strategy
+        state. It simply prevents market-data processing.
+        """
+
+        if self.status is StrategyStatus.STOPPED:
+            return
+
+        if not self._enabled:
+            return
+
+        self._enabled = False
+
+        logger.info(
+            "Strategy deactivated: id=%s name=%s status=%s",
+            self.strategy_id,
+            self.strategy_name,
+            self.status.value,
         )
+
+    # ==================================================================
+    # LIFECYCLE
+    # ==================================================================
 
     async def initialize(self) -> None:
-        """Initialize strategy before it can start."""
+        """
+        Initialize the strategy.
+
+        Initialization is performed once before the strategy is started.
+        """
 
         if self.status is not StrategyStatus.CREATED:
             raise StrategyStateError(
-                f"Cannot initialize strategy '{self.strategy_id}' "
-                f"from state '{self.status}'."
+                f"Strategy '{self.strategy_id}' cannot be initialized "
+                f"from state '{self.status.value}'."
             )
-
-        self.status = StrategyStatus.INITIALIZING
 
         try:
             await self.on_initialize()
 
-        except Exception as exc:
-            self.status = StrategyStatus.ERROR
+        except StrategyConfigurationError:
+            self._status = StrategyStatus.ERROR
+            raise
 
-            raise StrategyInitializationError(
-                f"Failed to initialize strategy '{self.strategy_id}'."
+        except Exception as exc:
+            self._status = StrategyStatus.ERROR
+
+            raise StrategyExecutionError(
+                f"Strategy '{self.strategy_id}' failed during initialization."
             ) from exc
 
-        self.status = StrategyStatus.READY
+        self._status = StrategyStatus.READY
+
+        logger.info(
+            "Strategy initialized: id=%s name=%s enabled=%s active=%s",
+            self.strategy_id,
+            self.strategy_name,
+            self.is_enabled,
+            self.is_active,
+        )
 
     async def start(self) -> None:
-        """Start processing market data."""
+        """
+        Start the strategy lifecycle.
+
+        Starting does not automatically activate a disabled strategy.
+        """
 
         if self.status is StrategyStatus.CREATED:
-            await self.initialize()
-
-        if self.status not in {
-            StrategyStatus.READY,
-            StrategyStatus.PAUSED,
-        }:
             raise StrategyStateError(
-                f"Cannot start strategy '{self.strategy_id}' "
-                f"from state '{self.status}'."
+                f"Strategy '{self.strategy_id}' must be initialized "
+                "before it can be started."
+            )
+
+        if self.status is StrategyStatus.RUNNING:
+            return
+
+        if self.status is StrategyStatus.PAUSED:
+            raise StrategyStateError(
+                f"Strategy '{self.strategy_id}' is paused. "
+                "Use resume() instead of start()."
+            )
+
+        if self.status is StrategyStatus.STOPPED:
+            raise StrategyStateError(
+                f"Strategy '{self.strategy_id}' cannot be restarted "
+                "from STOPPED state. Recreate the strategy instance."
+            )
+
+        if self.status is StrategyStatus.ERROR:
+            raise StrategyStateError(
+                f"Strategy '{self.strategy_id}' is in ERROR state "
+                "and cannot be started."
             )
 
         try:
-            if self.status is StrategyStatus.PAUSED:
-                await self.on_resume()
-            else:
-                await self.on_start()
+            await self.on_start()
 
         except Exception as exc:
-            self.status = StrategyStatus.ERROR
+            self._status = StrategyStatus.ERROR
 
             raise StrategyExecutionError(
-                f"Failed to start strategy '{self.strategy_id}'."
+                f"Strategy '{self.strategy_id}' failed during start."
             ) from exc
 
-        self.status = StrategyStatus.RUNNING
+        self._status = StrategyStatus.RUNNING
+
+        logger.info(
+            "Strategy started: id=%s name=%s enabled=%s active=%s",
+            self.strategy_id,
+            self.strategy_name,
+            self.is_enabled,
+            self.is_active,
+        )
 
     async def pause(self) -> None:
-        """Pause market-data processing."""
+        """
+        Pause strategy processing.
+
+        Market-data infrastructure remains active, but this strategy
+        becomes inactive and no longer processes market events.
+        """
 
         if self.status is not StrategyStatus.RUNNING:
             raise StrategyStateError(
-                f"Cannot pause strategy '{self.strategy_id}' "
-                f"from state '{self.status}'."
+                f"Strategy '{self.strategy_id}' can only be paused "
+                f"from RUNNING state. Current state={self.status.value}."
             )
 
         try:
             await self.on_pause()
 
         except Exception as exc:
-            self.status = StrategyStatus.ERROR
+            self._status = StrategyStatus.ERROR
 
             raise StrategyExecutionError(
-                f"Failed to pause strategy '{self.strategy_id}'."
+                f"Strategy '{self.strategy_id}' failed during pause."
             ) from exc
 
-        self.status = StrategyStatus.PAUSED
+        self._status = StrategyStatus.PAUSED
+
+        logger.info(
+            "Strategy paused: id=%s name=%s",
+            self.strategy_id,
+            self.strategy_name,
+        )
 
     async def resume(self) -> None:
-        """Resume a paused strategy."""
+        """
+        Resume strategy processing after a pause.
+
+        The strategy becomes active only when it is also enabled.
+        """
 
         if self.status is not StrategyStatus.PAUSED:
             raise StrategyStateError(
-                f"Cannot resume strategy '{self.strategy_id}' "
-                f"from state '{self.status}'."
+                f"Strategy '{self.strategy_id}' can only be resumed "
+                f"from PAUSED state. Current state={self.status.value}."
             )
 
         try:
             await self.on_resume()
 
         except Exception as exc:
-            self.status = StrategyStatus.ERROR
+            self._status = StrategyStatus.ERROR
 
             raise StrategyExecutionError(
-                f"Failed to resume strategy '{self.strategy_id}'."
+                f"Strategy '{self.strategy_id}' failed during resume."
             ) from exc
 
-        self.status = StrategyStatus.RUNNING
+        self._status = StrategyStatus.RUNNING
+
+        logger.info(
+            "Strategy resumed: id=%s name=%s enabled=%s active=%s",
+            self.strategy_id,
+            self.strategy_name,
+            self.is_enabled,
+            self.is_active,
+        )
 
     async def stop(self) -> None:
-        """Stop strategy."""
+        """
+        Stop the strategy.
 
-        if self.status in {
-            StrategyStatus.STOPPED,
-            StrategyStatus.CREATED,
-        }:
-            self.status = StrategyStatus.STOPPED
+        STOPPED is a terminal runtime state for the current instance.
+        """
+
+        if self.status is StrategyStatus.STOPPED:
             return
-
-        self.status = StrategyStatus.STOPPING
 
         try:
             await self.on_stop()
 
         except Exception as exc:
-            self.status = StrategyStatus.ERROR
+            self._status = StrategyStatus.ERROR
 
             raise StrategyExecutionError(
-                f"Failed to stop strategy '{self.strategy_id}'."
+                f"Strategy '{self.strategy_id}' failed during stop."
             ) from exc
 
-        self.status = StrategyStatus.STOPPED
+        self._status = StrategyStatus.STOPPED
+
+        logger.info(
+            "Strategy stopped: id=%s name=%s",
+            self.strategy_id,
+            self.strategy_name,
+        )
+
+    # ==================================================================
+    # MARKET-DATA CAPABILITY
+    # ==================================================================
+
+    def supports_tick(
+        self,
+        symbol: str,
+    ) -> bool:
+        """
+        Return whether this strategy should receive tick events for
+        the supplied symbol.
+        """
+
+        if not self.is_active:
+            return False
+
+        return symbol in self.symbols
+
+    def supports_candle(
+        self,
+        *,
+        symbol: str,
+        timeframe: str,
+    ) -> bool:
+        """
+        Return whether this strategy should receive candle events for
+        the supplied symbol and timeframe.
+        """
+
+        if not self.is_active:
+            return False
+
+        return symbol in self.symbols and timeframe.strip().upper() in self.timeframes
+
+    # ==================================================================
+    # MARKET-DATA HANDLERS
+    # ==================================================================
 
     async def handle_tick(
         self,
         event: MarketTickEvent,
-    ) -> StrategySignalResult:
+    ) -> TradingSignal | list[TradingSignal] | tuple[TradingSignal, ...] | None:
         """
-        Process a normalized AQE market-tick event.
+        Process a market tick event.
 
-        Returns:
-            A TradingSignal, multiple TradingSignals, or None.
+        The runtime receives a MarketTickEvent, but concrete strategies
+        receive the normalized MarketTick domain object.
         """
 
         if not self.is_active:
@@ -446,148 +853,256 @@ class BaseStrategy(ABC):
             return None
 
         try:
-            result = await self.on_tick(event)
-            return self._validate_signal_result(result)
+            return await self.on_tick(event.tick)
 
         except StrategyExecutionError:
             raise
 
         except Exception as exc:
             raise StrategyExecutionError(
-                f"Strategy '{self.strategy_id}' failed while "
-                f"processing tick for '{event.symbol}'."
+                f"Strategy '{self.strategy_id}' failed while processing tick."
             ) from exc
 
     async def handle_candle(
         self,
         event: MarketCandleEvent,
-    ) -> StrategySignalResult:
+    ) -> TradingSignal | list[TradingSignal] | tuple[TradingSignal, ...] | None:
         """
-        Process a normalized AQE market-candle event.
+        Process a market candle event.
 
-        Returns:
-            A TradingSignal, multiple TradingSignals, or None.
+        The runtime receives a MarketCandleEvent envelope. The concrete
+        strategy receives the underlying MarketCandle domain object.
+
+        This boundary is intentional:
+
+            MarketCandleEvent
+                └── candle: MarketCandle
+                              │
+                              ├── open
+                              ├── high
+                              ├── low
+                              ├── close
+                              └── ...
+
+        This prevents concrete strategies from depending on event
+        infrastructure and ensures their candle contract matches the
+        actual OHLC data they analyse.
         """
 
         if not self.is_active:
             return None
 
         if not self.supports_candle(
-            event.symbol,
-            event.timeframe,
+            symbol=event.symbol,
+            timeframe=event.timeframe,
         ):
             return None
 
         try:
-            result = await self.on_candle(event)
-            return self._validate_signal_result(result)
+            return await self.on_candle(event.candle)
 
         except StrategyExecutionError:
             raise
 
         except Exception as exc:
             raise StrategyExecutionError(
-                f"Strategy '{self.strategy_id}' failed while "
-                f"processing {event.timeframe} candle for "
-                f"'{event.symbol}'."
+                f"Strategy '{self.strategy_id}' failed while processing candle."
             ) from exc
 
-    def _validate_signal_result(
-        self,
-        result: StrategySignalResult,
-    ) -> StrategySignalResult:
-        """
-        Validate the result returned by a strategy hook.
-
-        This performs structural validation only. TradingSignal itself
-        remains responsible for validating its own fields and price
-        relationships.
-        """
-
-        if result is None:
-            return None
-
-        if isinstance(result, TradingSignal):
-            self._validate_signal(result)
-            return result
-
-        if isinstance(result, Sequence) and not isinstance(
-            result,
-            (str, bytes, bytearray),
-        ):
-            signals = list(result)
-
-            for signal in signals:
-                self._validate_signal(signal)
-
-            return signals
-
-        raise StrategyExecutionError(
-            f"Strategy '{self.strategy_id}' returned an invalid "
-            f"signal result of type '{type(result).__name__}'."
-        )
-
-    def _validate_signal(
-        self,
-        signal: TradingSignal,
-    ) -> None:
-        """Validate that a signal belongs to this strategy instance."""
-
-        if signal.strategy_id != self.strategy_id:
-            raise StrategyExecutionError(
-                f"Strategy '{self.strategy_id}' returned a signal "
-                f"belonging to strategy '{signal.strategy_id}'."
-            )
-
-        if signal.strategy_name != self.strategy_name:
-            raise StrategyExecutionError(
-                f"Strategy '{self.strategy_id}' returned a signal "
-                f"with strategy name '{signal.strategy_name}'."
-            )
-
-        if not self.supports_symbol(signal.symbol):
-            raise StrategyExecutionError(
-                f"Strategy '{self.strategy_id}' returned a signal "
-                f"for unsupported symbol '{signal.symbol}'."
-            )
-
-        if not self.supports_timeframe(
-            signal.timeframe.value,
-        ):
-            raise StrategyExecutionError(
-                f"Strategy '{self.strategy_id}' returned a signal "
-                f"for unsupported timeframe "
-                f"'{signal.timeframe.value}'."
-            )
+    # ==================================================================
+    # STRATEGY HOOKS
+    # ==================================================================
 
     async def on_initialize(self) -> None:
-        """Hook called during strategy initialization."""
+        """
+        Strategy-specific initialization hook.
+
+        Concrete strategies may override this method.
+        """
 
     async def on_start(self) -> None:
-        """Hook called when strategy starts."""
+        """
+        Strategy-specific start hook.
+
+        Concrete strategies may override this method.
+        """
 
     async def on_pause(self) -> None:
-        """Hook called when strategy pauses."""
+        """
+        Strategy-specific pause hook.
+
+        Concrete strategies may override this method.
+        """
 
     async def on_resume(self) -> None:
-        """Hook called when strategy resumes."""
+        """
+        Strategy-specific resume hook.
+
+        Concrete strategies may override this method.
+        """
 
     async def on_stop(self) -> None:
-        """Hook called when strategy stops."""
+        """
+        Strategy-specific stop hook.
+
+        Concrete strategies may override this method.
+        """
 
     async def on_tick(
         self,
-        event: MarketTickEvent,
-    ) -> TradingSignal | Sequence[TradingSignal] | None:
-        """Handle a market tick.
-
-        Subclasses may override this hook to implement tick-based logic.
+        tick: MarketTick,
+    ) -> TradingSignal | list[TradingSignal] | tuple[TradingSignal, ...] | None:
         """
+        Optional market-tick analysis hook.
+
+        Concrete strategies receive the normalized MarketTick object,
+        not the MarketTickEvent envelope.
+        """
+
         return None
 
-    @abstractmethod
     async def on_candle(
         self,
-        event: MarketCandleEvent,
-    ) -> TradingSignal | Sequence[TradingSignal] | None:
-        """Handle a market candle."""
+        candle: MarketCandle,
+    ) -> TradingSignal | list[TradingSignal] | tuple[TradingSignal, ...] | None:
+        """
+        Optional market-candle analysis hook.
+
+        Concrete strategies receive the normalized MarketCandle object,
+        not the MarketCandleEvent envelope.
+
+        Candle-based implementations can therefore safely access:
+
+            candle.open
+            candle.high
+            candle.low
+            candle.close
+            candle.volume
+            candle.symbol
+            candle.timeframe
+        """
+
+        return None
+
+    # ==================================================================
+    # VALIDATION
+    # ==================================================================
+
+    def _validate_definition(self) -> None:
+        """Validate the concrete strategy definition."""
+
+        definition = getattr(
+            type(self),
+            "definition",
+            None,
+        )
+
+        if not isinstance(
+            definition,
+            StrategyDefinition,
+        ):
+            raise StrategyConfigurationError(
+                f"Strategy class '{type(self).__name__}' must define "
+                "a class-level StrategyDefinition."
+            )
+
+    def _validate_configuration(self) -> None:
+        """
+        Validate strategy runtime configuration.
+
+        StrategyConfig performs structural validation. This layer
+        validates requirements specific to the strategy runtime.
+        """
+
+        if not self.strategy_id:
+            raise StrategyConfigurationError(
+                "Strategy instance requires a strategy_id."
+            )
+
+        if not self.strategy_name:
+            raise StrategyConfigurationError(
+                "Strategy instance requires a strategy_name."
+            )
+
+        if not self.symbols:
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' must define at least one symbol."
+            )
+
+        if not self.timeframes:
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' must define at least one timeframe."
+            )
+
+        if self.mode not in {
+            StrategyMode.LIVE,
+            StrategyMode.PAPER,
+            StrategyMode.BACKTEST,
+            StrategyMode.REPLAY,
+        }:
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' has unsupported "
+                f"execution mode: {self.mode!r}."
+            )
+
+        if (
+            self.mode
+            in {
+                StrategyMode.LIVE,
+                StrategyMode.PAPER,
+            }
+            and self.config.account_id is None
+        ):
+            raise StrategyConfigurationError(
+                f"Strategy '{self.strategy_id}' running in "
+                f"{self.mode.value} mode requires an account_id."
+            )
+
+    # ==================================================================
+    # SNAPSHOT
+    # ==================================================================
+
+    def snapshot(self) -> dict[str, Any]:
+        """
+        Return a lightweight runtime snapshot.
+
+        This snapshot is intended for management APIs, monitoring,
+        frontend state, and diagnostics.
+        """
+
+        return {
+            "strategy_id": self.strategy_id,
+            "strategy_name": self.strategy_name,
+            "definition": self.definition.snapshot(),
+            "config": self.config.snapshot(),
+            "mode": self.mode.value,
+            "status": self.status.value,
+            "enabled": self.is_enabled,
+            "active": self.is_active,
+            "symbols": list(self.symbols),
+            "timeframes": list(self.timeframes),
+            "parameters": dict(self.parameters),
+            "metadata": dict(self.metadata),
+        }
+
+    def __repr__(self) -> str:
+        """Return a useful representation for logs and debugging."""
+
+        return (
+            "BaseStrategy("
+            f"strategy_id={self.strategy_id!r}, "
+            f"strategy_name={self.strategy_name!r}, "
+            f"definition={self.definition.name!r}, "
+            f"mode={self.mode.value!r}, "
+            f"status={self.status.value!r}, "
+            f"enabled={self.is_enabled!r}, "
+            f"active={self.is_active!r}"
+            ")"
+        )
+
+
+__all__ = [
+    "BaseStrategy",
+    "StrategyConfig",
+    "StrategyDefinition",
+]

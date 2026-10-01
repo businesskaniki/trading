@@ -1,3 +1,5 @@
+"""Top-level lifecycle orchestration for the Athena Quant Engine."""
+
 from __future__ import annotations
 
 import logging
@@ -6,19 +8,32 @@ from typing import Any
 from uuid import UUID
 
 from app.core.config import settings
+from app.database.session import SessionLocal
 from app.market_data.consumer import MarketDataConsumer
-from app.market_data.live import LiveTickHub
-from app.market_data.subscription_manager import MarketDataSubscriptionManager
 from app.market_data.historical_synchronizer import (
     HistoricalDataSynchronizer,
 )
-from app.services.historical_data_service import HistoricalDataService
+from app.market_data.live import LiveTickHub
 from app.market_data.service import MarketDataService
-from app.services.mt5_bridge_service import MT5BridgeService
+from app.market_data.subscription_manager import (
+    MarketDataSubscriptionManager,
+)
 from engine.enums import EngineMode, EngineStatus
-from engine.exceptions import EngineStateError
-from execution.bootstrap import ExecutionRuntime, ExecutionRuntimeFactory
+from engine.exceptions import (
+    EnginePauseError,
+    EngineResumeError,
+    EngineShutdownError,
+    EngineStartupError,
+    EngineStateError,
+)
+from execution.bootstrap import (
+    ExecutionRuntime,
+    ExecutionRuntimeFactory,
+)
+from execution.strategy_deployer import LiveStrategyDeployer
+from strategies.bootstrap import strategy_bootstrap
 from strategies.core import StrategyMode, StrategyStatus
+from strategies.synchronization import StrategySynchronizationService
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +41,9 @@ logger = logging.getLogger(__name__)
 @dataclass(slots=True)
 class EngineContext:
     """
-    Mutable runtime state owned by AQEEngine.
+    Mutable lifecycle state owned by AQEEngine.
 
-    The context contains only engine lifecycle information. Runtime
-    services themselves remain owned by ExecutionRuntime.
+    Runtime services themselves remain owned by ExecutionRuntime.
     """
 
     status: EngineStatus = EngineStatus.STOPPED
@@ -41,28 +55,56 @@ class AQEEngine:
     """
     Top-level lifecycle coordinator for the Athena Quant Engine.
 
-    The engine owns the runtime lifecycle:
+    AQEEngine owns the lifecycle of one active account runtime.
+
+    Dependency order:
 
         START
-          |
-          v
-        Broker
-          |
-          v
-        Market Data
-          |
-          v
-        Strategies
-          |
-          v
-        Risk -> Execution
-          |
-          v
-        RUNNING
 
-    The engine does not implement broker execution, risk evaluation,
-    strategy logic, or market-data processing itself. It only starts,
-    stops, pauses, and exposes the state of those components.
+            Strategy discovery
+                ↓
+            Runtime composition
+                ↓
+            Strategy catalog synchronization
+                ↓
+            StrategyRun synchronization
+                ↓
+            Broker connection
+                ↓
+            Market-data infrastructure
+                ↓
+            Strategy runtime infrastructure
+                ↓
+            Risk → Execution pipeline
+                ↓
+            Persisted strategy deployment
+                ↓
+            RUNNING
+
+        STOP
+
+            Risk → Execution pipeline
+                ↓
+            Strategies
+                ↓
+            Market data
+                ↓
+            Broker
+                ↓
+            STOPPED
+
+    AQEEngine does NOT implement:
+
+        - broker execution
+        - risk evaluation
+        - strategy logic
+        - market-data processing
+        - order persistence
+        - MT5 protocol handling
+
+    It coordinates lifecycle and component ownership only.
+
+    Constructing AQEEngine never starts trading infrastructure.
     """
 
     def __init__(
@@ -71,17 +113,22 @@ class AQEEngine:
         runtime_factory: ExecutionRuntimeFactory | None = None,
         mode: EngineMode | None = None,
     ) -> None:
+        """Initialize the AQE engine lifecycle coordinator."""
+
         self.context = EngineContext(
             mode=mode or self._resolve_mode(),
         )
 
-        self.runtime_factory = runtime_factory or ExecutionRuntimeFactory()
+        self.runtime_factory = (
+            runtime_factory or ExecutionRuntimeFactory()
+        )
 
         self._runtime: ExecutionRuntime | None = None
-
         self._broker_connected = False
 
         self._paused_strategy_ids: set[str] = set()
+
+        self._strategy_deployer = LiveStrategyDeployer()
 
         logger.info(
             "AQE engine initialized. mode=%s status=%s",
@@ -93,27 +140,52 @@ class AQEEngine:
     # PUBLIC LIFECYCLE
     # ==================================================================
 
-    async def start(self, account_id: UUID) -> None:
+    async def start(
+        self,
+        account_id: UUID,
+    ) -> None:
         """
-        Start the complete AQE trading runtime.
+        Start the complete AQE trading runtime for one account.
 
         Startup order:
 
-            1. Resolve runtime
-            2. Connect broker
-            3. Start market-data consumer
-            4. Start live tick hub
-            5. Reconcile market-data subscriptions
-            6. Start historical synchronization
-            7. Start strategies
-            8. Start risk -> execution pipeline
-            9. Mark engine RUNNING
+            1. Discover installed strategies
+            2. Compose account runtime
+            3. Synchronize strategy definitions
+            4. Synchronize account StrategyRuns
+            5. Connect broker
+            6. Start market-data infrastructure
+            7. Start strategy runtime infrastructure
+            8. Start Risk → Execution pipeline
+            9. Deploy persisted LIVE/PAPER strategies
+            10. Mark engine RUNNING
+
+        Strategy discovery and persistence synchronization intentionally
+        happen inside AQEEngine.start() rather than FastAPI application
+        startup.
+
+        This means starting the AQE engine is the explicit boundary at
+        which an account's strategy catalog and StrategyRuns are
+        reconciled.
+
+        The Risk → Execution pipeline is started before persisted
+        strategies are deployed. This prevents a strategy signal from
+        being published before the pipeline has subscribed to
+        StrategySignalEvent.
+
+        FastAPI application startup must not call this method unless
+        automatic trading startup is intentionally desired.
         """
 
         if self.context.status is not EngineStatus.STOPPED:
             raise EngineStateError(
                 "AQE engine can only be started from STOPPED state. "
                 f"Current state={self.context.status.value}."
+            )
+
+        if not isinstance(account_id, UUID):
+            raise EngineStateError(
+                "AQE engine start requires a valid account_id UUID."
             )
 
         self.context.status = EngineStatus.STARTING
@@ -128,44 +200,112 @@ class AQEEngine:
 
         try:
             # ----------------------------------------------------------
-            # Resolve runtime
+            # 1. Strategy discovery
+            # ----------------------------------------------------------
+            #
+            # StrategyBootstrap owns StrategyDiscovery and populates
+            # the global StrategyRegistry.
+            #
+            # Discovery does not start strategies, consume market data,
+            # connect brokers, or execute orders.
             # ----------------------------------------------------------
 
-            self._runtime = await self.runtime_factory.create(account_id)
+            await self._discover_strategies()
 
             # ----------------------------------------------------------
-            # Broker
+            # 2. Compose account runtime
+            # ----------------------------------------------------------
+            #
+            # StrategyRun synchronization requires the runtime account
+            # owner (user_id), so runtime composition must happen before
+            # account-specific strategy synchronization.
+            # ----------------------------------------------------------
+
+            self._runtime = await self.runtime_factory.create(
+                account_id,
+            )
+
+            # ----------------------------------------------------------
+            # 3. Strategy catalog + account StrategyRuns
+            # ----------------------------------------------------------
+            #
+            # Both operations are performed against the same database
+            # transaction.
+            #
+            # Strategy definitions are the persistent representation of
+            # discovered Python strategy implementations.
+            #
+            # StrategyRuns are the account-specific persisted strategy
+            # configurations.
+            # ----------------------------------------------------------
+
+            await self._synchronize_strategy_catalog()
+
+            await self._synchronize_account_strategy_runs()
+
+            # ----------------------------------------------------------
+            # 4. Broker
             # ----------------------------------------------------------
 
             await self._start_broker()
 
             # ----------------------------------------------------------
-            # Market data
+            # 5. Market data
             # ----------------------------------------------------------
 
             await self._start_market_data()
 
             # ----------------------------------------------------------
-            # Strategies
+            # 6. Strategy runtime infrastructure
             # ----------------------------------------------------------
 
             await self._start_strategy_runtime()
 
             # ----------------------------------------------------------
-            # Risk -> Execution pipeline
+            # 7. Risk → Execution pipeline
+            #
+            # Start this BEFORE persisted strategies are deployed.
+            # Strategy signals must never be emitted while the pipeline
+            # is unsubscribed.
             # ----------------------------------------------------------
 
             await self._start_signal_pipeline()
 
+            # ----------------------------------------------------------
+            # 8. Deploy persisted strategies
+            #
+            # StrategyManager.create() starts the individual strategy
+            # instances after the manager is running.
+            #
+            # At this point the Risk → Execution pipeline is already
+            # listening.
+            # ----------------------------------------------------------
+
+            await self._deploy_strategies()
+
+            # ----------------------------------------------------------
+            # 9. Runtime is operational
+            # ----------------------------------------------------------
+
             self.context.status = EngineStatus.RUNNING
 
             logger.info(
-                "AQE engine started successfully. account_id=%s mode=%s",
+                "AQE engine started successfully. "
+                "account_id=%s mode=%s",
                 account_id,
                 self.context.mode.value,
             )
 
-        except Exception:
+        except EngineStartupError:
+            await self._cleanup_failed_start()
+
+            self.context.status = EngineStatus.STOPPED
+            self.context.account_id = None
+            self._paused_strategy_ids.clear()
+
+            raise
+
+        except Exception as exc:
             logger.exception(
                 "AQE engine failed to start. account_id=%s",
                 account_id,
@@ -177,19 +317,27 @@ class AQEEngine:
             self.context.account_id = None
             self._paused_strategy_ids.clear()
 
-            raise
+            raise EngineStartupError(
+                f"Failed to start AQE engine for account "
+                f"{account_id}: {exc}"
+            ) from exc
 
     async def stop(self) -> None:
         """
         Stop the complete AQE runtime.
 
-        Shutdown is performed in reverse dependency order:
+        Shutdown occurs in reverse dependency order:
 
-            Risk -> Execution
+            Risk → Execution
+                ↓
             Strategies
-            Historical Data
-            Live Tick Hub
-            Market Data Consumer
+                ↓
+            Historical synchronization
+                ↓
+            Live tick hub
+                ↓
+            Market-data consumer
+                ↓
             Broker
         """
 
@@ -206,32 +354,61 @@ class AQEEngine:
             self.context.account_id,
         )
 
+        shutdown_errors: list[BaseException] = []
+
         try:
             await self._stop_signal_pipeline()
+
+        except Exception as exc:
+            shutdown_errors.append(exc)
+
+        try:
             await self._stop_strategy_runtime()
+
+        except Exception as exc:
+            shutdown_errors.append(exc)
+
+        try:
             await self._stop_market_data()
+
+        except Exception as exc:
+            shutdown_errors.append(exc)
+
+        try:
             await self._stop_broker()
 
-        finally:
-            self._runtime = None
-            self._broker_connected = False
-            self._paused_strategy_ids.clear()
+        except Exception as exc:
+            shutdown_errors.append(exc)
 
-            self.context.status = EngineStatus.STOPPED
-            self.context.account_id = None
+        self._runtime = None
+        self._broker_connected = False
+        self._paused_strategy_ids.clear()
 
-            logger.info("AQE engine stopped.")
+        self.context.status = EngineStatus.STOPPED
+        self.context.account_id = None
+
+        if shutdown_errors:
+            logger.error(
+                "AQE engine stopped with %d shutdown error(s).",
+                len(shutdown_errors),
+            )
+
+            raise EngineShutdownError(
+                "AQE engine stopped, but one or more components "
+                "failed during shutdown."
+            ) from shutdown_errors[0]
+
+        logger.info("AQE engine stopped.")
 
     async def pause(self) -> None:
         """
-        Pause all running LIVE/PAPER strategies while keeping the
-        AQE runtime itself active.
+        Pause all currently running LIVE/PAPER strategies.
 
-        Broker, market-data services, historical synchronization,
-        and the Risk -> Execution pipeline remain running.
+        Broker connectivity and market-data infrastructure remain
+        active.
 
-        Only strategies that were actively RUNNING when the engine
-        was paused are recorded for subsequent resume.
+        Only strategies that were RUNNING when pause() was called are
+        remembered and subsequently resumed by resume().
         """
 
         if self.context.status is not EngineStatus.RUNNING:
@@ -271,17 +448,25 @@ class AQEEngine:
                     str(instance.strategy_id),
                 )
 
-        except Exception:
+        except Exception as exc:
             logger.exception(
                 "Failed to pause AQE strategy runtime. "
                 "Restoring strategies already paused by engine."
             )
 
-            await self._resume_paused_strategies()
+            try:
+                await self._resume_paused_strategies()
+
+            except Exception:
+                logger.exception(
+                    "Failed to restore strategies after pause failure."
+                )
 
             self._paused_strategy_ids.clear()
 
-            raise
+            raise EnginePauseError(
+                f"Failed to pause AQE engine: {exc}"
+            ) from exc
 
         self.context.status = EngineStatus.PAUSED
 
@@ -292,10 +477,10 @@ class AQEEngine:
 
     async def resume(self) -> None:
         """
-        Resume only the strategies that were paused by AQEEngine.pause().
+        Resume only the strategies that AQEEngine paused.
 
-        Strategies that were already paused before the engine pause
-        remain paused.
+        Strategies that were already paused before pause() remain
+        paused.
         """
 
         if self.context.status is not EngineStatus.PAUSED:
@@ -315,21 +500,267 @@ class AQEEngine:
         try:
             await self._resume_paused_strategies()
 
-        except Exception:
-            logger.exception("Failed to resume one or more AQE strategies.")
-            raise
+        except Exception as exc:
+            logger.exception(
+                "Failed to resume one or more AQE strategies."
+            )
+
+            raise EngineResumeError(
+                f"Failed to resume AQE engine: {exc}"
+            ) from exc
 
         self._paused_strategy_ids.clear()
-
         self.context.status = EngineStatus.RUNNING
 
         logger.info("AQE engine resumed.")
+
+    # ==================================================================
+    # STRATEGY DISCOVERY / SYNCHRONIZATION
+    # ==================================================================
+
+    async def _discover_strategies(self) -> None:
+        """
+        Discover installed strategy implementations.
+
+        StrategyBootstrap owns StrategyDiscovery and the global
+        StrategyRegistry.
+
+        Discovery is intentionally separate from persistence
+        synchronization:
+
+            StrategyBootstrap
+                ↓
+            StrategyRegistry
+                ↓
+            StrategySynchronizationService
+                ↓
+            strategy_definitions
+                ↓
+            strategy_runs
+        """
+
+        logger.info(
+            "Discovering AQE strategy implementations."
+        )
+
+        try:
+            result = await strategy_bootstrap.start()
+
+        except Exception as exc:
+            logger.exception(
+                "Failed to discover AQE strategy implementations."
+            )
+
+            raise EngineStartupError(
+                "Failed to discover AQE strategies: "
+                f"{exc}"
+            ) from exc
+
+        imported_count = len(
+            getattr(
+                result,
+                "imported_modules",
+                (),
+            )
+        )
+
+        registered_count = len(
+            getattr(
+                result,
+                "registered_strategies",
+                (),
+            )
+        )
+
+        logger.info(
+            "AQE strategy discovery completed. "
+            "imported_modules=%d registered_strategies=%d",
+            imported_count,
+            registered_count,
+        )
+
+    async def _synchronize_strategy_catalog(self) -> None:
+        """
+        Synchronize discovered strategies into the persistent catalog.
+
+        This operation is intentionally part of AQEEngine.start().
+
+        The Python StrategyRegistry is the source of truth for installed
+        strategy implementations.
+
+        StrategySynchronizationService reconciles that registry with
+        the persistent strategy_definitions table.
+
+        This method does not:
+
+            - connect the broker
+            - connect MT5
+            - start market-data polling
+            - subscribe to market data
+            - create strategy instances
+            - start the Risk → Execution pipeline
+            - deploy StrategyRun records
+
+        Account-specific StrategyRuns are synchronized separately by
+        _synchronize_account_strategy_runs().
+        """
+
+        logger.info(
+            "Synchronizing AQE strategy definition catalog."
+        )
+
+        try:
+            async with SessionLocal() as db:
+                async with db.begin():
+                    service = StrategySynchronizationService(
+                        db=db,
+                    )
+
+                    definitions = (
+                        await service.synchronize_definitions(
+                            commit=False,
+                        )
+                    )
+
+            available_definitions = [
+                definition
+                for definition in definitions
+                if definition.available
+            ]
+
+            logger.info(
+                "AQE strategy definition catalog synchronized: "
+                "definitions=%d available=%d unavailable=%d",
+                len(definitions),
+                len(available_definitions),
+                len(definitions) - len(available_definitions),
+            )
+
+            logger.debug(
+                "Available AQE strategy definitions: %s",
+                tuple(
+                    definition.name
+                    for definition in available_definitions
+                ),
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Failed to synchronize AQE strategy definition catalog."
+            )
+
+            raise EngineStartupError(
+                "Failed to synchronize the AQE strategy definition "
+                f"catalog: {exc}"
+            ) from exc
+
+    async def _synchronize_account_strategy_runs(self) -> None:
+        """
+        Provision missing StrategyRun records for the active account.
+
+        StrategyRun synchronization happens when an AQE account runtime
+        starts, not during FastAPI application startup.
+
+        The operation is idempotent:
+
+            - existing StrategyRuns are preserved
+            - missing StrategyRuns are created
+            - strategy configuration is derived from the registered
+              StrategyDefinition
+            - disabled runs remain disabled
+            - no strategy instance is started here
+
+        Actual strategy instances are deployed later by
+        LiveStrategyDeployer after the Risk → Execution pipeline is
+        running.
+        """
+
+        runtime = self._require_runtime()
+
+        account_id = runtime.account.account_id
+        user_id = runtime.account.user_id
+
+        logger.info(
+            "Synchronizing account strategy runs. "
+            "account_id=%s user_id=%s",
+            account_id,
+            user_id,
+        )
+
+        try:
+            async with SessionLocal() as db:
+                async with db.begin():
+                    service = StrategySynchronizationService(
+                        db=db,
+                    )
+
+                    strategy_runs = (
+                        await service.synchronize_account(
+                            account_id=account_id,
+                            user_id=user_id,
+                            commit=False,
+                        )
+                    )
+
+            enabled_count = sum(
+                1
+                for run in strategy_runs
+                if run.enabled
+            )
+
+            logger.info(
+                "Account strategy runs synchronized. "
+                "account_id=%s user_id=%s runs=%d enabled=%d",
+                account_id,
+                user_id,
+                len(strategy_runs),
+                enabled_count,
+            )
+
+            logger.debug(
+                "Account strategy runs: %s",
+                tuple(
+                    (
+                        str(run.id),
+                        run.strategy_name,
+                        run.status.value
+                        if hasattr(run.status, "value")
+                        else str(run.status),
+                        run.enabled,
+                    )
+                    for run in strategy_runs
+                ),
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Failed to synchronize account strategy runs. "
+                "account_id=%s user_id=%s",
+                account_id,
+                user_id,
+            )
+
+            raise EngineStartupError(
+                "Failed to synchronize strategy runs for account "
+                f"{account_id}: {exc}"
+            ) from exc
 
     # ==================================================================
     # STARTUP
     # ==================================================================
 
     async def _start_broker(self) -> None:
+        """
+        Connect the account-specific broker.
+
+        RuntimeAccount.broker_credentials is the only credential source.
+
+        Credentials originate from the AQE TradingAccount and are
+        decrypted by RuntimeAccountResolver.
+
+        They are never obtained from the MT5 bridge environment.
+        """
+
         runtime = self._require_runtime()
 
         if not self._requires_broker:
@@ -345,9 +776,16 @@ class AQEEngine:
             runtime.account.account_id,
         )
 
-        await runtime.broker_manager.connect(
-            runtime.account.broker_credentials,
-        )
+        try:
+            await runtime.broker_manager.connect(
+                runtime.account.broker_credentials,
+            )
+
+        except Exception as exc:
+            raise EngineStartupError(
+                f"Failed to connect broker for account "
+                f"{runtime.account.account_id}: {exc}"
+            ) from exc
 
         self._broker_connected = True
 
@@ -358,66 +796,180 @@ class AQEEngine:
         )
 
     async def _start_market_data(self) -> None:
+        """Start all market-data runtime components."""
+
         runtime = self._require_runtime()
 
-        consumer = runtime.market_data_consumer
+        try:
+            consumer = runtime.market_data_consumer
 
-        if consumer is not None:
-            await consumer.start()
+            if consumer is not None:
+                await consumer.start()
 
-        hub = runtime.live_tick_hub
+            hub = runtime.live_tick_hub
 
-        if hub is not None:
-            await hub.start()
+            if hub is not None:
+                await hub.start()
 
-        subscription_manager = runtime.market_data_subscription_manager
+            subscription_manager = (
+                runtime.market_data_subscription_manager
+            )
 
-        if subscription_manager is not None:
-            await subscription_manager.reconcile()
+            if subscription_manager is not None:
+                await subscription_manager.reconcile()
 
-        historical_synchronizer = runtime.historical_data_synchronizer
+            historical_synchronizer = (
+                runtime.historical_data_synchronizer
+            )
 
-        if historical_synchronizer is not None:
-            await historical_synchronizer.start()
+            if historical_synchronizer is not None:
+                await historical_synchronizer.start()
+
+        except Exception as exc:
+            raise EngineStartupError(
+                f"Failed to start AQE market-data runtime: {exc}"
+            ) from exc
 
         logger.info("AQE market-data runtime started.")
 
     async def _start_strategy_runtime(self) -> None:
-        runtime = self._require_runtime()
+        """
+        Start strategy runtime infrastructure.
 
+        Strategy implementations have already been discovered and
+        synchronized by the engine startup sequence.
+
+        StrategyManager.start() is therefore responsible only for
+        starting the runtime dispatcher/infrastructure.
+
+        Individual LIVE/PAPER strategy instances are deployed later by
+        LiveStrategyDeployer.
+        """
+
+        runtime = self._require_runtime()
         strategy_manager = runtime.strategy_manager
 
         if strategy_manager is None:
             logger.warning(
-                "No strategy manager configured. " "AQE will run without strategies."
+                "No strategy manager configured. "
+                "AQE will run without strategies."
             )
             return
 
-        await strategy_manager.start()
+        try:
+            await strategy_manager.start()
+
+        except Exception as exc:
+            raise EngineStartupError(
+                f"Failed to start AQE strategy runtime: {exc}"
+            ) from exc
 
         logger.info("AQE strategy runtime started.")
 
     async def _start_signal_pipeline(self) -> None:
-        runtime = self._require_runtime()
+        """
+        Start the Strategy → Risk → Execution event pipeline.
 
+        This must happen before persisted strategies are deployed so
+        that StrategySignalEvent cannot be emitted before the pipeline
+        is subscribed.
+        """
+
+        runtime = self._require_runtime()
         pipeline = runtime.live_pipeline
 
         if pipeline is None:
             logger.warning(
                 "No live signal pipeline configured. "
-                "Risk -> Execution will not process strategy signals."
+                "Risk → Execution will not process strategy signals."
             )
             return
 
-        await pipeline.start()
+        try:
+            await pipeline.start()
 
-        logger.info("AQE risk -> execution pipeline started.")
+        except Exception as exc:
+            raise EngineStartupError(
+                "Failed to start AQE Risk → Execution pipeline: "
+                f"{exc}"
+            ) from exc
+
+        logger.info(
+            "AQE Risk → Execution pipeline started."
+        )
+
+    async def _deploy_strategies(self) -> None:
+        """
+        Deploy persisted LIVE/PAPER strategies for the active account.
+
+        StrategyRun persistence is intentionally accessed through
+        LiveStrategyDeployer rather than directly from AQEEngine.
+
+        Only StrategyRun records belonging to the runtime account owner
+        are considered by the deployer.
+
+        The deployment is performed after the execution pipeline is
+        listening, so deployed strategies can safely emit signals.
+        """
+
+        runtime = self._require_runtime()
+        strategy_manager = runtime.strategy_manager
+
+        if strategy_manager is None:
+            logger.info(
+                "Strategy deployment skipped because no strategy "
+                "manager is configured."
+            )
+            return
+
+        account_id = runtime.account.account_id
+        user_id = runtime.account.user_id
+
+        try:
+            result = await self._strategy_deployer.deploy_for_account(
+                account_id=account_id,
+                user_id=user_id,
+                strategy_manager=strategy_manager,
+            )
+
+        except Exception as exc:
+            raise EngineStartupError(
+                f"Failed to deploy persisted strategies for account "
+                f"{account_id}: {exc}"
+            ) from exc
+
+        if result.failed_count:
+            logger.warning(
+                "AQE strategy deployment completed with failures. "
+                "account_id=%s user_id=%s deployed=%s skipped=%s "
+                "failed=%s failed_strategy_ids=%s",
+                account_id,
+                user_id,
+                result.deployed_count,
+                result.skipped_count,
+                result.failed_count,
+                list(result.failed_strategy_ids),
+            )
+
+        else:
+            logger.info(
+                "AQE strategy deployment completed. "
+                "account_id=%s user_id=%s deployed=%s skipped=%s "
+                "failed=%s",
+                account_id,
+                user_id,
+                result.deployed_count,
+                result.skipped_count,
+                result.failed_count,
+            )
 
     # ==================================================================
     # SHUTDOWN
     # ==================================================================
 
     async def _stop_signal_pipeline(self) -> None:
+        """Stop the Strategy → Risk → Execution pipeline."""
+
         runtime = self._runtime
 
         if runtime is None:
@@ -431,10 +983,21 @@ class AQEEngine:
         try:
             await pipeline.stop()
 
-        except Exception:
-            logger.exception("Failed to stop AQE risk -> execution pipeline.")
+        except Exception as exc:
+            logger.exception(
+                "Failed to stop AQE Risk → Execution pipeline."
+            )
+
+            raise EngineShutdownError(
+                "Failed to stop AQE Risk → Execution pipeline: "
+                f"{exc}"
+            ) from exc
 
     async def _stop_strategy_runtime(self) -> None:
+        """
+        Stop all strategy instances and strategy runtime infrastructure.
+        """
+
         runtime = self._runtime
 
         if runtime is None:
@@ -448,23 +1011,39 @@ class AQEEngine:
         try:
             await strategy_manager.stop()
 
-        except Exception:
-            logger.exception("Failed to stop AQE strategy runtime.")
+        except Exception as exc:
+            logger.exception(
+                "Failed to stop AQE strategy runtime."
+            )
+
+            raise EngineShutdownError(
+                f"Failed to stop AQE strategy runtime: {exc}"
+            ) from exc
 
     async def _stop_market_data(self) -> None:
+        """Stop market-data components in reverse dependency order."""
+
         runtime = self._runtime
 
         if runtime is None:
             return
 
-        historical_synchronizer = runtime.historical_data_synchronizer
+        shutdown_errors: list[BaseException] = []
+
+        historical_synchronizer = (
+            runtime.historical_data_synchronizer
+        )
 
         if historical_synchronizer is not None:
             try:
                 await historical_synchronizer.stop()
 
-            except Exception:
-                logger.exception("Failed to stop historical-data synchronizer.")
+            except Exception as exc:
+                logger.exception(
+                    "Failed to stop historical-data synchronizer."
+                )
+
+                shutdown_errors.append(exc)
 
         hub = runtime.live_tick_hub
 
@@ -472,8 +1051,12 @@ class AQEEngine:
             try:
                 await hub.stop()
 
-            except Exception:
-                logger.exception("Failed to stop live tick hub.")
+            except Exception as exc:
+                logger.exception(
+                    "Failed to stop live tick hub."
+                )
+
+                shutdown_errors.append(exc)
 
         consumer = runtime.market_data_consumer
 
@@ -481,10 +1064,22 @@ class AQEEngine:
             try:
                 await consumer.stop()
 
-            except Exception:
-                logger.exception("Failed to stop market-data consumer.")
+            except Exception as exc:
+                logger.exception(
+                    "Failed to stop market-data consumer."
+                )
+
+                shutdown_errors.append(exc)
+
+        if shutdown_errors:
+            raise EngineShutdownError(
+                "One or more market-data components failed during "
+                "shutdown."
+            ) from shutdown_errors[0]
 
     async def _stop_broker(self) -> None:
+        """Disconnect the account-specific broker."""
+
         runtime = self._runtime
 
         if runtime is None:
@@ -496,39 +1091,60 @@ class AQEEngine:
         try:
             await runtime.broker_manager.disconnect()
 
-        except Exception:
-            logger.exception("Failed to disconnect broker.")
+        except Exception as exc:
+            logger.exception(
+                "Failed to disconnect broker."
+            )
+
+            raise EngineShutdownError(
+                f"Failed to disconnect broker: {exc}"
+            ) from exc
 
         finally:
             self._broker_connected = False
 
     async def _cleanup_failed_start(self) -> None:
         """
-        Best-effort cleanup after startup failure.
+        Best-effort cleanup after a failed startup.
 
-        This deliberately mirrors shutdown order but does not change the
-        externally visible engine state until the caller resets it.
+        Components are stopped in reverse dependency order.
+
+        Cleanup errors are logged but do not replace the original
+        startup exception.
         """
 
         try:
             await self._stop_signal_pipeline()
+
         except Exception:
-            logger.exception("Startup cleanup failed while stopping signal pipeline.")
+            logger.exception(
+                "Startup cleanup failed while stopping "
+                "signal pipeline."
+            )
 
         try:
             await self._stop_strategy_runtime()
+
         except Exception:
-            logger.exception("Startup cleanup failed while stopping strategies.")
+            logger.exception(
+                "Startup cleanup failed while stopping strategies."
+            )
 
         try:
             await self._stop_market_data()
+
         except Exception:
-            logger.exception("Startup cleanup failed while stopping market data.")
+            logger.exception(
+                "Startup cleanup failed while stopping market data."
+            )
 
         try:
             await self._stop_broker()
+
         except Exception:
-            logger.exception("Startup cleanup failed while stopping broker.")
+            logger.exception(
+                "Startup cleanup failed while stopping broker."
+            )
 
         self._runtime = None
         self._broker_connected = False
@@ -540,9 +1156,9 @@ class AQEEngine:
 
     def snapshot(self) -> dict[str, Any]:
         """
-        Return the complete current AQE runtime state.
+        Return the current AQE runtime state.
 
-        Every component is queried using its actual lifecycle contract.
+        Broker credentials and passwords are intentionally excluded.
         """
 
         runtime = self._runtime
@@ -559,6 +1175,30 @@ class AQEEngine:
                 "server": account.server,
             }
 
+        strategy_manager = self.strategy_manager
+
+        strategy_snapshot: dict[str, Any] = {
+            "configured": strategy_manager is not None,
+            "running": self._strategy_manager_running(),
+            "paused_strategy_ids": (
+                self._paused_strategy_ids_snapshot()
+            ),
+        }
+
+        if strategy_manager is not None:
+            strategy_snapshot.update(
+                {
+                    "instance_count": (
+                        strategy_manager.instance_count
+                    ),
+                    "active_instance_count": (
+                        strategy_manager.active_instance_count
+                    ),
+                    "instances": strategy_manager.snapshots(),
+                    "routing": strategy_manager.routing_snapshot(),
+                }
+            )
+
         return {
             "status": self.context.status.value,
             "mode": self.context.mode.value,
@@ -568,15 +1208,17 @@ class AQEEngine:
                 "connected": self._broker_connected,
             },
             "market_data": {
-                "consumer_running": self._market_data_consumer_running(),
-                "live_tick_hub_running": self._live_tick_hub_running(),
-                "historical_sync_running": self._historical_sync_running(),
+                "consumer_running": (
+                    self._market_data_consumer_running()
+                ),
+                "live_tick_hub_running": (
+                    self._live_tick_hub_running()
+                ),
+                "historical_sync_running": (
+                    self._historical_sync_running()
+                ),
             },
-            "strategies": {
-                "configured": self.strategy_manager is not None,
-                "running": self._strategy_manager_running(),
-                "paused_strategy_ids": self._paused_strategy_ids_snapshot(),
-            },
+            "strategies": strategy_snapshot,
             "pipeline": {
                 "configured": self.live_pipeline is not None,
                 "running": self._live_pipeline_running(),
@@ -592,71 +1234,135 @@ class AQEEngine:
 
     @property
     def runtime(self) -> ExecutionRuntime | None:
+        """Return the current execution runtime."""
+
         return self._runtime
 
     @property
     def broker_manager(self):
+        """Return the runtime broker manager."""
+
         runtime = self._runtime
-        return runtime.broker_manager if runtime is not None else None
+
+        return (
+            runtime.broker_manager
+            if runtime is not None
+            else None
+        )
 
     @property
-    def market_data_consumer(self) -> MarketDataConsumer | None:
+    def market_data_consumer(
+        self,
+    ) -> MarketDataConsumer | None:
+        """Return the runtime market-data consumer."""
+
         runtime = self._runtime
-        return runtime.market_data_consumer if runtime is not None else None
+
+        return (
+            runtime.market_data_consumer
+            if runtime is not None
+            else None
+        )
 
     @property
-    def live_tick_hub(self) -> LiveTickHub | None:
+    def live_tick_hub(
+        self,
+    ) -> LiveTickHub | None:
+        """Return the runtime live tick hub."""
+
         runtime = self._runtime
-        return runtime.live_tick_hub if runtime is not None else None
+
+        return (
+            runtime.live_tick_hub
+            if runtime is not None
+            else None
+        )
 
     @property
     def market_data_subscription_manager(
         self,
     ) -> MarketDataSubscriptionManager | None:
+        """Return the runtime market-data subscription manager."""
+
         runtime = self._runtime
-        return runtime.market_data_subscription_manager if runtime is not None else None
+
+        return (
+            runtime.market_data_subscription_manager
+            if runtime is not None
+            else None
+        )
 
     @property
     def historical_synchronizer(
         self,
     ) -> HistoricalDataSynchronizer | None:
-        runtime = self._runtime
-        return runtime.historical_data_synchronizer if runtime is not None else None
+        """Return the runtime historical synchronizer."""
 
-    @property
-    def historical_data_service(
-        self,
-    ) -> HistoricalDataService | None:
         runtime = self._runtime
-        return runtime.historical_data_service if runtime is not None else None
+
+        return (
+            runtime.historical_data_synchronizer
+            if runtime is not None
+            else None
+        )
 
     @property
     def market_data_service(
         self,
     ) -> MarketDataService | None:
+        """Return the runtime market-data service."""
+
         runtime = self._runtime
-        return runtime.market_data_service if runtime is not None else None
+
+        return (
+            runtime.market_data_service
+            if runtime is not None
+            else None
+        )
 
     @property
     def strategy_manager(self):
+        """Return the runtime strategy manager."""
+
         runtime = self._runtime
-        return runtime.strategy_manager if runtime is not None else None
+
+        return (
+            runtime.strategy_manager
+            if runtime is not None
+            else None
+        )
 
     @property
     def live_pipeline(self):
+        """Return the live signal pipeline."""
+
         runtime = self._runtime
-        return runtime.live_pipeline if runtime is not None else None
+
+        return (
+            runtime.live_pipeline
+            if runtime is not None
+            else None
+        )
 
     @property
     def execution_engine(self):
+        """Return the execution engine."""
+
         runtime = self._runtime
-        return runtime.execution_engine if runtime is not None else None
+
+        return (
+            runtime.execution_engine
+            if runtime is not None
+            else None
+        )
 
     # ==================================================================
     # COMPONENT STATE
     # ==================================================================
 
     def _market_data_consumer_running(self) -> bool:
+        """Return whether the market-data consumer reports running."""
+
         consumer = self.market_data_consumer
 
         if consumer is None:
@@ -664,44 +1370,75 @@ class AQEEngine:
 
         try:
             status = consumer.status()
+
         except Exception:
-            logger.exception("Failed to read market-data consumer status.")
+            logger.exception(
+                "Failed to read market-data consumer status."
+            )
+
             return False
 
-        return bool(status.get("running", False))
+        return bool(
+            status.get(
+                "running",
+                False,
+            )
+        )
 
     def _live_tick_hub_running(self) -> bool:
+        """Return whether the live tick hub is started."""
+
         hub = self.live_tick_hub
 
         if hub is None:
             return False
 
-        # LiveTickHub intentionally exposes its lifecycle internally
-        # through _started and currently has no public status property.
-        return bool(getattr(hub, "_started", False))
+        return bool(
+            getattr(
+                hub,
+                "_started",
+                False,
+            )
+        )
 
     def _historical_sync_running(self) -> bool:
+        """Return whether historical synchronization is running."""
+
         synchronizer = self.historical_synchronizer
 
         if synchronizer is None:
             return False
 
-        # HistoricalDataSynchronizer currently exposes _running as its
-        # lifecycle flag and has no public status property.
-        return bool(getattr(synchronizer, "_running", False))
+        return bool(
+            getattr(
+                synchronizer,
+                "_running",
+                False,
+            )
+        )
 
     def _strategy_manager_running(self) -> bool:
+        """Return whether the strategy manager is running."""
+
         strategy_manager = self.strategy_manager
 
         if strategy_manager is None:
             return False
 
-        running = getattr(strategy_manager, "running", None)
+        running = getattr(
+            strategy_manager,
+            "running",
+            None,
+        )
 
         if running is not None:
             return bool(running)
 
-        is_running = getattr(strategy_manager, "is_running", None)
+        is_running = getattr(
+            strategy_manager,
+            "is_running",
+            None,
+        )
 
         if is_running is not None:
             return bool(is_running)
@@ -709,25 +1446,36 @@ class AQEEngine:
         return False
 
     def _live_pipeline_running(self) -> bool:
+        """Return whether the live signal pipeline is started."""
+
         pipeline = self.live_pipeline
 
         if pipeline is None:
             return False
 
-        # LivePipeline's actual public lifecycle property is `started`.
-        started = getattr(pipeline, "started", None)
+        started = getattr(
+            pipeline,
+            "started",
+            None,
+        )
 
         if started is not None:
             return bool(started)
 
-        # Compatibility with any future implementation exposing one of
-        # the more conventional lifecycle names.
-        running = getattr(pipeline, "running", None)
+        running = getattr(
+            pipeline,
+            "running",
+            None,
+        )
 
         if running is not None:
             return bool(running)
 
-        is_running = getattr(pipeline, "is_running", None)
+        is_running = getattr(
+            pipeline,
+            "is_running",
+            None,
+        )
 
         if is_running is not None:
             return bool(is_running)
@@ -735,48 +1483,48 @@ class AQEEngine:
         return False
 
     def _paused_strategy_ids_snapshot(self) -> list[str]:
-        """
-        Return the strategy IDs that AQEEngine itself paused.
+        """Return paused strategy IDs in deterministic order."""
 
-        This intentionally does not ask StrategyManager for a
-        `paused_strategy_ids` property because StrategyManager does not
-        expose such a property.
-        """
-
-        return sorted(self._paused_strategy_ids)
+        return sorted(
+            self._paused_strategy_ids,
+        )
 
     async def _resume_paused_strategies(self) -> None:
         """
         Resume strategies previously paused by AQEEngine.
 
-        If a strategy was removed while the engine was paused, it is
-        simply skipped.
+        Strategies removed while the engine was paused are skipped.
         """
 
         strategy_manager = self.strategy_manager
 
         if strategy_manager is None:
             raise EngineStateError(
-                "Cannot resume AQE strategies because the strategy manager "
-                "is not configured."
+                "Cannot resume AQE strategies because the strategy "
+                "manager is not configured."
             )
 
-        strategy_ids = tuple(self._paused_strategy_ids)
+        strategy_ids = tuple(
+            self._paused_strategy_ids,
+        )
 
         for strategy_id in strategy_ids:
-            instance = strategy_manager.get(strategy_id)
+            instance = strategy_manager.get(
+                strategy_id,
+            )
 
             if instance is None:
                 logger.warning(
-                    "Strategy instance no longer exists while resuming: " "id=%s",
+                    "Strategy instance no longer exists while "
+                    "resuming: id=%s",
                     strategy_id,
                 )
                 continue
 
             if instance.status is not StrategyStatus.PAUSED:
                 logger.info(
-                    "Skipping strategy resume because strategy is no "
-                    "longer paused: id=%s status=%s",
+                    "Skipping strategy resume because strategy "
+                    "is no longer paused: id=%s status=%s",
                     strategy_id,
                     instance.status.value,
                 )
@@ -792,6 +1540,8 @@ class AQEEngine:
 
     @property
     def _requires_broker(self) -> bool:
+        """Return whether the selected engine mode requires a broker."""
+
         return self.context.mode in {
             EngineMode.LIVE,
             EngineMode.PAPER,
@@ -800,38 +1550,57 @@ class AQEEngine:
     @staticmethod
     def _resolve_mode() -> EngineMode:
         """
-        Resolve the configured engine mode.
+        Resolve configured AQE engine mode.
 
         Invalid configuration falls back to PAPER rather than preventing
-        the backend application from starting.
+        the backend application itself from starting.
         """
 
-        raw_mode = getattr(settings, "AQE_ENGINE_MODE", None)
+        raw_mode = getattr(
+            settings,
+            "AQE_ENGINE_MODE",
+            None,
+        )
 
         if raw_mode is None:
-            raw_mode = getattr(settings, "ENGINE_MODE", None)
+            raw_mode = getattr(
+                settings,
+                "ENGINE_MODE",
+                None,
+            )
 
         if raw_mode is None:
             return EngineMode.PAPER
 
-        if isinstance(raw_mode, EngineMode):
+        if isinstance(
+            raw_mode,
+            EngineMode,
+        ):
             return raw_mode
 
         try:
-            return EngineMode(str(raw_mode).strip().upper())
+            return EngineMode(
+                str(raw_mode).strip().upper(),
+            )
 
         except ValueError:
             logger.warning(
-                "Invalid AQE engine mode %r. Falling back to PAPER.",
+                "Invalid AQE engine mode %r. "
+                "Falling back to PAPER.",
                 raw_mode,
             )
+
             return EngineMode.PAPER
 
     def _require_runtime(self) -> ExecutionRuntime:
+        """Return the active execution runtime or raise."""
+
         runtime = self._runtime
 
         if runtime is None:
-            raise EngineStateError("AQE runtime has not been created.")
+            raise EngineStateError(
+                "AQE runtime has not been created."
+            )
 
         return runtime
 
@@ -846,6 +1615,11 @@ _aqe_engine = AQEEngine()
 def get_aqe_engine() -> AQEEngine:
     """
     Return the application-wide AQE engine instance.
+
+    Calling this function only retrieves the lifecycle coordinator.
+
+    It does NOT start broker, market-data, strategy, risk, or
+    execution infrastructure.
     """
 
     return _aqe_engine

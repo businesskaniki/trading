@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from app.events.market import MarketCandleEvent
+from app.market_data.models import MarketCandle
 
-from ..core.base import BaseStrategy, StrategyDefinition
+from ..core.base import (
+    BaseStrategy,
+    StrategyConfig,
+    StrategyDefinition,
+)
 from ..core.enums import (
     OrderType,
     SignalDirection,
@@ -71,12 +75,12 @@ class EMATrendStrategy(BaseStrategy):
             "ATR-based stop-loss and take-profit."
         ),
         author="AQE",
-        tags=[
+        tags=(
             "trend",
             "ema",
             "atr",
             "crossover",
-        ],
+        ),
     )
 
     DEFAULT_FAST_PERIOD = 20
@@ -86,10 +90,17 @@ class EMATrendStrategy(BaseStrategy):
     DEFAULT_TAKE_PROFIT_ATR = 3.0
     DEFAULT_CONFIDENCE = 0.70
 
-    def __init__(self, *args, **kwargs) -> None:
+    def __init__(
+        self,
+        config: StrategyConfig,
+        context,
+    ) -> None:
         """Create the EMA trend strategy."""
 
-        super().__init__(*args, **kwargs)
+        super().__init__(
+            config=config,
+            context=context,
+        )
 
         self.fast_period = self._positive_int_parameter(
             "fast_period",
@@ -163,11 +174,9 @@ class EMATrendStrategy(BaseStrategy):
 
     async def on_candle(
         self,
-        event: MarketCandleEvent,
+        candle: MarketCandle,
     ) -> TradingSignal | None:
         """Process one normalized market candle."""
-
-        candle = event.candle
 
         if not self.supports_candle(
             symbol=candle.symbol,
@@ -175,7 +184,9 @@ class EMATrendStrategy(BaseStrategy):
         ):
             return None
 
-        timeframe = candle.timeframe.upper()
+        timeframe = str(
+            candle.timeframe
+        ).strip().upper()
 
         if timeframe == "TICK":
             return None
@@ -190,10 +201,18 @@ class EMATrendStrategy(BaseStrategy):
             _IndicatorState(),
         )
 
-        candle_open = float(candle.open)
-        candle_high = float(candle.high)
-        candle_low = float(candle.low)
-        candle_close = float(candle.close)
+        candle_open = float(
+            candle.open
+        )
+        candle_high = float(
+            candle.high
+        )
+        candle_low = float(
+            candle.low
+        )
+        candle_close = float(
+            candle.close
+        )
 
         if candle_close <= 0:
             return None
@@ -242,9 +261,7 @@ class EMATrendStrategy(BaseStrategy):
         if direction is None:
             return None
 
-        candle_timestamp = self._timestamp_value(
-            candle.timestamp,
-        )
+        candle_timestamp = candle.timestamp
 
         if self._last_signal_candle.get(key) == candle_timestamp:
             return None
@@ -252,7 +269,7 @@ class EMATrendStrategy(BaseStrategy):
         self._last_signal_candle[key] = candle_timestamp
 
         return self._build_signal(
-            event=event,
+            candle=candle,
             direction=direction,
             atr=state.atr,
         )
@@ -276,17 +293,21 @@ class EMATrendStrategy(BaseStrategy):
 
         ordered_candles = sorted(
             candles,
-            key=lambda candle: self._timestamp_value(
-                candle.timestamp,
-            ),
+            key=lambda candle: candle.timestamp,
         )
 
         state = _IndicatorState()
 
         for candle in ordered_candles:
-            high = float(candle.high)
-            low = float(candle.low)
-            close = float(candle.close)
+            high = float(
+                candle.high
+            )
+            low = float(
+                candle.low
+            )
+            close = float(
+                candle.close
+            )
 
             if high < low or close <= 0:
                 continue
@@ -336,23 +357,36 @@ class EMATrendStrategy(BaseStrategy):
         if state.ema_fast is None:
             state.ema_fast = close
         else:
-            fast_alpha = 2.0 / (self.fast_period + 1.0)
+            fast_alpha = 2.0 / (
+                self.fast_period + 1.0
+            )
 
-            state.ema_fast = close * fast_alpha + state.ema_fast * (1.0 - fast_alpha)
+            state.ema_fast = (
+                close * fast_alpha
+                + state.ema_fast * (1.0 - fast_alpha)
+            )
 
         if state.ema_slow is None:
             state.ema_slow = close
         else:
-            slow_alpha = 2.0 / (self.slow_period + 1.0)
+            slow_alpha = 2.0 / (
+                self.slow_period + 1.0
+            )
 
-            state.ema_slow = close * slow_alpha + state.ema_slow * (1.0 - slow_alpha)
+            state.ema_slow = (
+                close * slow_alpha
+                + state.ema_slow * (1.0 - slow_alpha)
+            )
 
         if state.atr is None:
             state.atr = true_range
         else:
             atr_alpha = 1.0 / self.atr_period
 
-            state.atr = state.atr * (1.0 - atr_alpha) + true_range * atr_alpha
+            state.atr = (
+                state.atr * (1.0 - atr_alpha)
+                + true_range * atr_alpha
+            )
 
         state.previous_close = close
 
@@ -388,43 +422,63 @@ class EMATrendStrategy(BaseStrategy):
     def _build_signal(
         self,
         *,
-        event: MarketCandleEvent,
+        candle: MarketCandle,
         direction: SignalDirection,
         atr: float,
     ) -> TradingSignal:
         """Create the normalized AQE trading signal."""
 
-        candle = event.candle
+        entry_price = float(
+            candle.close
+        )
 
-        entry_price = float(candle.close)
+        stop_distance = (
+            atr * self.stop_loss_atr
+        )
 
-        stop_distance = atr * self.stop_loss_atr
-
-        take_profit_distance = atr * self.take_profit_atr
+        take_profit_distance = (
+            atr * self.take_profit_atr
+        )
 
         if direction is SignalDirection.LONG:
-            stop_loss = entry_price - stop_distance
+            stop_loss = (
+                entry_price - stop_distance
+            )
 
-            take_profit = entry_price + take_profit_distance
+            take_profit = (
+                entry_price + take_profit_distance
+            )
 
-            reason = f"Bullish EMA crossover on " f"{candle.symbol} {candle.timeframe}."
+            reason = (
+                f"Bullish EMA crossover on "
+                f"{candle.symbol} {candle.timeframe}."
+            )
 
         else:
-            stop_loss = entry_price + stop_distance
+            stop_loss = (
+                entry_price + stop_distance
+            )
 
-            take_profit = entry_price - take_profit_distance
+            take_profit = (
+                entry_price - take_profit_distance
+            )
 
-            reason = f"Bearish EMA crossover on " f"{candle.symbol} {candle.timeframe}."
+            reason = (
+                f"Bearish EMA crossover on "
+                f"{candle.symbol} {candle.timeframe}."
+            )
 
         return TradingSignal(
             strategy_id=self.strategy_id,
             strategy_name=self.strategy_name,
             symbol=candle.symbol,
-            timeframe=Timeframe(candle.timeframe),
+            timeframe=Timeframe(
+                str(candle.timeframe).strip().upper()
+            ),
             signal_type=SignalType.ENTRY,
             direction=direction,
             order_type=OrderType.MARKET,
-            timestamp=self.context.now(),
+            timestamp=candle.datetime,
             entry_price=entry_price,
             stop_loss=stop_loss,
             take_profit=take_profit,
@@ -464,6 +518,7 @@ class EMATrendStrategy(BaseStrategy):
 
         try:
             value = int(value)
+
         except (TypeError, ValueError) as exc:
             raise StrategyConfigurationError(
                 f"Strategy parameter '{name}' must be an integer."
@@ -490,6 +545,7 @@ class EMATrendStrategy(BaseStrategy):
 
         try:
             value = float(value)
+
         except (TypeError, ValueError) as exc:
             raise StrategyConfigurationError(
                 f"Strategy parameter '{name}' must be numeric."
@@ -516,6 +572,7 @@ class EMATrendStrategy(BaseStrategy):
 
         try:
             value = float(value)
+
         except (TypeError, ValueError) as exc:
             raise StrategyConfigurationError(
                 f"Strategy parameter '{name}' must be numeric."
@@ -529,10 +586,14 @@ class EMATrendStrategy(BaseStrategy):
         return value
 
     @staticmethod
-    def _timestamp_value(timestamp: object) -> int:
-        """Convert supported timestamp values into integer seconds."""
-
-        if hasattr(timestamp, "timestamp"):
-            return int(timestamp.timestamp())
+    def _timestamp_value(
+        timestamp: int,
+    ) -> int:
+        """Return the normalized Unix timestamp in seconds."""
 
         return int(timestamp)
+
+
+__all__ = [
+    "EMATrendStrategy",
+]

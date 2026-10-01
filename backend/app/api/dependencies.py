@@ -34,7 +34,6 @@ from app.repositories.trading_account_repository import (
 from app.repositories.user_repository import UserRepository
 from app.services.account_symbol_service import AccountSymbolService
 from app.services.analytics_service import AnalyticsService
-from app.services.bot_service import BotService
 from app.services.email_service import EmailService
 from app.services.execution_service import ExecutionService
 from app.services.mt5_bridge_service import MT5BridgeService
@@ -473,19 +472,6 @@ def get_analytics_service(
 ) -> AnalyticsService:
     return AnalyticsService(
         repository=AnalyticsRepository(db),
-    )
-
-
-# ==========================================================
-# BOT SERVICE
-# ==========================================================
-
-
-def get_bot_service(
-    db: AsyncSession = Depends(get_db),
-) -> BotService:
-    return BotService(
-        StrategyRunRepository(db),
     )
 
 

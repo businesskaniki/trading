@@ -3,41 +3,54 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterable
 
-from .discovery import StrategyDiscovery, StrategyDiscoveryResult
+from .discovery import (
+    DEFAULT_STRATEGY_MODULES,
+    StrategyDiscovery,
+    StrategyDiscoveryResult,
+)
 
 logger = logging.getLogger(__name__)
 
-
-DEFAULT_STRATEGY_MODULES: tuple[str, ...] = (
-    "strategies.implementations.ema_trend",
-    "strategies.implementations.rsi_reversal",
-    "strategies.implementations.macd_trend",
-)
 
 class StrategyBootstrap:
     """
     Bootstrap the AQE Strategy Engine strategy registry.
 
-    The bootstrap layer defines which strategy modules belong to
-    the running AQE application.
+    Bootstrap is responsible for loading the available strategy
+    implementations into the StrategyRegistry.
 
-    It does not create or start strategy instances.
+    It does NOT:
+
+        - create strategy instances
+        - configure strategy instances
+        - activate strategies
+        - start strategies
+        - pause strategies
+        - stop strategy instances
+        - subscribe to market data
+        - consume Redis
+        - perform risk checks
+        - execute broker orders
+
+    Runtime strategy instances are owned by StrategyManager.
     """
 
     def __init__(
         self,
         *,
-        modules: tuple[str, ...] | None = None,
+        modules: Iterable[str] | None = None,
     ) -> None:
         """
         Initialize strategy bootstrap.
 
         Args:
             modules:
-                Optional explicit strategy module list.
+                Optional explicit strategy module collection.
 
-                When omitted, AQE's default strategy modules are used.
+                When omitted, the production AQE strategy modules
+                defined by StrategyDiscovery are used.
         """
 
         self._modules = DEFAULT_STRATEGY_MODULES if modules is None else tuple(modules)
@@ -49,15 +62,25 @@ class StrategyBootstrap:
         self._bootstrapped = False
         self._result: StrategyDiscoveryResult | None = None
 
+    # ==================================================================
+    # PROPERTIES
+    # ==================================================================
+
     @property
     def discovery(self) -> StrategyDiscovery:
-        """Return the underlying discovery service."""
+        """Return the underlying strategy discovery service."""
 
         return self._discovery
 
     @property
+    def modules(self) -> tuple[str, ...]:
+        """Return the strategy modules configured for bootstrap."""
+
+        return self._modules
+
+    @property
     def bootstrapped(self) -> bool:
-        """Return whether bootstrap has completed."""
+        """Return whether bootstrap has completed successfully."""
 
         return self._bootstrapped
 
@@ -67,20 +90,43 @@ class StrategyBootstrap:
 
         return self._result
 
+    # ==================================================================
+    # LIFECYCLE
+    # ==================================================================
+
     async def start(self) -> StrategyDiscoveryResult:
         """
         Bootstrap the strategy registry.
 
-        The operation is idempotent. Calling start more than once
-        does not import the same modules repeatedly.
+        The operation is idempotent.
+
+        Calling ``start()`` more than once returns the previous
+        discovery result without re-importing already discovered
+        modules.
+
+        Bootstrap does not instantiate or activate any strategy.
         """
 
         if self._bootstrapped and self._result is not None:
+            logger.debug("AQE Strategy Engine bootstrap already completed.")
+
             return self._result
 
-        logger.info("Starting AQE Strategy Engine bootstrap.")
+        logger.info(
+            "Starting AQE Strategy Engine bootstrap: modules=%s",
+            self._modules,
+        )
 
-        result = self._discovery.discover()
+        try:
+            result = self._discovery.discover()
+
+        except Exception:
+            self._bootstrapped = False
+            self._result = None
+
+            logger.exception("AQE Strategy Engine bootstrap failed.")
+
+            raise
 
         self._result = result
         self._bootstrapped = True
@@ -91,20 +137,51 @@ class StrategyBootstrap:
             result.strategy_count,
         )
 
+        logger.debug(
+            "Registered AQE strategies: %s",
+            result.registered_strategies,
+        )
+
         return result
 
     async def stop(self) -> None:
         """
         Stop the bootstrap lifecycle.
 
-        Strategy classes remain registered because discovery is
-        process-level configuration. Runtime strategy instances
-        are owned by StrategyManager and must be stopped there.
+        Bootstrap itself owns no running strategy instances.
+
+        Therefore this operation does not unregister strategy classes
+        and does not stop strategy instances.
+
+        Strategy instances are owned and stopped by StrategyManager.
         """
+
+        if not self._bootstrapped:
+            return
 
         self._bootstrapped = False
 
         logger.info("AQE Strategy Engine bootstrap stopped.")
 
+    # ==================================================================
+    # DISCOVERY ACCESS
+    # ==================================================================
+
+    def registered_strategies(self) -> tuple[str, ...]:
+        """
+        Return the strategies discovered during the latest bootstrap.
+
+        If bootstrap has not completed, an empty tuple is returned.
+        """
+
+        if self._result is None:
+            return ()
+
+        return self._result.registered_strategies
+
+
+# ======================================================================
+# DEFAULT APPLICATION BOOTSTRAP
+# ======================================================================
 
 strategy_bootstrap = StrategyBootstrap()

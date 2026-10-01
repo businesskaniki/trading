@@ -27,72 +27,147 @@ class StrategyInstance:
     """
     Runtime representation of one configured strategy instance.
 
-    A registered strategy class can have multiple independent
-    StrategyInstance objects, each with its own configuration,
-    context, lifecycle, and state.
+    A registered strategy implementation can have multiple independent
+    StrategyInstance objects.
+
+    Each instance owns:
+
+        - one BaseStrategy object
+        - one StrategyConfig
+        - one StrategyContext
+        - one selected symbol universe
+        - one lifecycle
+        - one activation state
+        - one strategy-specific runtime state
+
+    A strategy instance may analyse multiple symbols.
+
+    Example:
+
+        StrategyInstance
+            strategy = EMA Trend
+            symbols  = (
+                "XAUUSD.s",
+                "BTCUSD",
+                "AUDCAD.s",
+                "EURUSD",
+            )
+
+    There is intentionally no one-instance-per-symbol model.
 
     The instance is also the boundary between strategy logic and
-    runtime infrastructure. Strategies return TradingSignal objects;
-    the instance passes those signals to the configured publisher.
+    runtime infrastructure:
+
+        Market Event
+              │
+              ▼
+        StrategyInstance
+              │
+              ▼
+        BaseStrategy
+              │
+              ▼
+        TradingSignal
+              │
+              ▼
+        StrategySignalPublisher
+              │
+              ▼
+        StrategySignalEvent
     """
 
     strategy: BaseStrategy
     signal_publisher: StrategySignalPublisher
 
+    # ==================================================================
+    # PROPERTIES
+    # ==================================================================
+
     @property
     def strategy_id(self) -> str:
-        """Return the unique instance identifier."""
+        """Return the unique runtime strategy instance identifier."""
+
         return self.strategy.strategy_id
 
     @property
     def strategy_name(self) -> str:
         """Return the registered strategy name."""
+
         return self.strategy.strategy_name
 
     @property
     def mode(self) -> StrategyMode:
         """Return the execution mode."""
+
         return self.strategy.mode
 
     @property
     def status(self) -> StrategyStatus:
-        """Return current lifecycle state."""
+        """Return the current lifecycle state."""
+
         return self.strategy.status
 
     @property
     def symbols(self) -> tuple[str, ...]:
-        """Return symbols monitored by this instance."""
+        """
+        Return all symbols monitored by this strategy instance.
+
+        A strategy instance can monitor multiple symbols simultaneously.
+        """
+
         return self.strategy.symbols
 
     @property
     def timeframes(self) -> tuple[str, ...]:
-        """Return timeframes monitored by this instance."""
+        """Return all timeframes monitored by this instance."""
+
         return self.strategy.timeframes
 
     @property
     def definition(self) -> StrategyDefinition:
-        """Return strategy implementation definition."""
+        """Return the static strategy implementation definition."""
+
         return self.strategy.definition
 
     @property
     def config(self) -> StrategyConfig:
-        """Return instance configuration."""
+        """Return the runtime strategy configuration."""
+
         return self.strategy.config
 
     @property
     def context(self) -> StrategyContext:
-        """Return runtime strategy context."""
+        """Return the runtime strategy context."""
+
         return self.strategy.context
 
     @property
+    def is_enabled(self) -> bool:
+        """
+        Return whether this strategy instance is administratively
+        enabled.
+        """
+
+        return self.strategy.is_enabled
+
+    @property
     def is_running(self) -> bool:
-        """Return whether strategy is running."""
+        """Return whether the strategy lifecycle is RUNNING."""
+
         return self.strategy.is_running
 
     @property
     def is_active(self) -> bool:
-        """Return whether strategy can process market data."""
+        """
+        Return whether the strategy is currently allowed to process
+        market data.
+        """
+
         return self.strategy.is_active
+
+    # ==================================================================
+    # CREATION
+    # ==================================================================
 
     @classmethod
     def create(
@@ -106,10 +181,19 @@ class StrategyInstance:
         signal_publisher: StrategySignalPublisher | None = None,
     ) -> StrategyInstance:
         """
-        Create a strategy instance from runtime configuration.
+        Create one runtime strategy instance from configuration.
 
-        The concrete strategy implementation is resolved through the
-        global strategy registry.
+        The strategy implementation is resolved through the AQE
+        StrategyRegistry.
+
+        The registry provides the implementation class only. This method
+        then creates exactly one instance configured with the complete
+        symbol universe contained in ``config.symbols``.
+
+        No market-data subscription is created here.
+        No broker communication occurs here.
+        No risk validation occurs here.
+        No order execution occurs here.
         """
 
         strategy_class = registry.get(
@@ -149,53 +233,122 @@ class StrategyInstance:
 
         return cls(
             strategy=strategy,
-            signal_publisher=(signal_publisher or StrategySignalPublisher()),
+            signal_publisher=(
+                signal_publisher
+                if signal_publisher is not None
+                else StrategySignalPublisher()
+            ),
         )
+
+    # ==================================================================
+    # ACTIVATION
+    # ==================================================================
+
+    def activate(self) -> None:
+        """
+        Activate this strategy instance.
+
+        Activation is independent of lifecycle state.
+
+        Example:
+
+            RUNNING + activate()
+                -> RUNNING + active
+
+        The strategy is not started by this method.
+        """
+
+        self.strategy.activate()
+
+    def deactivate(self) -> None:
+        """
+        Deactivate this strategy instance.
+
+        Deactivation does not stop the lifecycle and does not destroy
+        strategy state.
+
+        Example:
+
+            RUNNING + deactivate()
+                -> RUNNING + inactive
+        """
+
+        self.strategy.deactivate()
+
+    # ==================================================================
+    # LIFECYCLE
+    # ==================================================================
 
     async def initialize(self) -> None:
         """Initialize the underlying strategy."""
+
         await self.strategy.initialize()
 
     async def start(self) -> None:
-        """Start the underlying strategy."""
+        """Start the underlying strategy lifecycle."""
+
         await self.strategy.start()
 
     async def pause(self) -> None:
         """Pause the underlying strategy."""
+
         await self.strategy.pause()
 
     async def resume(self) -> None:
         """Resume the underlying strategy."""
+
         await self.strategy.resume()
 
     async def stop(self) -> None:
         """Stop the underlying strategy."""
+
         await self.strategy.stop()
+
+    # ==================================================================
+    # MARKET-DATA CAPABILITY
+    # ==================================================================
 
     def supports_tick(
         self,
         symbol: str,
     ) -> bool:
-        """Return whether this instance should receive a tick."""
-        return self.strategy.supports_tick(symbol)
+        """
+        Return whether this strategy instance should receive a tick
+        for the supplied symbol.
+        """
+
+        return self.strategy.supports_tick(
+            symbol,
+        )
 
     def supports_candle(
         self,
         symbol: str,
         timeframe: str,
     ) -> bool:
-        """Return whether this instance should receive a candle."""
+        """
+        Return whether this strategy instance should receive a candle
+        for the supplied symbol and timeframe.
+        """
+
         return self.strategy.supports_candle(
             symbol=symbol,
             timeframe=timeframe,
         )
+
+    # ==================================================================
+    # MARKET-DATA PROCESSING
+    # ==================================================================
 
     async def handle_tick(
         self,
         event: MarketTickEvent,
     ) -> tuple[StrategySignalEvent, ...]:
         """
-        Process a tick and publish any generated signals.
+        Process a market tick and publish generated signals.
+
+        The underlying strategy remains responsible only for analysis.
+        Any resulting TradingSignal is handed to the signal publisher.
 
         Returns:
             Published strategy-signal events.
@@ -216,7 +369,7 @@ class StrategyInstance:
         except Exception as exc:
             raise StrategyExecutionError(
                 f"Strategy instance '{self.strategy_id}' "
-                f"failed while handling a tick."
+                "failed while handling a tick."
             ) from exc
 
     async def handle_candle(
@@ -224,7 +377,7 @@ class StrategyInstance:
         event: MarketCandleEvent,
     ) -> tuple[StrategySignalEvent, ...]:
         """
-        Process a candle and publish any generated signals.
+        Process a market candle and publish generated signals.
 
         Returns:
             Published strategy-signal events.
@@ -245,24 +398,31 @@ class StrategyInstance:
         except Exception as exc:
             raise StrategyExecutionError(
                 f"Strategy instance '{self.strategy_id}' "
-                f"failed while handling a candle."
+                "failed while handling a candle."
             ) from exc
+
+    # ==================================================================
+    # SIGNAL PUBLISHING
+    # ==================================================================
 
     async def _publish_signals(
         self,
         result: TradingSignal | list[TradingSignal] | tuple[TradingSignal, ...] | None,
     ) -> tuple[StrategySignalEvent, ...]:
         """
-        Publish strategy-generated signals.
+        Publish signals generated by the strategy.
 
-        A strategy may return:
+        Supported strategy return values:
+
             None
-            one TradingSignal
-            a list/tuple of TradingSignal objects
+            TradingSignal
+            list[TradingSignal]
+            tuple[TradingSignal, ...]
 
-        The publisher converts each signal into a
-        StrategySignalEvent and sends it through the existing AQE
-        EventBus.
+        The StrategyInstance does not perform risk validation,
+        position sizing, or execution.
+
+        Those responsibilities belong to downstream AQE components.
         """
 
         if result is None:
@@ -279,40 +439,58 @@ class StrategyInstance:
         published_events: list[StrategySignalEvent] = []
 
         for signal in signals:
+            if not isinstance(signal, TradingSignal):
+                raise StrategyExecutionError(
+                    f"Strategy '{self.strategy_id}' returned an "
+                    f"unsupported signal type: {type(signal).__name__}."
+                )
+
             event = await self.signal_publisher.publish(
                 signal,
             )
 
-            published_events.append(event)
+            published_events.append(
+                event,
+            )
 
         return tuple(published_events)
+
+    # ==================================================================
+    # SNAPSHOT
+    # ==================================================================
 
     def snapshot(self) -> dict[str, Any]:
         """
         Return a lightweight runtime snapshot.
 
-        Intended for monitoring, diagnostics, and management APIs.
-        Does not expose sensitive runtime objects.
+        Intended for:
+
+            - management APIs
+            - frontend state
+            - monitoring
+            - diagnostics
+            - runtime inspection
+
+        Sensitive runtime infrastructure objects are not exposed.
         """
 
-        return {
-            "strategy_id": self.strategy_id,
-            "strategy_name": self.strategy_name,
-            "mode": self.mode.value,
-            "status": self.status.value,
-            "symbols": list(self.symbols),
-            "timeframes": list(self.timeframes),
-            "enabled": self.config.enabled,
-        }
+        return self.strategy.snapshot()
+
+    # ==================================================================
+    # REPRESENTATION
+    # ==================================================================
 
     def __repr__(self) -> str:
-        """Return useful representation for logs/debugging."""
+        """Return a useful representation for logs and debugging."""
 
         return (
             "StrategyInstance("
             f"strategy_id={self.strategy_id!r}, "
             f"strategy_name={self.strategy_name!r}, "
             f"mode={self.mode.value!r}, "
-            f"status={self.status.value!r}"
+            f"status={self.status.value!r}, "
+            f"enabled={self.is_enabled!r}, "
+            f"active={self.is_active!r}, "
+            f"symbols={self.symbols!r}"
             ")"
         )

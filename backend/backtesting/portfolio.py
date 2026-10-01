@@ -3,11 +3,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
 from .position import (
     BacktestPosition,
-    BacktestPositionSide,
     BacktestPositionStatus,
 )
 
@@ -27,20 +27,27 @@ class BacktestPositionNotFoundError(BacktestPortfolioError):
 @dataclass(slots=True)
 class BacktestPortfolio:
     """
-    Portfolio state for a single backtest account.
+    Shared simulated account portfolio for a backtest.
 
-    The portfolio is deliberately independent from:
-    - the Risk Engine
-    - the Strategy Engine
+    A single portfolio may contain positions opened by:
+    - multiple strategies
+    - multiple symbols
+    - multiple timeframes
+
+    The portfolio is intentionally independent from:
     - the live broker
     - PostgreSQL
+    - Redis
+    - the Strategy Engine
+    - the Risk Engine
 
-    It represents the simulated account state used by the
-    backtesting execution environment.
+    The Risk Engine decides whether a trade is allowed.
+
+    The execution layer mutates this portfolio when a simulated
+    order is filled.
     """
 
     account_id: UUID
-
     initial_balance: Decimal
 
     balance: Decimal | None = None
@@ -53,24 +60,32 @@ class BacktestPortfolio:
 
     peak_equity: Decimal | None = None
 
-    created_at: datetime = field(
-        default_factory=lambda: datetime.now(timezone.utc)
-    )
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     current_time: datetime | None = None
 
     def __post_init__(self) -> None:
+        self.initial_balance = Decimal(str(self.initial_balance))
+
         if self.initial_balance < Decimal("0"):
             raise ValueError("Initial balance cannot be negative.")
 
         if self.balance is None:
             self.balance = self.initial_balance
+        else:
+            self.balance = Decimal(str(self.balance))
 
         if self.balance < Decimal("0"):
             raise ValueError("Balance cannot be negative.")
 
+        self.realized_pnl = Decimal(str(self.realized_pnl))
+        self.commission_paid = Decimal(str(self.commission_paid))
+        self.swap_paid = Decimal(str(self.swap_paid))
+
         if self.peak_equity is None:
             self.peak_equity = self.balance
+        else:
+            self.peak_equity = Decimal(str(self.peak_equity))
 
         self.created_at = self._normalize_datetime(self.created_at)
 
@@ -86,39 +101,39 @@ class BacktestPortfolio:
         """
         Current account equity.
 
-        Equity = balance + unrealized P&L of all open positions.
+        Equity is:
+
+            balance + unrealized P&L
+
+        The portfolio cannot calculate unrealized P&L without current
+        market prices, so callers that need a marked-to-market equity
+        value should use ``mark_to_market()`` or ``snapshot()``.
+
+        If no prices are available, the property returns balance.
         """
 
-        unrealized = self.total_unrealized_pnl()
-
-        equity = self.balance + unrealized
-
-        if self.peak_equity is None or equity > self.peak_equity:
-            self.peak_equity = equity
-
-        return equity
+        return self.balance
 
     @property
     def free_margin(self) -> Decimal:
         """
-        Backtest free margin.
+        Current simulated free margin.
 
-        Margin reservation is intentionally handled by the
-        backtest broker/execution layer rather than the portfolio
-        itself. For the initial engine this represents equity.
+        Margin reservation is deliberately kept outside this portfolio
+        until symbol-specific margin requirements are introduced.
 
-        The Risk Engine remains responsible for margin validation.
+        For the current backtest model, free margin is therefore the
+        account equity represented by ``balance``.
         """
 
-        return self.equity
+        return self.balance
 
     @property
     def margin(self) -> Decimal:
         """
         Current simulated margin usage.
 
-        Margin accounting will be introduced when the BacktestBroker
-        applies symbol-specific margin requirements.
+        Margin accounting is currently delegated to the risk layer.
         """
 
         return Decimal("0")
@@ -126,18 +141,22 @@ class BacktestPortfolio:
     @property
     def margin_level(self) -> Decimal | None:
         """
-        Simulated margin level.
+        Current simulated margin level.
 
-        Returns None when no margin is currently used.
+        Returns ``None`` when no margin is reserved.
         """
 
-        if self.margin <= Decimal("0"):
+        margin = self.margin
+
+        if margin <= Decimal("0"):
             return None
 
-        return (self.equity / self.margin) * Decimal("100")
+        return (self.balance / margin) * Decimal("100")
 
     @property
     def open_positions(self) -> list[BacktestPosition]:
+        """Return all currently open positions."""
+
         return [
             position
             for position in self.positions.values()
@@ -146,6 +165,8 @@ class BacktestPortfolio:
 
     @property
     def closed_positions(self) -> list[BacktestPosition]:
+        """Return all closed positions."""
+
         return [
             position
             for position in self.positions.values()
@@ -154,7 +175,15 @@ class BacktestPortfolio:
 
     @property
     def open_position_count(self) -> int:
+        """Number of currently open positions."""
+
         return len(self.open_positions)
+
+    @property
+    def closed_position_count(self) -> int:
+        """Number of positions that have been closed."""
+
+        return len(self.closed_positions)
 
     # ------------------------------------------------------------------
     # P&L
@@ -162,48 +191,44 @@ class BacktestPortfolio:
 
     def total_unrealized_pnl(
         self,
-        prices: dict[str, Decimal] | None = None,
+        prices: dict[str, Decimal],
         contract_sizes: dict[str, Decimal] | None = None,
     ) -> Decimal:
         """
-        Calculate unrealized P&L for all open positions.
+        Calculate unrealized P&L across every open position.
 
-        Parameters
-        ----------
-        prices:
-            Optional symbol -> current price mapping.
+        ``prices`` is keyed by normalized symbol.
 
-        contract_sizes:
-            Optional symbol -> contract size mapping.
+        ``contract_sizes`` allows instruments such as XAUUSD to use
+        their actual contract size instead of the generic default of 1.
 
-        When prices are omitted, positions must have an externally
-        supplied current price in the future market layer. For now,
-        the method requires prices for open positions.
+        Because this is a shared account portfolio, positions from all
+        strategies are included in the same calculation.
         """
 
         if not self.open_positions:
             return Decimal("0")
 
-        if prices is None:
-            raise ValueError(
-                "Current prices are required to calculate unrealized P&L."
-            )
+        normalized_prices = {
+            self._normalize_symbol(symbol): Decimal(str(price))
+            for symbol, price in prices.items()
+        }
 
-        contract_sizes = contract_sizes or {}
+        normalized_contract_sizes = self._normalize_contract_sizes(contract_sizes)
 
         total = Decimal("0")
 
         for position in self.open_positions:
-            symbol = position.symbol
+            symbol = self._normalize_symbol(position.symbol)
 
-            if symbol not in prices:
+            try:
+                current_price = normalized_prices[symbol]
+            except KeyError as exc:
                 raise ValueError(
-                    f"Missing current price for open position '{symbol}'."
-                )
+                    f"Missing current price for open position " f"'{position.symbol}'."
+                ) from exc
 
-            current_price = prices[symbol]
-
-            contract_size = contract_sizes.get(
+            contract_size = normalized_contract_sizes.get(
                 symbol,
                 Decimal("1"),
             )
@@ -222,47 +247,63 @@ class BacktestPortfolio:
         timestamp: datetime | None = None,
     ) -> Decimal:
         """
-        Mark all open positions to the supplied market prices.
+        Mark the shared account to current market prices.
 
-        Returns current account equity.
+        Returns the resulting account equity.
         """
 
         if timestamp is not None:
             self.current_time = self._normalize_datetime(timestamp)
 
-        return self.total_unrealized_pnl(
+        unrealized = self.total_unrealized_pnl(
             prices=prices,
             contract_sizes=contract_sizes,
-        ) + self.balance
+        )
+
+        equity = self.balance + unrealized
+
+        self._update_peak_equity(equity)
+
+        return equity
 
     @property
     def total_realized_pnl(self) -> Decimal:
+        """Alias for the account's realized P&L."""
+
         return self.realized_pnl
 
     @property
     def total_pnl(self) -> Decimal:
         """
-        Total P&L since the beginning of the backtest.
+        Realized account P&L relative to the initial balance.
 
-        This is based on the account balance relative to the
-        initial balance.
+        Unrealized P&L is deliberately excluded because it is not yet
+        reflected in account balance.
         """
 
         return self.balance - self.initial_balance
 
-    @property
-    def drawdown(self) -> Decimal:
+    def drawdown_from_equity(
+        self,
+        equity: Decimal,
+    ) -> Decimal:
         """
-        Current absolute drawdown from peak equity.
+        Calculate absolute drawdown from peak equity.
         """
 
         peak = self.peak_equity or self.initial_balance
-        return max(Decimal("0"), peak - self.equity)
 
-    @property
-    def drawdown_percent(self) -> Decimal:
+        return max(
+            Decimal("0"),
+            peak - Decimal(str(equity)),
+        )
+
+    def drawdown_percent_from_equity(
+        self,
+        equity: Decimal,
+    ) -> Decimal:
         """
-        Current percentage drawdown from peak equity.
+        Calculate percentage drawdown from peak equity.
         """
 
         peak = self.peak_equity or self.initial_balance
@@ -270,15 +311,40 @@ class BacktestPortfolio:
         if peak <= Decimal("0"):
             return Decimal("0")
 
-        return (self.drawdown / peak) * Decimal("100")
+        drawdown = self.drawdown_from_equity(equity)
+
+        return (drawdown / peak) * Decimal("100")
+
+    @property
+    def drawdown(self) -> Decimal:
+        """
+        Drawdown using the current realized account balance.
+
+        For a marked-to-market drawdown use ``snapshot()`` or
+        ``mark_to_market()`` with current prices.
+        """
+
+        return self.drawdown_from_equity(self.balance)
+
+    @property
+    def drawdown_percent(self) -> Decimal:
+        """Percentage drawdown using current account balance."""
+
+        return self.drawdown_percent_from_equity(self.balance)
 
     # ------------------------------------------------------------------
     # POSITION MANAGEMENT
     # ------------------------------------------------------------------
 
-    def add_position(self, position: BacktestPosition) -> None:
+    def add_position(
+        self,
+        position: BacktestPosition,
+    ) -> None:
         """
         Register a newly opened position.
+
+        Positions from any strategy and any supported symbol may be
+        stored in this shared account portfolio.
         """
 
         if position.account_id != self.account_id:
@@ -298,10 +364,11 @@ class BacktestPortfolio:
 
         self.positions[position.position_id] = position
 
-    def get_position(self, position_id: UUID) -> BacktestPosition:
-        """
-        Retrieve a position by ID.
-        """
+    def get_position(
+        self,
+        position_id: UUID,
+    ) -> BacktestPosition:
+        """Retrieve a position by ID."""
 
         try:
             return self.positions[position_id]
@@ -323,43 +390,51 @@ class BacktestPortfolio:
         """
         Close an existing position and update account balance.
 
-        The position calculates gross P&L.
+        ``BacktestPosition.close()`` calculates gross realized P&L and
+        stores commission/swap on the position.
 
-        The portfolio then applies:
-            net P&L = gross P&L - commission - swap
+        The portfolio then applies the position's resulting
+        ``net_realized_pnl`` exactly once.
 
-        The account balance is updated by the net P&L.
+        This is important because transaction costs must not be
+        subtracted twice.
         """
 
         position = self.get_position(position_id)
 
         if position.status != BacktestPositionStatus.OPEN:
-            raise BacktestPortfolioError(
-                f"Position '{position_id}' is already closed."
-            )
+            raise BacktestPortfolioError(f"Position '{position_id}' is already closed.")
+
+        close_timestamp = closed_at or self.current_time
 
         gross_pnl = position.close(
-            exit_price=exit_price,
-            closed_at=closed_at or self.current_time,
+            exit_price=Decimal(str(exit_price)),
+            closed_at=close_timestamp,
             exit_reason=exit_reason,
-            contract_size=contract_size,
-            commission=commission,
-            swap=swap,
+            contract_size=Decimal(str(contract_size)),
+            commission=Decimal(str(commission)),
+            swap=Decimal(str(swap)),
         )
 
-        net_pnl = gross_pnl - commission - swap
+        # ``BacktestPosition.close()`` stores the net realized P&L
+        # separately from the gross P&L.
+        net_pnl = position.net_realized_pnl
 
-        position.realized_pnl = net_pnl
+        # Defensive fallback for compatibility with position
+        # implementations that may not expose the property.
+        if net_pnl is None:
+            net_pnl = gross_pnl - Decimal(str(commission)) + Decimal(str(swap))
 
         self.balance += net_pnl
         self.realized_pnl += net_pnl
-        self.commission_paid += commission
-        self.swap_paid += swap
 
-        if closed_at is not None:
-            self.current_time = self._normalize_datetime(closed_at)
+        self.commission_paid += Decimal(str(commission))
+        self.swap_paid += Decimal(str(swap))
 
-        self._update_peak_equity()
+        if close_timestamp is not None:
+            self.current_time = self._normalize_datetime(close_timestamp)
+
+        self._update_peak_equity(self.balance)
 
         return position
 
@@ -371,13 +446,14 @@ class BacktestPortfolio:
         self,
         prices: dict[str, Decimal] | None = None,
         contract_sizes: dict[str, Decimal] | None = None,
-    ) -> dict:
+    ) -> dict[str, Any]:
         """
-        Return a serializable portfolio snapshot.
+        Return a serializable account snapshot.
 
-        This is intentionally a plain dictionary so the backtest
-        result layer can later convert it into whatever persistence
-        or reporting model AQE requires.
+        When prices are supplied, equity and unrealized P&L are
+        calculated across the entire multi-strategy portfolio.
+
+        When prices are omitted, equity falls back to balance.
         """
 
         unrealized = Decimal("0")
@@ -390,6 +466,10 @@ class BacktestPortfolio:
 
         equity = self.balance + unrealized
 
+        self._update_peak_equity(equity)
+
+        drawdown = self.drawdown_from_equity(equity)
+
         return {
             "account_id": str(self.account_id),
             "initial_balance": self.initial_balance,
@@ -400,23 +480,97 @@ class BacktestPortfolio:
             "total_pnl": self.balance - self.initial_balance,
             "commission_paid": self.commission_paid,
             "swap_paid": self.swap_paid,
+            "margin": self.margin,
+            "free_margin": equity,
+            "margin_level": self.margin_level,
             "open_positions": self.open_position_count,
+            "closed_positions": self.closed_position_count,
             "peak_equity": self.peak_equity,
-            "drawdown": max(
-                Decimal("0"),
-                (self.peak_equity or self.initial_balance) - equity,
+            "drawdown": drawdown,
+            "drawdown_percent": (
+                (drawdown / self.peak_equity) * Decimal("100")
+                if self.peak_equity and self.peak_equity > Decimal("0")
+                else Decimal("0")
             ),
+            "current_time": self.current_time,
         }
+
+    # ------------------------------------------------------------------
+    # STRATEGY / SYMBOL ATTRIBUTION
+    # ------------------------------------------------------------------
+
+    def positions_for_strategy(
+        self,
+        strategy_id: str,
+    ) -> list[BacktestPosition]:
+        """
+        Return positions belonging to one strategy.
+
+        The account remains shared; this method is only for attribution
+        and reporting.
+        """
+
+        return [
+            position
+            for position in self.positions.values()
+            if position.strategy_id == strategy_id
+        ]
+
+    def positions_for_symbol(
+        self,
+        symbol: str,
+    ) -> list[BacktestPosition]:
+        """Return positions belonging to one symbol."""
+
+        normalized_symbol = self._normalize_symbol(symbol)
+
+        return [
+            position
+            for position in self.positions.values()
+            if self._normalize_symbol(position.symbol) == normalized_symbol
+        ]
 
     # ------------------------------------------------------------------
     # INTERNAL
     # ------------------------------------------------------------------
 
-    def _update_peak_equity(self) -> None:
-        equity = self.equity
+    def _update_peak_equity(
+        self,
+        equity: Decimal,
+    ) -> None:
+        equity = Decimal(str(equity))
 
         if self.peak_equity is None or equity > self.peak_equity:
             self.peak_equity = equity
+
+    @staticmethod
+    def _normalize_symbol(symbol: str) -> str:
+        normalized = str(symbol).strip().upper()
+
+        if not normalized:
+            raise ValueError("Symbol cannot be empty.")
+
+        return normalized
+
+    @classmethod
+    def _normalize_contract_sizes(
+        cls,
+        contract_sizes: dict[str, Decimal] | None,
+    ) -> dict[str, Decimal]:
+        if not contract_sizes:
+            return {}
+
+        normalized: dict[str, Decimal] = {}
+
+        for symbol, value in contract_sizes.items():
+            size = Decimal(str(value))
+
+            if size <= Decimal("0"):
+                raise ValueError(f"Contract size for '{symbol}' must be positive.")
+
+            normalized[cls._normalize_symbol(symbol)] = size
+
+        return normalized
 
     @staticmethod
     def _normalize_datetime(value: datetime) -> datetime:

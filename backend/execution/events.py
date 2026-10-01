@@ -6,7 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-from app.schemas.execution import ExecutionResult
+from app.schemas.execution import ExecutionResult, ExecutionStatus
 from risk.models import RiskDecision
 
 
@@ -20,10 +20,14 @@ class ExecutionSubmittedEvent:
     Published immediately before an approved execution order is submitted
     to the broker.
 
-    `decision_id` is the AQE execution correlation identifier.
+    The event represents the AQE execution boundary being crossed.
+
+    `decision_id` is the deterministic AQE execution correlation
+    identifier.
 
     `symbol` is the broker-facing symbol after account-specific symbol
-    resolution. The original canonical AQE symbol is preserved in metadata.
+    resolution. The canonical AQE symbol remains available through
+    metadata.
     """
 
     decision_id: UUID
@@ -56,6 +60,17 @@ class ExecutionSubmittedEvent:
         symbol: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ExecutionSubmittedEvent:
+        if decision.account_id is None:
+            raise ValueError(
+                "ExecutionSubmittedEvent requires a RiskDecision " "with an account_id."
+            )
+
+        if decision.position_size is None:
+            raise ValueError(
+                "ExecutionSubmittedEvent requires a RiskDecision "
+                "with a position_size."
+            )
+
         return cls(
             decision_id=decision.decision_id,
             signal_id=decision.signal_id,
@@ -100,12 +115,18 @@ class ExecutionSubmittedEvent:
 @dataclass(frozen=True, slots=True)
 class ExecutionCompletedEvent:
     """
-    Published after the broker successfully processes the execution.
+    Published after the broker returns a confirmed successful execution
+    result.
 
-    `decision_id` is the primary AQE correlation key.
+    This event represents broker-confirmed success only.
 
-    Broker identifiers are retained separately because they represent
-    broker-side objects and must never be confused with AQE identifiers.
+    The persisted AQE order may therefore be:
+        - FILLED;
+        - PARTIALLY_FILLED; or
+        - PENDING for a successfully placed pending order.
+
+    Explicit broker rejection and unknown broker outcomes must not be
+    represented by this event.
     """
 
     decision_id: UUID
@@ -116,6 +137,7 @@ class ExecutionCompletedEvent:
     strategy_name: str
 
     symbol: str
+
     status: str
 
     broker_order_id: str | None
@@ -141,6 +163,18 @@ class ExecutionCompletedEvent:
         symbol: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ExecutionCompletedEvent:
+        if result.status is not ExecutionStatus.SUCCESS:
+            raise ValueError(
+                "ExecutionCompletedEvent requires an "
+                f"ExecutionStatus.SUCCESS result, got "
+                f"{result.status.value!r}."
+            )
+
+        if decision.account_id is None:
+            raise ValueError(
+                "ExecutionCompletedEvent requires a RiskDecision " "with an account_id."
+            )
+
         return cls(
             decision_id=decision.decision_id,
             signal_id=decision.signal_id,
@@ -150,23 +184,17 @@ class ExecutionCompletedEvent:
             symbol=symbol or decision.symbol,
             status=result.status.value,
             broker_order_id=_string_or_none(
-                getattr(result, "broker_order_id", None)
+                result.broker_order_id,
             ),
             broker_deal_id=_string_or_none(
-                getattr(result, "broker_deal_id", None)
+                result.broker_deal_id,
             ),
             broker_position_id=_string_or_none(
-                getattr(result, "broker_position_id", None)
+                result.broker_position_id,
             ),
-            volume=_decimal_or_none(
-                getattr(result, "volume", None)
-            ),
-            price=_decimal_or_none(
-                getattr(result, "price", None)
-            ),
-            message=_string_or_none(
-                getattr(result, "message", None)
-            ),
+            volume=_decimal_or_none(result.volume),
+            price=_decimal_or_none(result.price),
+            message=_string_or_none(result.message),
             metadata=dict(metadata or {}),
         )
 
@@ -199,10 +227,31 @@ class ExecutionCompletedEvent:
 @dataclass(frozen=True, slots=True)
 class ExecutionFailedEvent:
     """
-    Published when an approved execution cannot be completed.
+    Published when an approved execution does not produce a confirmed
+    successful execution result.
 
-    `decision_id` remains the correlation identifier even though no
-    successful broker execution exists.
+    Important:
+
+    A failed execution event does NOT necessarily mean that the broker
+    did not execute the order.
+
+    If the broker boundary was crossed and the broker response was lost,
+    the broker outcome is UNKNOWN. In that situation the persisted AQE
+    Order remains SUBMITTED and must be reconciled separately.
+
+    Metadata should contain execution-state information such as:
+
+        {
+            "execution_submitted": True,
+            "broker_execution_outcome": "unknown",
+        }
+
+    Explicit broker rejection can use:
+
+        {
+            "execution_submitted": True,
+            "broker_execution_outcome": "rejected",
+        }
     """
 
     decision_id: UUID
@@ -231,6 +280,11 @@ class ExecutionFailedEvent:
         symbol: str | None = None,
         metadata: dict[str, Any] | None = None,
     ) -> ExecutionFailedEvent:
+        if decision.account_id is None:
+            raise ValueError(
+                "ExecutionFailedEvent requires a RiskDecision " "with an account_id."
+            )
+
         return cls(
             decision_id=decision.decision_id,
             signal_id=decision.signal_id,

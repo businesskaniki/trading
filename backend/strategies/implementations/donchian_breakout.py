@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
-from strategies.core.base import BaseStrategy
+from app.market_data.models import MarketCandle
+
+from strategies.core.base import (
+    BaseStrategy,
+    StrategyConfig,
+    StrategyDefinition,
+)
 from strategies.core.context import StrategyContext
 from strategies.core.enums import (
     OrderType,
@@ -51,6 +57,22 @@ class DonchianBreakoutStrategy(BaseStrategy):
     Stop-loss and take-profit are calculated using ATR.
     """
 
+    definition = StrategyDefinition(
+        name="donchian_breakout",
+        version="1.0.0",
+        description=(
+            "Donchian Channel breakout strategy with "
+            "ATR-based stop-loss and take-profit."
+        ),
+        author="AQE",
+        tags=(
+            "breakout",
+            "donchian",
+            "trend",
+            "atr",
+        ),
+    )
+
     DEFAULT_PARAMETERS = {
         "donchian_period": 20,
         "atr_period": 14,
@@ -61,33 +83,54 @@ class DonchianBreakoutStrategy(BaseStrategy):
 
     def __init__(
         self,
-        config,
+        config: StrategyConfig,
         context: StrategyContext,
     ) -> None:
-        super().__init__(config, context)
+        super().__init__(
+            config=config,
+            context=context,
+        )
 
         parameters = {
             **self.DEFAULT_PARAMETERS,
             **config.parameters,
         }
 
-        self._donchian_period = int(parameters["donchian_period"])
-        self._atr_period = int(parameters["atr_period"])
-        self._stop_loss_atr = float(parameters["stop_loss_atr"])
-        self._take_profit_atr = float(parameters["take_profit_atr"])
-        self._confidence = float(parameters["confidence"])
+        self._donchian_period = int(
+            parameters["donchian_period"]
+        )
+        self._atr_period = int(
+            parameters["atr_period"]
+        )
+        self._stop_loss_atr = float(
+            parameters["stop_loss_atr"]
+        )
+        self._take_profit_atr = float(
+            parameters["take_profit_atr"]
+        )
+        self._confidence = float(
+            parameters["confidence"]
+        )
 
         if self._donchian_period <= 0:
-            raise ValueError("donchian_period must be greater than zero.")
+            raise ValueError(
+                "donchian_period must be greater than zero."
+            )
 
         if self._atr_period <= 0:
-            raise ValueError("atr_period must be greater than zero.")
+            raise ValueError(
+                "atr_period must be greater than zero."
+            )
 
         if self._stop_loss_atr <= 0:
-            raise ValueError("stop_loss_atr must be greater than zero.")
+            raise ValueError(
+                "stop_loss_atr must be greater than zero."
+            )
 
         if self._take_profit_atr <= 0:
-            raise ValueError("take_profit_atr must be greater than zero.")
+            raise ValueError(
+                "take_profit_atr must be greater than zero."
+            )
 
         self._states: dict[
             tuple[str, Timeframe],
@@ -96,9 +139,17 @@ class DonchianBreakoutStrategy(BaseStrategy):
 
     async def on_initialize(self) -> None:
         """Warm up the strategy using historical candles."""
+
         for symbol in self.symbols:
-            for timeframe in self.timeframes:
-                state = self._get_state(symbol, timeframe)
+            for timeframe_name in self.timeframes:
+                timeframe = Timeframe(
+                    timeframe_name.strip().upper()
+                )
+
+                state = self._get_state(
+                    symbol,
+                    timeframe,
+                )
 
                 candles = await self.context.get_candles(
                     symbol=symbol,
@@ -120,28 +171,44 @@ class DonchianBreakoutStrategy(BaseStrategy):
 
     async def on_start(self) -> None:
         """Start the strategy."""
+
         return None
 
     async def on_stop(self) -> None:
         """Stop the strategy."""
+
         return None
 
     async def on_shutdown(self) -> None:
         """Release strategy state."""
+
         self._states.clear()
 
     async def on_candle(
         self,
-        candle,
+        candle: MarketCandle,
     ) -> TradingSignal | None:
         """Process a completed candle."""
+
         symbol = candle.symbol
-        timeframe = Timeframe(candle.timeframe)
 
-        state = self._get_state(symbol, timeframe)
+        timeframe = Timeframe(
+            str(candle.timeframe).strip().upper()
+        )
 
-        previous_upper = self._channel_high(state)
-        previous_lower = self._channel_low(state)
+        state = self._get_state(
+            symbol,
+            timeframe,
+        )
+
+        # Determine the breakout channel from candles received before
+        # the current candle is added to the state.
+        previous_upper = self._channel_high(
+            state
+        )
+        previous_lower = self._channel_low(
+            state
+        )
 
         atr_value = self._update_state(
             state,
@@ -150,18 +217,23 @@ class DonchianBreakoutStrategy(BaseStrategy):
             candle.close,
         )
 
-        if previous_upper is None or previous_lower is None:
+        if (
+            previous_upper is None
+            or previous_lower is None
+        ):
             return None
 
         if atr_value <= 0:
             return None
 
-        timestamp = self._normalize_timestamp(candle.timestamp)
+        timestamp = candle.datetime
 
         if state.last_signal_timestamp == timestamp:
             return None
 
-        close = float(candle.close)
+        close = float(
+            candle.close
+        )
 
         direction: SignalDirection | None = None
         reason: str | None = None
@@ -183,18 +255,43 @@ class DonchianBreakoutStrategy(BaseStrategy):
         if direction is None:
             return None
 
-        entry_price = Decimal(str(candle.close))
-        atr = Decimal(str(atr_value))
+        entry_price = Decimal(
+            str(candle.close)
+        )
 
-        stop_distance = atr * Decimal(str(self._stop_loss_atr))
-        target_distance = atr * Decimal(str(self._take_profit_atr))
+        atr = Decimal(
+            str(atr_value)
+        )
+
+        stop_distance = (
+            atr
+            * Decimal(
+                str(self._stop_loss_atr)
+            )
+        )
+
+        target_distance = (
+            atr
+            * Decimal(
+                str(self._take_profit_atr)
+            )
+        )
 
         if direction is SignalDirection.LONG:
-            stop_loss = entry_price - stop_distance
-            take_profit = entry_price + target_distance
+            stop_loss = (
+                entry_price - stop_distance
+            )
+            take_profit = (
+                entry_price + target_distance
+            )
+
         else:
-            stop_loss = entry_price + stop_distance
-            take_profit = entry_price - target_distance
+            stop_loss = (
+                entry_price + stop_distance
+            )
+            take_profit = (
+                entry_price - target_distance
+            )
 
         state.last_signal_timestamp = timestamp
 
@@ -227,17 +324,30 @@ class DonchianBreakoutStrategy(BaseStrategy):
         symbol: str,
         timeframe: Timeframe,
     ) -> _IndicatorState:
-        """Get or create isolated state."""
-        key = (symbol, timeframe)
+        """Get or create isolated indicator state."""
 
-        state = self._states.get(key)
+        key = (
+            symbol,
+            timeframe,
+        )
+
+        state = self._states.get(
+            key
+        )
 
         if state is None:
             state = _IndicatorState(
-                highs=deque(maxlen=self._donchian_period),
-                lows=deque(maxlen=self._donchian_period),
-                atr=ATR(self._atr_period),
+                highs=deque(
+                    maxlen=self._donchian_period
+                ),
+                lows=deque(
+                    maxlen=self._donchian_period
+                ),
+                atr=ATR(
+                    self._atr_period
+                ),
             )
+
             self._states[key] = state
 
         return state
@@ -250,15 +360,24 @@ class DonchianBreakoutStrategy(BaseStrategy):
         close: float | Decimal,
     ) -> float:
         """Update channel and ATR state."""
+
         atr_value = state.atr.update(
             high=float(high),
             low=float(low),
             close=float(close),
         )
 
-        state.highs.append(float(high))
-        state.lows.append(float(low))
-        state.previous_close = float(close)
+        state.highs.append(
+            float(high)
+        )
+
+        state.lows.append(
+            float(low)
+        )
+
+        state.previous_close = float(
+            close
+        )
 
         return atr_value
 
@@ -267,27 +386,28 @@ class DonchianBreakoutStrategy(BaseStrategy):
         state: _IndicatorState,
     ) -> float | None:
         """Return the current stored upper channel."""
+
         if not state.highs:
             return None
 
-        return max(state.highs)
+        return max(
+            state.highs
+        )
 
     @staticmethod
     def _channel_low(
         state: _IndicatorState,
     ) -> float | None:
         """Return the current stored lower channel."""
+
         if not state.lows:
             return None
 
-        return min(state.lows)
+        return min(
+            state.lows
+        )
 
-    @staticmethod
-    def _normalize_timestamp(
-        timestamp: datetime,
-    ) -> datetime:
-        """Normalize timestamp to timezone-aware UTC."""
-        if timestamp.tzinfo is None:
-            return timestamp.replace(tzinfo=timezone.utc)
 
-        return timestamp.astimezone(timezone.utc)
+__all__ = [
+    "DonchianBreakoutStrategy",
+]

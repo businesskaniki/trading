@@ -7,12 +7,13 @@ from sqlalchemy import pool
 from app.core.config import settings
 from app.database.base import Base
 
-# Import every model so Alembic can detect them
+# Import every model so Alembic can detect them.
 from app.database.models.symbol import Symbol
 from app.database.models.trading_account import TradingAccount
 from app.database.models.order import Order
 from app.database.models.position import Position
 from app.database.models.trade import Trade
+from app.database.models.strategy_definition import StrategyDefinition
 from app.database.models.strategy_run import StrategyRun
 from app.database.models.performance import Performance
 from app.database.models.risk_snapshot import RiskSnapshot
@@ -21,7 +22,7 @@ from app.database.models.historical_candle import HistoricalCandle
 
 config = context.config
 
-# Override the placeholder URL from alembic.ini
+# Override the placeholder URL from alembic.ini.
 config.set_main_option(
     "sqlalchemy.url",
     settings.DATABASE_URL,
@@ -33,7 +34,9 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def run_migrations_offline():
+def run_migrations_offline() -> None:
+    """Run migrations in offline mode."""
+
     context.configure(
         url=settings.DATABASE_URL,
         target_metadata=target_metadata,
@@ -45,7 +48,9 @@ def run_migrations_offline():
         context.run_migrations()
 
 
-def run_migrations_online():
+def run_migrations_online() -> None:
+    """Run migrations in online mode."""
+
     connectable = engine_from_config(
         config.get_section(config.config_ini_section),
         prefix="sqlalchemy.",

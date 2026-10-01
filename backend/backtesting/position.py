@@ -1,3 +1,5 @@
+"""Position domain model for AQE backtesting."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -6,9 +8,13 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID, uuid4
 
+# ======================================================================
+# ENUMS
+# ======================================================================
+
 
 class BacktestPositionSide(StrEnum):
-    """Side of a simulated position."""
+    """Directional side of a simulated position."""
 
     LONG = "LONG"
     SHORT = "SHORT"
@@ -21,17 +27,54 @@ class BacktestPositionStatus(StrEnum):
     CLOSED = "CLOSED"
 
 
+# ======================================================================
+# POSITION
+# ======================================================================
+
+
 @dataclass(slots=True)
 class BacktestPosition:
     """
-    Represents a single simulated trading position.
+    Pure backtesting position domain object.
 
-    This is a pure backtesting domain object. It is deliberately
-    independent of database models and live broker models.
+    A BacktestPosition represents one simulated position belonging to
+    the shared account-level backtest portfolio.
+
+    The object deliberately has no dependency on:
+
+        - SQLAlchemy
+        - PostgreSQL
+        - Redis
+        - MT5
+        - broker position models
+        - strategy runtime classes
+        - RiskEngine
+
+    Strategy attribution is stored as simple identifiers so a shared
+    account-level backtest can report which strategy opened a position.
+
+    Accounting convention
+    ---------------------
+
+    ``realized_pnl`` is gross price P&L.
+
+    ``commission`` is the total commission paid over the complete
+    position lifecycle:
+
+        entry commission + exit commission
+
+    ``swap`` represents the accumulated financing/swap adjustment and
+    may be positive or negative.
+
+    Therefore:
+
+        net_realized_pnl =
+            realized_pnl - commission + swap
     """
 
     position_id: UUID
     account_id: UUID
+
     symbol: str
     side: BacktestPositionSide
 
@@ -50,11 +93,26 @@ class BacktestPosition:
     exit_price: Decimal | None = None
     closed_at: datetime | None = None
 
+    # Gross price P&L before transaction costs.
     realized_pnl: Decimal = Decimal("0")
+
+    # Total commission for the complete position lifecycle.
+    #
+    # This includes both:
+    #
+    #     entry commission
+    #     + exit commission
+    #
     commission: Decimal = Decimal("0")
+
+    # Accumulated swap/financing adjustment.
     swap: Decimal = Decimal("0")
 
     exit_reason: str | None = None
+
+    # ==================================================================
+    # FACTORY
+    # ==================================================================
 
     @classmethod
     def open(
@@ -70,41 +128,83 @@ class BacktestPosition:
         take_profit: Decimal | None = None,
         strategy_id: str | None = None,
         strategy_name: str | None = None,
+        entry_commission: Decimal = Decimal("0"),
     ) -> BacktestPosition:
         """
-        Create a new open simulated position.
+        Create a new OPEN simulated position.
+
+        ``entry_commission`` is recorded immediately because the
+        commission is incurred when the entry fill occurs.
+
+        The position's ``commission`` field therefore already contains
+        the entry cost while the position is OPEN. When the position is
+        subsequently closed, the exit commission is added to that
+        existing amount.
         """
 
-        if volume <= Decimal("0"):
-            raise ValueError("Position volume must be greater than zero.")
+        cls._validate_account_id(
+            account_id,
+        )
 
-        if entry_price <= Decimal("0"):
-            raise ValueError("Entry price must be greater than zero.")
+        normalized_symbol = cls._normalize_symbol(
+            symbol,
+        )
 
-        if stop_loss is not None and stop_loss <= Decimal("0"):
-            raise ValueError("Stop loss must be greater than zero.")
+        normalized_side = cls._validate_side(
+            side,
+        )
 
-        if take_profit is not None and take_profit <= Decimal("0"):
-            raise ValueError("Take profit must be greater than zero.")
+        normalized_volume = cls._validate_positive_decimal(
+            volume,
+            "Position volume",
+        )
 
-        timestamp = opened_at or datetime.now(timezone.utc)
+        normalized_entry_price = cls._validate_positive_decimal(
+            entry_price,
+            "Entry price",
+        )
 
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
+        normalized_stop_loss = cls._validate_optional_positive_decimal(
+            stop_loss,
+            "Stop loss",
+        )
+
+        normalized_take_profit = cls._validate_optional_positive_decimal(
+            take_profit,
+            "Take profit",
+        )
+
+        normalized_entry_commission = cls._validate_non_negative_decimal(
+            entry_commission,
+            "Entry commission",
+        )
+
+        timestamp = cls._normalize_timestamp(
+            opened_at if opened_at is not None else datetime.now(timezone.utc)
+        )
 
         return cls(
             position_id=uuid4(),
             account_id=account_id,
-            symbol=symbol.upper(),
-            side=side,
-            volume=volume,
-            entry_price=entry_price,
+            symbol=normalized_symbol,
+            side=normalized_side,
+            volume=normalized_volume,
+            entry_price=normalized_entry_price,
             opened_at=timestamp,
-            stop_loss=stop_loss,
-            take_profit=take_profit,
-            strategy_id=strategy_id,
-            strategy_name=strategy_name,
+            stop_loss=normalized_stop_loss,
+            take_profit=normalized_take_profit,
+            strategy_id=cls._normalize_strategy(
+                strategy_id,
+            ),
+            strategy_name=cls._normalize_strategy(
+                strategy_name,
+            ),
+            commission=normalized_entry_commission,
         )
+
+    # ==================================================================
+    # STATE
+    # ==================================================================
 
     @property
     def is_open(self) -> bool:
@@ -118,87 +218,173 @@ class BacktestPosition:
 
         return self.status == BacktestPositionStatus.CLOSED
 
+    # ==================================================================
+    # ACCOUNTING
+    # ==================================================================
+
+    @property
+    def net_realized_pnl(self) -> Decimal:
+        """
+        Return realized net P&L after commission and swap.
+
+        Convention:
+
+            net = gross realized P&L
+                  - total commission
+                  + swap
+
+        Commission is stored as a positive cost magnitude.
+
+        ``commission`` includes both entry and exit commission.
+        """
+
+        return self.realized_pnl - self.commission + self.swap
+
+    # ==================================================================
+    # UNREALIZED P&L
+    # ==================================================================
+
     def unrealized_pnl(
         self,
         current_price: Decimal,
         contract_size: Decimal = Decimal("1"),
     ) -> Decimal:
         """
-        Calculate unrealized P&L at the supplied market price.
+        Calculate current gross unrealized P&L.
 
-        The calculation is:
+        LONG:
 
-            LONG  = (current - entry) * volume * contract_size
-            SHORT = (entry - current) * volume * contract_size
+            (current_price - entry_price)
+                * volume
+                * contract_size
+
+        SHORT:
+
+            (entry_price - current_price)
+                * volume
+                * contract_size
         """
 
-        if current_price <= Decimal("0"):
-            raise ValueError("Current price must be greater than zero.")
+        current = self._validate_positive_decimal(
+            current_price,
+            "Current price",
+        )
 
-        if contract_size <= Decimal("0"):
-            raise ValueError("Contract size must be greater than zero.")
+        contract = self._validate_positive_decimal(
+            contract_size,
+            "Contract size",
+        )
 
         if self.side == BacktestPositionSide.LONG:
-            price_difference = current_price - self.entry_price
-        else:
-            price_difference = self.entry_price - current_price
+            price_difference = current - self.entry_price
 
-        return price_difference * self.volume * contract_size
+        elif self.side == BacktestPositionSide.SHORT:
+            price_difference = self.entry_price - current
+
+        else:
+            raise ValueError(f"Unsupported position side: {self.side!r}")
+
+        return price_difference * self.volume * contract
+
+    # ==================================================================
+    # CLOSE
+    # ==================================================================
 
     def close(
         self,
         *,
         exit_price: Decimal,
         closed_at: datetime | None = None,
-        reason: str | None = None,
+        exit_reason: str | None = None,
         contract_size: Decimal = Decimal("1"),
         commission: Decimal = Decimal("0"),
         swap: Decimal = Decimal("0"),
     ) -> Decimal:
         """
-        Close the position and calculate realized P&L.
+        Close the position and calculate gross realized P&L.
 
         Returns:
-            Realized gross P&L before commission and swap.
+            Gross realized price P&L before commission and swap.
+
+        Commission handling
+        -------------------
+
+        ``self.commission`` already contains any commission incurred
+        when the position was opened.
+
+        The commission supplied here represents the commission incurred
+        by the closing transaction.
+
+        Therefore the closing operation accumulates commission:
+
+            total_commission =
+                existing_commission + exit_commission
+
+        It does NOT replace the entry commission.
+
+        Swap is accumulated in the same manner so repeated accounting
+        adjustments cannot silently overwrite previously recorded swap.
         """
 
         if self.is_closed:
-            raise ValueError(
-                f"Position {self.position_id} is already closed."
-            )
+            raise ValueError(f"Position {self.position_id} is already closed.")
 
-        if exit_price <= Decimal("0"):
-            raise ValueError("Exit price must be greater than zero.")
-
-        if contract_size <= Decimal("0"):
-            raise ValueError("Contract size must be greater than zero.")
-
-        if commission < Decimal("0"):
-            raise ValueError("Commission cannot be negative.")
-
-        if swap < Decimal("0"):
-            raise ValueError("Swap cannot be negative.")
-
-        timestamp = closed_at or datetime.now(timezone.utc)
-
-        if timestamp.tzinfo is None:
-            timestamp = timestamp.replace(tzinfo=timezone.utc)
-
-        gross_pnl = self._calculate_pnl(
-            exit_price=exit_price,
-            contract_size=contract_size,
+        normalized_exit_price = self._validate_positive_decimal(
+            exit_price,
+            "Exit price",
         )
 
-        self.exit_price = exit_price
+        normalized_contract_size = self._validate_positive_decimal(
+            contract_size,
+            "Contract size",
+        )
+
+        normalized_commission = self._validate_non_negative_decimal(
+            commission,
+            "Commission",
+        )
+
+        normalized_swap = self._validate_decimal(
+            swap,
+            "Swap",
+        )
+
+        timestamp = self._normalize_timestamp(
+            closed_at if closed_at is not None else datetime.now(timezone.utc)
+        )
+
+        if timestamp < self.opened_at:
+            raise ValueError("Position closed_at cannot be before opened_at.")
+
+        gross_pnl = self._calculate_pnl(
+            exit_price=normalized_exit_price,
+            contract_size=normalized_contract_size,
+        )
+
+        self.exit_price = normalized_exit_price
         self.closed_at = timestamp
         self.status = BacktestPositionStatus.CLOSED
 
         self.realized_pnl = gross_pnl
-        self.commission = commission
-        self.swap = swap
-        self.exit_reason = reason
+
+        # IMPORTANT:
+        #
+        # The position may already contain entry commission.
+        # Closing adds exit commission rather than replacing it.
+        self.commission += normalized_commission
+
+        # Swap is accumulated rather than overwritten.
+        self.swap += normalized_swap
+
+        self.exit_reason = self._normalize_exit_reason(
+            exit_reason,
+        )
 
         return gross_pnl
+
+    # ==================================================================
+    # P&L
+    # ==================================================================
 
     def _calculate_pnl(
         self,
@@ -206,30 +392,318 @@ class BacktestPosition:
         exit_price: Decimal,
         contract_size: Decimal,
     ) -> Decimal:
-        """Calculate gross realized P&L."""
+        """Calculate gross realized price P&L."""
 
         if self.side == BacktestPositionSide.LONG:
             price_difference = exit_price - self.entry_price
-        else:
+
+        elif self.side == BacktestPositionSide.SHORT:
             price_difference = self.entry_price - exit_price
+
+        else:
+            raise ValueError(f"Unsupported position side: {self.side!r}")
 
         return price_difference * self.volume * contract_size
 
+    # ==================================================================
+    # DIRECT-CONSTRUCTION VALIDATION
+    # ==================================================================
+
     def __post_init__(self) -> None:
-        """Normalize and validate directly constructed positions."""
+        """
+        Normalize and validate directly constructed positions.
 
-        self.symbol = self.symbol.strip().upper()
+        Most callers should prefer BacktestPosition.open(), but the
+        dataclass remains safe when instantiated directly.
+        """
 
-        if not self.symbol:
+        self._validate_account_id(
+            self.account_id,
+        )
+
+        self.symbol = self._normalize_symbol(
+            self.symbol,
+        )
+
+        self.side = self._validate_side(
+            self.side,
+        )
+
+        self.volume = self._validate_positive_decimal(
+            self.volume,
+            "Position volume",
+        )
+
+        self.entry_price = self._validate_positive_decimal(
+            self.entry_price,
+            "Entry price",
+        )
+
+        self.opened_at = self._normalize_timestamp(
+            self.opened_at,
+        )
+
+        self.stop_loss = self._validate_optional_positive_decimal(
+            self.stop_loss,
+            "Stop loss",
+        )
+
+        self.take_profit = self._validate_optional_positive_decimal(
+            self.take_profit,
+            "Take profit",
+        )
+
+        if self.exit_price is not None:
+            self.exit_price = self._validate_positive_decimal(
+                self.exit_price,
+                "Exit price",
+            )
+
+        if self.closed_at is not None:
+            self.closed_at = self._normalize_timestamp(
+                self.closed_at,
+            )
+
+            if self.closed_at < self.opened_at:
+                raise ValueError("closed_at cannot be before opened_at.")
+
+        if not isinstance(
+            self.status,
+            BacktestPositionStatus,
+        ):
+            try:
+                self.status = BacktestPositionStatus(
+                    str(self.status).strip().upper(),
+                )
+
+            except ValueError as exc:
+                raise ValueError(f"Invalid position status: {self.status!r}") from exc
+
+        self.realized_pnl = self._validate_decimal(
+            self.realized_pnl,
+            "Realized P&L",
+        )
+
+        self.commission = self._validate_non_negative_decimal(
+            self.commission,
+            "Commission",
+        )
+
+        self.swap = self._validate_decimal(
+            self.swap,
+            "Swap",
+        )
+
+        self.strategy_id = self._normalize_strategy(
+            self.strategy_id,
+        )
+
+        self.strategy_name = self._normalize_strategy(
+            self.strategy_name,
+        )
+
+        self.exit_reason = self._normalize_exit_reason(
+            self.exit_reason,
+        )
+
+        # --------------------------------------------------------------
+        # OPEN STATE
+        # --------------------------------------------------------------
+
+        if self.status == BacktestPositionStatus.OPEN:
+            if self.exit_price is not None:
+                raise ValueError("An OPEN position cannot have an exit_price.")
+
+            if self.closed_at is not None:
+                raise ValueError("An OPEN position cannot have closed_at.")
+
+            if self.exit_reason is not None:
+                raise ValueError("An OPEN position cannot have an exit_reason.")
+
+            if self.realized_pnl != Decimal("0"):
+                raise ValueError("An OPEN position cannot have realized P&L.")
+
+        # --------------------------------------------------------------
+        # CLOSED STATE
+        # --------------------------------------------------------------
+
+        if self.status == BacktestPositionStatus.CLOSED:
+            if self.exit_price is None:
+                raise ValueError("A CLOSED position must have an exit_price.")
+
+            if self.closed_at is None:
+                raise ValueError("A CLOSED position must have closed_at.")
+
+    # ==================================================================
+    # VALIDATION HELPERS
+    # ==================================================================
+
+    @staticmethod
+    def _validate_account_id(
+        account_id: UUID,
+    ) -> None:
+        if not isinstance(
+            account_id,
+            UUID,
+        ):
+            raise ValueError("account_id must be a UUID.")
+
+    @staticmethod
+    def _normalize_symbol(
+        symbol: str,
+    ) -> str:
+        if not isinstance(
+            symbol,
+            str,
+        ):
+            raise ValueError("Position symbol must be a string.")
+
+        normalized = symbol.strip().upper()
+
+        if not normalized:
             raise ValueError("Position symbol cannot be empty.")
 
-        if self.volume <= Decimal("0"):
-            raise ValueError("Position volume must be greater than zero.")
+        return normalized
 
-        if self.entry_price <= Decimal("0"):
-            raise ValueError("Entry price must be greater than zero.")
+    @staticmethod
+    def _validate_side(
+        side: BacktestPositionSide,
+    ) -> BacktestPositionSide:
+        if isinstance(
+            side,
+            BacktestPositionSide,
+        ):
+            return side
 
-        if self.opened_at.tzinfo is None:
-            self.opened_at = self.opened_at.replace(
-                tzinfo=timezone.utc
+        try:
+            return BacktestPositionSide(
+                str(side).strip().upper(),
             )
+
+        except ValueError as exc:
+            raise ValueError(f"Invalid position side: {side!r}") from exc
+
+    @staticmethod
+    def _validate_positive_decimal(
+        value: Decimal,
+        field_name: str,
+    ) -> Decimal:
+        normalized = BacktestPosition._validate_decimal(
+            value,
+            field_name,
+        )
+
+        if normalized <= Decimal("0"):
+            raise ValueError(f"{field_name} must be greater than zero.")
+
+        return normalized
+
+    @staticmethod
+    def _validate_non_negative_decimal(
+        value: Decimal,
+        field_name: str,
+    ) -> Decimal:
+        normalized = BacktestPosition._validate_decimal(
+            value,
+            field_name,
+        )
+
+        if normalized < Decimal("0"):
+            raise ValueError(f"{field_name} cannot be negative.")
+
+        return normalized
+
+    @staticmethod
+    def _validate_decimal(
+        value: Decimal,
+        field_name: str,
+    ) -> Decimal:
+        if value is None:
+            raise ValueError(f"{field_name} cannot be None.")
+
+        if isinstance(
+            value,
+            Decimal,
+        ):
+            normalized = value
+
+        else:
+            try:
+                normalized = Decimal(
+                    str(value),
+                )
+
+            except Exception as exc:
+                raise ValueError(f"{field_name} must be a valid decimal.") from exc
+
+        if not normalized.is_finite():
+            raise ValueError(f"{field_name} must be finite.")
+
+        return normalized
+
+    @classmethod
+    def _validate_optional_positive_decimal(
+        cls,
+        value: Decimal | None,
+        field_name: str,
+    ) -> Decimal | None:
+        if value is None:
+            return None
+
+        return cls._validate_positive_decimal(
+            value,
+            field_name,
+        )
+
+    @staticmethod
+    def _normalize_timestamp(
+        value: datetime,
+    ) -> datetime:
+        if not isinstance(
+            value,
+            datetime,
+        ):
+            raise ValueError("Position timestamp must be a datetime.")
+
+        if value.tzinfo is None:
+            return value.replace(
+                tzinfo=timezone.utc,
+            )
+
+        return value.astimezone(
+            timezone.utc,
+        )
+
+    @staticmethod
+    def _normalize_strategy(
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            raise ValueError("Strategy identifier/name must be a string.")
+
+        normalized = value.strip()
+
+        return normalized or None
+
+    @staticmethod
+    def _normalize_exit_reason(
+        value: str | None,
+    ) -> str | None:
+        if value is None:
+            return None
+
+        if not isinstance(
+            value,
+            str,
+        ):
+            raise ValueError("Exit reason must be a string.")
+
+        normalized = value.strip().upper()
+
+        return normalized or None

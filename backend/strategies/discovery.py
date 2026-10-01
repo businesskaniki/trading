@@ -12,17 +12,28 @@ from .core import StrategyRegistry, registry
 logger = logging.getLogger(__name__)
 
 
+# ======================================================================
+# PRODUCTION STRATEGY MODULES
+# ======================================================================
+
+DEFAULT_STRATEGY_MODULES: tuple[str, ...] = (
+    "strategies.implementations.bollinger_reversion",
+    "strategies.implementations.donchian_breakout",
+    "strategies.implementations.ema_trend",
+    "strategies.implementations.macd_trend",
+    "strategies.implementations.rsi_reversal",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class StrategyDiscoveryResult:
     """
     Result produced by the strategy discovery process.
 
-    Attributes:
-        imported_modules:
-            Modules successfully imported.
+    Discovery reports implementation modules that were successfully
+    imported and strategy names that are currently registered.
 
-        registered_strategies:
-            Strategy names available in the registry after discovery.
+    Discovery does not activate or instantiate strategies.
     """
 
     imported_modules: tuple[str, ...]
@@ -43,18 +54,27 @@ class StrategyDiscoveryResult:
 
 class StrategyDiscovery:
     """
-    Discover and import AQE strategy modules.
+    Discover and import AQE strategy implementations.
 
-    Discovery is responsible only for loading strategy definitions.
+    Discovery is responsible only for loading strategy classes and
+    allowing their registration decorators to register them with the
+    StrategyRegistry.
 
-    It does not:
+    Discovery does NOT:
+
         - create strategy instances
+        - initialize strategies
+        - activate strategies
         - start strategies
         - subscribe to market data
         - consume Redis
         - communicate with brokers
+        - perform risk checks
         - execute orders
         - publish trading signals
+
+    The runtime StrategyManager is responsible for creating and
+    controlling strategy instances.
     """
 
     def __init__(
@@ -68,37 +88,63 @@ class StrategyDiscovery:
 
         Args:
             strategy_registry:
-                Registry that receives discovered strategies.
+                Registry that receives discovered strategy classes.
+
+                When omitted, the global AQE registry is used.
 
             modules:
-                Optional explicit list of strategy modules.
+                Optional explicit collection of modules to import.
 
-                When supplied, only these modules are imported.
+                When omitted, the five production AQE strategies defined
+                in DEFAULT_STRATEGY_MODULES are imported.
         """
 
-        self._registry = strategy_registry or registry
-        self._modules = tuple(modules or ())
+        self._registry = (
+            strategy_registry if strategy_registry is not None else registry
+        )
+
+        if modules is None:
+            self._modules = DEFAULT_STRATEGY_MODULES
+        else:
+            self._modules = self._normalize_modules(modules)
+
         self._imported_modules: set[str] = set()
+
+    # ==================================================================
+    # PROPERTIES
+    # ==================================================================
 
     @property
     def registry(self) -> StrategyRegistry:
-        """Return the registry used by discovery."""
+        """Return the registry used by this discovery instance."""
 
         return self._registry
 
     @property
+    def modules(self) -> tuple[str, ...]:
+        """Return the configured strategy modules."""
+
+        return self._modules
+
+    @property
     def imported_modules(self) -> tuple[str, ...]:
-        """Return successfully imported modules."""
+        """Return successfully imported modules in deterministic order."""
 
         return tuple(sorted(self._imported_modules))
 
+    # ==================================================================
+    # DISCOVERY
+    # ==================================================================
+
     def discover(self) -> StrategyDiscoveryResult:
         """
-        Import configured strategy modules.
+        Import all configured strategy modules.
 
-        Importing a strategy module executes its registration
-        decorator, making the strategy class available through
-        the StrategyRegistry.
+        Importing each implementation module executes its
+        ``@register_strategy`` decorator, causing the strategy class to
+        become available through the StrategyRegistry.
+
+        No strategy instance is created.
         """
 
         imported: list[str] = []
@@ -109,18 +155,21 @@ class StrategyDiscovery:
 
             self._import_module(module_name)
 
-            imported.append(module_name)
             self._imported_modules.add(module_name)
+            imported.append(module_name)
 
-        strategies = tuple(
-            sorted(self._registry.names())
-        )
+        strategies = tuple(sorted(self._registry.names()))
 
         logger.info(
             "Strategy discovery completed: "
-            "modules=%d strategies=%d",
+            "modules_imported=%d strategies_registered=%d",
             len(imported),
             len(strategies),
+        )
+
+        logger.debug(
+            "Discovered strategy implementations: %s",
+            strategies,
         )
 
         return StrategyDiscoveryResult(
@@ -135,31 +184,93 @@ class StrategyDiscovery:
         """
         Import one strategy module.
 
-        This is useful for dynamically loading a strategy without
-        rebuilding the entire discovery configuration.
+        This is useful for explicit dynamic discovery and testing.
+
+        The imported module may register one or more strategy classes
+        through the global or supplied StrategyRegistry.
         """
 
-        if module_name not in self._imported_modules:
-            self._import_module(module_name)
-            self._imported_modules.add(module_name)
+        normalized_module = self._normalize_module_name(
+            module_name,
+        )
+
+        if normalized_module not in self._imported_modules:
+            self._import_module(normalized_module)
+            self._imported_modules.add(normalized_module)
 
         return StrategyDiscoveryResult(
             imported_modules=self.imported_modules,
-            registered_strategies=tuple(
-                sorted(self._registry.names())
-            ),
+            registered_strategies=tuple(sorted(self._registry.names())),
         )
+
+    # ==================================================================
+    # VALIDATION
+    # ==================================================================
+
+    @staticmethod
+    def _normalize_module_name(
+        module_name: str,
+    ) -> str:
+        """Normalize and validate a Python module name."""
+
+        if not isinstance(module_name, str):
+            raise TypeError("Strategy module name must be a string.")
+
+        normalized = module_name.strip()
+
+        if not normalized:
+            raise ValueError("Strategy module name cannot be empty.")
+
+        return normalized
+
+    @classmethod
+    def _normalize_modules(
+        cls,
+        modules: Iterable[str],
+    ) -> tuple[str, ...]:
+        """
+        Normalize an explicit module collection.
+
+        Duplicate module names are removed while preserving the first
+        occurrence.
+        """
+
+        normalized_modules: list[str] = []
+        seen: set[str] = set()
+
+        for module_name in modules:
+            normalized = cls._normalize_module_name(
+                module_name,
+            )
+
+            if normalized in seen:
+                continue
+
+            seen.add(normalized)
+            normalized_modules.append(normalized)
+
+        return tuple(normalized_modules)
+
+    # ==================================================================
+    # IMPORT
+    # ==================================================================
 
     def _import_module(
         self,
         module_name: str,
     ) -> None:
-        """Import a strategy module and provide a useful failure."""
+        """
+        Import a strategy implementation module.
 
-        if not module_name.strip():
-            raise ValueError(
-                "Strategy module name cannot be empty."
-            )
+        Import failures are allowed to propagate after being logged so
+        that application startup or an explicit discovery operation
+        cannot silently continue with a partially discovered strategy
+        universe.
+        """
+
+        module_name = self._normalize_module_name(
+            module_name,
+        )
 
         logger.debug(
             "Loading strategy module: %s",
@@ -175,3 +286,35 @@ class StrategyDiscovery:
                 module_name,
             )
             raise
+
+        logger.debug(
+            "Strategy module loaded successfully: %s",
+            module_name,
+        )
+
+
+# ======================================================================
+# BOOTSTRAP HELPER
+# ======================================================================
+
+
+def discover_strategies(
+    *,
+    strategy_registry: StrategyRegistry | None = None,
+    modules: Iterable[str] | None = None,
+) -> StrategyDiscoveryResult:
+    """
+    Discover the configured AQE strategy implementations.
+
+    This is a convenience function for application bootstrap.
+
+    It imports strategy modules and registers their classes, but does
+    not create, initialize, activate, or start any strategy instance.
+    """
+
+    discovery = StrategyDiscovery(
+        strategy_registry=strategy_registry,
+        modules=modules,
+    )
+
+    return discovery.discover()

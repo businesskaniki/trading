@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Protocol
 
-from app.events import event_bus
+from app.events import EventBus, event_bus
 from app.events.strategy import StrategySignalEvent
 
 from ..core.signal import TradingSignal
@@ -15,30 +15,73 @@ logger = logging.getLogger(__name__)
 
 class SignalPublisher(Protocol):
     """
-    Convert a TradingSignal into a StrategySignalEvent.
+    Protocol for strategy signal delivery.
 
-    Implementations decide whether the resulting event is delivered
-    to the global runtime event bus or returned directly to the caller.
+    A publisher receives a strategy-generated TradingSignal and converts
+    it into a StrategySignalEvent.
+
+    The publisher does not:
+
+        - perform risk checks
+        - calculate position size
+        - create execution orders
+        - communicate with brokers
+        - place orders
+
+    Those responsibilities belong to downstream AQE components.
     """
 
     async def publish(
         self,
         signal: TradingSignal,
     ) -> StrategySignalEvent:
-        """Create and deliver a strategy signal event."""
+        """
+        Convert and deliver a TradingSignal.
+
+        Returns:
+            The resulting StrategySignalEvent.
+        """
         ...
 
 
 class StrategySignalPublisher:
     """
-    Publish strategy signals to the AQE EventBus.
+    Publish LIVE/PAPER strategy signals to the AQE EventBus.
 
-    This is the live/paper runtime publisher. It is intentionally
-    independent from strategy implementation code.
+    This class forms the boundary between:
+
+        Strategy Engine
+              │
+              ▼
+        TradingSignal
+              │
+              ▼
+        StrategySignalEvent
+              │
+              ▼
+          EventBus
+              │
+              ▼
+          Risk Engine
+
+    The publisher does not perform any trading decision after receiving
+    the TradingSignal.
     """
 
-    def __init__(self, *, bus=None) -> None:
-        self._event_bus = bus or event_bus
+    def __init__(
+        self,
+        *,
+        bus: EventBus | None = None,
+    ) -> None:
+        """Initialize the signal publisher."""
+
+        self._event_bus = bus if bus is not None else event_bus
+
+    @property
+    def event_bus(self) -> EventBus:
+        """Return the EventBus used for signal delivery."""
+
+        return self._event_bus
 
     async def publish(
         self,
@@ -46,7 +89,16 @@ class StrategySignalPublisher:
     ) -> StrategySignalEvent:
         """
         Convert a TradingSignal into a StrategySignalEvent and publish it.
+
+        The resulting event is delivered to the shared AQE EventBus.
+
+        Downstream consumers such as the Risk Engine are responsible for
+        deciding what happens to the signal.
         """
+
+        self._validate_signal(
+            signal,
+        )
 
         event = StrategySignalEvent.create(
             signal=signal,
@@ -58,24 +110,60 @@ class StrategySignalPublisher:
 
         logger.info(
             "Strategy signal published: "
-            "signal_id=%s strategy_id=%s symbol=%s direction=%s",
+            "signal_id=%s strategy_id=%s "
+            "symbol=%s direction=%s signal_type=%s",
             signal.signal_id,
             signal.strategy_id,
             signal.symbol,
             signal.direction.value,
+            signal.signal_type.value,
         )
 
         return event
 
+    @staticmethod
+    def _validate_signal(
+        signal: TradingSignal,
+    ) -> None:
+        """Validate the publisher input."""
+
+        if not isinstance(
+            signal,
+            TradingSignal,
+        ):
+            raise TypeError(
+                "StrategySignalPublisher expects a " "TradingSignal instance."
+            )
+
 
 class BacktestSignalPublisher:
     """
-    Convert strategy signals into StrategySignalEvents without publishing
-    them to the global EventBus.
+    Create StrategySignalEvents without publishing them to EventBus.
 
-    Backtests consume the returned events directly through the
-    BacktestOrchestrator. This prevents simulated strategy signals from
-    entering the live SignalRiskExecutionPipeline.
+    Backtests consume the returned events directly.
+
+    This isolation is intentional:
+
+        BACKTEST
+            Strategy
+               │
+               ▼
+         TradingSignal
+               │
+               ▼
+      StrategySignalEvent
+               │
+               ▼
+        BacktestOrchestrator
+               │
+               ▼
+          Risk Engine
+               │
+               ▼
+       Backtest Execution
+
+    A simulated backtest signal must never accidentally enter the
+    LIVE/PAPER EventBus and reach the live trading pipeline.
     """
 
     async def publish(
@@ -84,7 +172,14 @@ class BacktestSignalPublisher:
     ) -> StrategySignalEvent:
         """
         Create a StrategySignalEvent without external delivery.
+
+        Returns:
+            The event for direct consumption by the backtest runtime.
         """
+
+        self._validate_signal(
+            signal,
+        )
 
         event = StrategySignalEvent.create(
             signal=signal,
@@ -92,14 +187,30 @@ class BacktestSignalPublisher:
 
         logger.debug(
             "Backtest strategy signal created: "
-            "signal_id=%s strategy_id=%s symbol=%s direction=%s",
+            "signal_id=%s strategy_id=%s "
+            "symbol=%s direction=%s signal_type=%s",
             signal.signal_id,
             signal.strategy_id,
             signal.symbol,
             signal.direction.value,
+            signal.signal_type.value,
         )
 
         return event
+
+    @staticmethod
+    def _validate_signal(
+        signal: TradingSignal,
+    ) -> None:
+        """Validate the publisher input."""
+
+        if not isinstance(
+            signal,
+            TradingSignal,
+        ):
+            raise TypeError(
+                "BacktestSignalPublisher expects a " "TradingSignal instance."
+            )
 
 
 strategy_signal_publisher = StrategySignalPublisher()

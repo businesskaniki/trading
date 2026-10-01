@@ -1,13 +1,17 @@
-
 """MACD trend-following strategy with ATR-based risk management."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
-from strategies.core.base import BaseStrategy
+from app.market_data.models import MarketCandle
+from strategies.core.base import (
+    BaseStrategy,
+    StrategyConfig,
+    StrategyDefinition,
+)
 from strategies.core.context import StrategyContext
 from strategies.core.enums import (
     OrderType,
@@ -45,6 +49,22 @@ class MACDTrendStrategy(BaseStrategy):
     Stop-loss and take-profit are calculated using ATR.
     """
 
+    definition = StrategyDefinition(
+        name="macd_trend",
+        version="1.0.0",
+        description=(
+            "MACD trend-following strategy with "
+            "ATR-based stop-loss and take-profit."
+        ),
+        author="AQE",
+        tags=(
+            "trend",
+            "macd",
+            "atr",
+            "crossover",
+        ),
+    )
+
     DEFAULT_PARAMETERS = {
         "fast_period": 12,
         "slow_period": 26,
@@ -57,20 +77,31 @@ class MACDTrendStrategy(BaseStrategy):
 
     def __init__(
         self,
-        config,
+        config: StrategyConfig,
         context: StrategyContext,
     ) -> None:
-        super().__init__(config, context)
+        super().__init__(
+            config=config,
+            context=context,
+        )
 
         parameters = {
             **self.DEFAULT_PARAMETERS,
             **config.parameters,
         }
 
-        self._fast_period = int(parameters["fast_period"])
-        self._slow_period = int(parameters["slow_period"])
-        self._signal_period = int(parameters["signal_period"])
-        self._atr_period = int(parameters["atr_period"])
+        self._fast_period = int(
+            parameters["fast_period"]
+        )
+        self._slow_period = int(
+            parameters["slow_period"]
+        )
+        self._signal_period = int(
+            parameters["signal_period"]
+        )
+        self._atr_period = int(
+            parameters["atr_period"]
+        )
 
         self._stop_loss_atr = float(
             parameters["stop_loss_atr"]
@@ -89,9 +120,17 @@ class MACDTrendStrategy(BaseStrategy):
 
     async def on_initialize(self) -> None:
         """Warm up indicators using historical candles."""
+
         for symbol in self.symbols:
-            for timeframe in self.timeframes:
-                state = self._get_state(symbol, timeframe)
+            for timeframe_name in self.timeframes:
+                timeframe = Timeframe(
+                    timeframe_name.strip().upper()
+                )
+
+                state = self._get_state(
+                    symbol,
+                    timeframe,
+                )
 
                 candles = await self.context.get_candles(
                     symbol=symbol,
@@ -114,25 +153,35 @@ class MACDTrendStrategy(BaseStrategy):
 
     async def on_start(self) -> None:
         """Start the strategy."""
+
         return None
 
     async def on_stop(self) -> None:
         """Stop the strategy."""
+
         return None
 
     async def on_shutdown(self) -> None:
         """Release indicator state."""
+
         self._states.clear()
 
     async def on_candle(
         self,
-        candle,
+        candle: MarketCandle,
     ) -> TradingSignal | None:
         """Process a completed candle."""
-        symbol = candle.symbol
-        timeframe = Timeframe(candle.timeframe)
 
-        state = self._get_state(symbol, timeframe)
+        symbol = candle.symbol
+
+        timeframe = Timeframe(
+            str(candle.timeframe).strip().upper()
+        )
+
+        state = self._get_state(
+            symbol,
+            timeframe,
+        )
 
         macd_value, atr_value = self._update_indicators(
             state,
@@ -147,15 +196,16 @@ class MACDTrendStrategy(BaseStrategy):
         state.previous_macd = macd_value.macd
         state.previous_signal = macd_value.signal
 
-        if previous_macd is None or previous_signal is None:
+        if (
+            previous_macd is None
+            or previous_signal is None
+        ):
             return None
 
         if atr_value <= 0:
             return None
 
-        timestamp = self._normalize_timestamp(
-            candle.timestamp
-        )
+        timestamp = candle.datetime
 
         if state.last_signal_timestamp == timestamp:
             return None
@@ -186,22 +236,43 @@ class MACDTrendStrategy(BaseStrategy):
         if direction is None:
             return None
 
-        entry_price = Decimal(str(candle.close))
-        atr = Decimal(str(atr_value))
+        entry_price = Decimal(
+            str(candle.close)
+        )
+
+        atr = Decimal(
+            str(atr_value)
+        )
 
         stop_distance = (
-            atr * Decimal(str(self._stop_loss_atr))
+            atr
+            * Decimal(
+                str(self._stop_loss_atr)
+            )
         )
+
         target_distance = (
-            atr * Decimal(str(self._take_profit_atr))
+            atr
+            * Decimal(
+                str(self._take_profit_atr)
+            )
         )
 
         if direction is SignalDirection.LONG:
-            stop_loss = entry_price - stop_distance
-            take_profit = entry_price + target_distance
+            stop_loss = (
+                entry_price - stop_distance
+            )
+            take_profit = (
+                entry_price + target_distance
+            )
+
         else:
-            stop_loss = entry_price + stop_distance
-            take_profit = entry_price - target_distance
+            stop_loss = (
+                entry_price + stop_distance
+            )
+            take_profit = (
+                entry_price - target_distance
+            )
 
         state.last_signal_timestamp = timestamp
 
@@ -220,6 +291,7 @@ class MACDTrendStrategy(BaseStrategy):
             confidence=self._confidence,
             reason=reason,
             metadata={
+                "strategy_mode": self.mode.value,
                 "macd": macd_value.macd,
                 "signal": macd_value.signal,
                 "histogram": macd_value.histogram,
@@ -240,9 +312,15 @@ class MACDTrendStrategy(BaseStrategy):
         timeframe: Timeframe,
     ) -> _IndicatorState:
         """Get or create isolated indicator state."""
-        key = (symbol, timeframe)
 
-        state = self._states.get(key)
+        key = (
+            symbol,
+            timeframe,
+        )
+
+        state = self._states.get(
+            key
+        )
 
         if state is None:
             state = _IndicatorState(
@@ -251,8 +329,11 @@ class MACDTrendStrategy(BaseStrategy):
                     slow_period=self._slow_period,
                     signal_period=self._signal_period,
                 ),
-                atr=ATR(self._atr_period),
+                atr=ATR(
+                    self._atr_period
+                ),
             )
+
             self._states[key] = state
 
         return state
@@ -265,7 +346,10 @@ class MACDTrendStrategy(BaseStrategy):
         close: float | Decimal,
     ):
         """Update MACD and ATR from one candle."""
-        macd_value = state.macd.update(float(close))
+
+        macd_value = state.macd.update(
+            float(close)
+        )
 
         atr_value = state.atr.update(
             high=float(high),
@@ -273,14 +357,12 @@ class MACDTrendStrategy(BaseStrategy):
             close=float(close),
         )
 
-        return macd_value, atr_value
+        return (
+            macd_value,
+            atr_value,
+        )
 
-    @staticmethod
-    def _normalize_timestamp(
-        timestamp: datetime,
-    ) -> datetime:
-        """Normalize timestamp to timezone-aware UTC."""
-        if timestamp.tzinfo is None:
-            return timestamp.replace(tzinfo=timezone.utc)
 
-        return timestamp.astimezone(timezone.utc)
+__all__ = [
+    "MACDTrendStrategy",
+]

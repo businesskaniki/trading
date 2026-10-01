@@ -3,10 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
-from strategies.core.base import BaseStrategy
+from app.market_data.models import MarketCandle
+from strategies.core.base import (
+    BaseStrategy,
+    StrategyConfig,
+    StrategyDefinition,
+)
 from strategies.core.context import StrategyContext
 from strategies.core.enums import (
     OrderType,
@@ -47,6 +52,21 @@ class BollingerReversionStrategy(BaseStrategy):
     Stop-loss and take-profit are calculated using ATR.
     """
 
+    definition = StrategyDefinition(
+        name="bollinger_reversion",
+        version="1.0.0",
+        description=(
+            "Bollinger Band mean-reversion strategy with "
+            "ATR-based stop-loss and take-profit."
+        ),
+        author="AQE",
+        tags=(
+            "mean-reversion",
+            "bollinger",
+            "atr",
+        ),
+    )
+
     DEFAULT_PARAMETERS = {
         "bollinger_period": 20,
         "bollinger_deviation": 2.0,
@@ -58,10 +78,13 @@ class BollingerReversionStrategy(BaseStrategy):
 
     def __init__(
         self,
-        config,
+        config: StrategyConfig,
         context: StrategyContext,
     ) -> None:
-        super().__init__(config, context)
+        super().__init__(
+            config=config,
+            context=context,
+        )
 
         parameters = {
             **self.DEFAULT_PARAMETERS,
@@ -82,13 +105,17 @@ class BollingerReversionStrategy(BaseStrategy):
 
     async def on_initialize(self) -> None:
         """Warm up indicators using historical candles."""
+
         for symbol in self.symbols:
             for timeframe in self.timeframes:
-                state = self._get_state(symbol, timeframe)
+                state = self._get_state(
+                    symbol,
+                    Timeframe(timeframe),
+                )
 
                 candles = await self.context.get_candles(
                     symbol=symbol,
-                    timeframe=timeframe.value,
+                    timeframe=timeframe,
                     count=max(
                         self._bollinger_period * 3,
                         self._atr_period * 3,
@@ -106,25 +133,34 @@ class BollingerReversionStrategy(BaseStrategy):
 
     async def on_start(self) -> None:
         """Start the strategy."""
+
         return None
 
     async def on_stop(self) -> None:
         """Stop the strategy."""
+
         return None
 
     async def on_shutdown(self) -> None:
         """Release indicator state."""
+
         self._states.clear()
 
     async def on_candle(
         self,
-        candle,
+        candle: MarketCandle,
     ) -> TradingSignal | None:
         """Process a completed candle."""
-        symbol = candle.symbol
-        timeframe = Timeframe(candle.timeframe)
 
-        state = self._get_state(symbol, timeframe)
+        symbol = candle.symbol
+        timeframe = Timeframe(
+            str(candle.timeframe).strip().upper()
+        )
+
+        state = self._get_state(
+            symbol,
+            timeframe,
+        )
 
         bands, atr_value = self._update_indicators(
             state,
@@ -141,13 +177,19 @@ class BollingerReversionStrategy(BaseStrategy):
         state.previous_upper = bands.upper
         state.previous_lower = bands.lower
 
-        if previous_close is None or previous_upper is None or previous_lower is None:
+        if (
+            previous_close is None
+            or previous_upper is None
+            or previous_lower is None
+        ):
             return None
 
         if atr_value <= 0:
             return None
 
-        timestamp = self._normalize_timestamp(candle.timestamp)
+        # MarketCandle.timestamp is Unix seconds.
+        # MarketCandle.datetime provides the normalized UTC datetime.
+        timestamp = candle.datetime
 
         if state.last_signal_timestamp == timestamp:
             return None
@@ -159,28 +201,41 @@ class BollingerReversionStrategy(BaseStrategy):
 
         # Price was below the lower band and has
         # returned inside the bands.
-        if previous_close <= previous_lower and current_close > bands.lower:
+        if (
+            previous_close <= previous_lower
+            and current_close > bands.lower
+        ):
             direction = SignalDirection.LONG
-            reason = "Price reverted above the lower " "Bollinger Band"
+            reason = "Price reverted above the lower Bollinger Band"
 
         # Price was above the upper band and has
         # returned inside the bands.
-        elif previous_close >= previous_upper and current_close < bands.upper:
+        elif (
+            previous_close >= previous_upper
+            and current_close < bands.upper
+        ):
             direction = SignalDirection.SHORT
-            reason = "Price reverted below the upper " "Bollinger Band"
+            reason = "Price reverted below the upper Bollinger Band"
 
         if direction is None:
             return None
 
         entry_price = Decimal(str(candle.close))
+
         atr = Decimal(str(atr_value))
 
-        stop_distance = atr * Decimal(str(self._stop_loss_atr))
-        target_distance = atr * Decimal(str(self._take_profit_atr))
+        stop_distance = (
+            atr * Decimal(str(self._stop_loss_atr))
+        )
+
+        target_distance = (
+            atr * Decimal(str(self._take_profit_atr))
+        )
 
         if direction is SignalDirection.LONG:
             stop_loss = entry_price - stop_distance
             take_profit = entry_price + target_distance
+
         else:
             stop_loss = entry_price + stop_distance
             take_profit = entry_price - target_distance
@@ -205,12 +260,12 @@ class BollingerReversionStrategy(BaseStrategy):
                 "middle_band": bands.middle,
                 "upper_band": bands.upper,
                 "lower_band": bands.lower,
-                "standard_deviation": (bands.standard_deviation),
+                "standard_deviation": bands.standard_deviation,
                 "atr": atr_value,
-                "bollinger_period": (self._bollinger_period),
-                "bollinger_deviation": (self._bollinger_deviation),
-                "stop_loss_atr": (self._stop_loss_atr),
-                "take_profit_atr": (self._take_profit_atr),
+                "bollinger_period": self._bollinger_period,
+                "bollinger_deviation": self._bollinger_deviation,
+                "stop_loss_atr": self._stop_loss_atr,
+                "take_profit_atr": self._take_profit_atr,
             },
         )
 
@@ -220,7 +275,11 @@ class BollingerReversionStrategy(BaseStrategy):
         timeframe: Timeframe,
     ) -> _IndicatorState:
         """Get or create isolated indicator state."""
-        key = (symbol, timeframe)
+
+        key = (
+            symbol,
+            timeframe,
+        )
 
         state = self._states.get(key)
 
@@ -232,6 +291,7 @@ class BollingerReversionStrategy(BaseStrategy):
                 ),
                 atr=ATR(self._atr_period),
             )
+
             self._states[key] = state
 
         return state
@@ -244,6 +304,7 @@ class BollingerReversionStrategy(BaseStrategy):
         close: float | Decimal,
     ):
         """Update Bollinger Bands and ATR from one candle."""
+
         bands = state.bollinger.update(float(close))
 
         atr_value = state.atr.update(
@@ -252,14 +313,12 @@ class BollingerReversionStrategy(BaseStrategy):
             close=float(close),
         )
 
-        return bands, atr_value
+        return (
+            bands,
+            atr_value,
+        )
 
-    @staticmethod
-    def _normalize_timestamp(
-        timestamp: datetime,
-    ) -> datetime:
-        """Normalize timestamp to timezone-aware UTC."""
-        if timestamp.tzinfo is None:
-            return timestamp.replace(tzinfo=timezone.utc)
 
-        return timestamp.astimezone(timezone.utc)
+__all__ = [
+    "BollingerReversionStrategy",
+]

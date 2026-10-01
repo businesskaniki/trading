@@ -1,6 +1,9 @@
-import MetaTrader5 as mt5
+from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from typing import Any
+
+import MetaTrader5 as mt5
 
 from app.core.logging import logger
 
@@ -26,29 +29,49 @@ class MarketDataBroker:
 
         if info is None:
             logger.warning(
-                "Symbol not found in MT5: %s",
+                "Symbol not found in MT5: %s | last_error=%s",
                 symbol,
+                mt5.last_error(),
             )
             return False
 
         if not info.visible:
-            selected = mt5.symbol_select(
-                symbol,
-                True,
-            )
+            selected = mt5.symbol_select(symbol, True)
 
             if not selected:
                 logger.error(
-                    "Failed to select symbol %s: %s",
+                    "Failed to select symbol %s: last_error=%s",
                     symbol,
                     mt5.last_error(),
                 )
                 return False
 
+            logger.info(
+                "Selected MT5 symbol: %s",
+                symbol,
+            )
+
         return True
 
     @staticmethod
-    def _validate_tick(symbol: str, tick) -> bool:
+    def _normalize_utc(value: datetime | None) -> datetime | None:
+        """
+        Normalize a datetime to an explicit UTC-aware datetime.
+
+        MT5's Python API expects historical datetime values to be
+        interpreted in UTC.
+        """
+
+        if value is None:
+            return None
+
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+
+        return value.astimezone(timezone.utc)
+
+    @staticmethod
+    def _validate_tick(symbol: str, tick: Any) -> bool:
         """
         Validate a raw MT5 tick before it is allowed into AQE.
 
@@ -60,7 +83,7 @@ class MarketDataBroker:
 
         if tick is None:
             logger.warning(
-                "MT5 returned no tick for %s: %s",
+                "MT5 returned no tick for %s: last_error=%s",
                 symbol,
                 mt5.last_error(),
             )
@@ -105,7 +128,8 @@ class MarketDataBroker:
 
         if bid_value <= 0:
             logger.warning(
-                "Rejected MT5 tick for %s: invalid bid=%r " "raw_tick=%r last_error=%s",
+                "Rejected MT5 tick for %s: invalid bid=%r "
+                "raw_tick=%r last_error=%s",
                 symbol,
                 bid,
                 data,
@@ -115,7 +139,8 @@ class MarketDataBroker:
 
         if ask_value <= 0:
             logger.warning(
-                "Rejected MT5 tick for %s: invalid ask=%r " "raw_tick=%r last_error=%s",
+                "Rejected MT5 tick for %s: invalid ask=%r "
+                "raw_tick=%r last_error=%s",
                 symbol,
                 ask,
                 data,
@@ -173,13 +198,19 @@ class MarketDataBroker:
         end: datetime | None = None,
     ):
         """
-        Retrieve historical OHLCV candles from MT5.
+        Retrieve historical OHLCV candles directly from MT5.
 
-        When `start` and/or `end` are supplied, MT5 range-based
-        retrieval is used through `copy_rates_range()`.
+        Range mode:
+            When either `start` or `end` is supplied,
+            `mt5.copy_rates_range()` is used.
 
-        When no range is supplied, the method falls back to the
-        latest-N candle behavior using `copy_rates_from_pos()`.
+        Latest-N mode:
+            When neither `start` nor `end` is supplied,
+            `mt5.copy_rates_from_pos()` is used.
+
+        Returns:
+            MT5 NumPy structured array when candles are available.
+            None when MT5 cannot retrieve the requested data.
         """
 
         symbol = symbol.strip()
@@ -190,25 +221,86 @@ class MarketDataBroker:
             )
             return None
 
+        # ------------------------------------------------------------------
+        # Verify MT5 terminal state.
+        # ------------------------------------------------------------------
+
+        terminal = mt5.terminal_info()
+
+        if terminal is None:
+            logger.error(
+                "MT5 terminal information unavailable while retrieving "
+                "candles for %s | last_error=%s",
+                symbol,
+                mt5.last_error(),
+            )
+            return None
+
+        if not terminal.connected:
+            logger.error(
+                "MT5 terminal is not connected while retrieving candles "
+                "for %s | last_error=%s",
+                symbol,
+                mt5.last_error(),
+            )
+            return None
+
+        # ------------------------------------------------------------------
+        # Ensure the requested symbol is available.
+        # ------------------------------------------------------------------
+
         if not MarketDataBroker._ensure_symbol_selected(symbol):
             return None
 
-        if start is not None and end is not None:
-            if start > end:
-                logger.warning(
-                    "Invalid candle range for %s: start=%s is later than end=%s",
-                    symbol,
-                    start,
-                    end,
-                )
-                return None
+        symbol_info = mt5.symbol_info(symbol)
+
+        if symbol_info is None:
+            logger.error(
+                "MT5 symbol disappeared after selection: %s | last_error=%s",
+                symbol,
+                mt5.last_error(),
+            )
+            return None
+
+        # ------------------------------------------------------------------
+        # Normalize datetime values.
+        # ------------------------------------------------------------------
+
+        start = MarketDataBroker._normalize_utc(start)
+        end = MarketDataBroker._normalize_utc(end)
+
+        # ------------------------------------------------------------------
+        # Validate range.
+        # ------------------------------------------------------------------
+
+        if start is not None and end is not None and start > end:
+            logger.warning(
+                "Invalid candle range for %s: start=%s is later than end=%s",
+                symbol,
+                start,
+                end,
+            )
+            return None
+
+        # ------------------------------------------------------------------
+        # Range-based historical retrieval.
+        # ------------------------------------------------------------------
 
         if start is not None or end is not None:
             if start is None:
                 start = end
 
             if end is None:
-                end = datetime.now(start.tzinfo)
+                end = datetime.now(timezone.utc)
+
+            logger.info(
+                "Requesting MT5 historical candles | "
+                "symbol=%s | timeframe=%s | start=%s | end=%s",
+                symbol,
+                timeframe,
+                start.isoformat(),
+                end.isoformat(),
+            )
 
             rates = mt5.copy_rates_range(
                 symbol,
@@ -217,18 +309,73 @@ class MarketDataBroker:
                 end,
             )
 
+            last_error = mt5.last_error()
+
             if rates is None:
                 logger.error(
-                    "Failed to retrieve candle range for %s: %s",
+                    "MT5 copy_rates_range returned None | "
+                    "symbol=%s | timeframe=%s | start=%s | end=%s | "
+                    "last_error=%s",
                     symbol,
-                    mt5.last_error(),
+                    timeframe,
+                    start.isoformat(),
+                    end.isoformat(),
+                    last_error,
                 )
                 return None
 
-            if count is not None and count > 0:
-                rates = rates[-count:]
+            try:
+                rate_count = len(rates)
+            except TypeError:
+                logger.error(
+                    "MT5 returned an unexpected candle result | "
+                    "symbol=%s | result=%r | last_error=%s",
+                    symbol,
+                    rates,
+                    last_error,
+                )
+                return None
+
+            if rate_count == 0:
+                logger.warning(
+                    "MT5 returned zero historical candles | "
+                    "symbol=%s | timeframe=%s | start=%s | end=%s | "
+                    "last_error=%s",
+                    symbol,
+                    timeframe,
+                    start.isoformat(),
+                    end.isoformat(),
+                    last_error,
+                )
+                return None
+
+            if count is not None:
+                if count < 1:
+                    logger.warning(
+                        "Invalid candle count for %s: %s",
+                        symbol,
+                        count,
+                    )
+                    return None
+
+                if rate_count > count:
+                    rates = rates[-count:]
+
+            logger.info(
+                "MT5 historical candles retrieved | "
+                "symbol=%s | timeframe=%s | count=%s | start=%s | end=%s",
+                symbol,
+                timeframe,
+                len(rates),
+                start.isoformat(),
+                end.isoformat(),
+            )
 
             return rates
+
+        # ------------------------------------------------------------------
+        # Latest-N retrieval.
+        # ------------------------------------------------------------------
 
         if count is None:
             count = 100
@@ -241,6 +388,14 @@ class MarketDataBroker:
             )
             return None
 
+        logger.info(
+            "Requesting latest MT5 candles | "
+            "symbol=%s | timeframe=%s | count=%s",
+            symbol,
+            timeframe,
+            count,
+        )
+
         rates = mt5.copy_rates_from_pos(
             symbol,
             timeframe,
@@ -248,12 +403,50 @@ class MarketDataBroker:
             count,
         )
 
+        last_error = mt5.last_error()
+
         if rates is None:
             logger.error(
-                "Failed to retrieve candles for %s: %s",
+                "MT5 copy_rates_from_pos returned None | "
+                "symbol=%s | timeframe=%s | count=%s | "
+                "last_error=%s",
                 symbol,
-                mt5.last_error(),
+                timeframe,
+                count,
+                last_error,
             )
             return None
+
+        try:
+            rate_count = len(rates)
+        except TypeError:
+            logger.error(
+                "MT5 returned an unexpected candle result | "
+                "symbol=%s | result=%r | last_error=%s",
+                symbol,
+                rates,
+                last_error,
+            )
+            return None
+
+        if rate_count == 0:
+            logger.warning(
+                "MT5 returned zero latest candles | "
+                "symbol=%s | timeframe=%s | count=%s | "
+                "last_error=%s",
+                symbol,
+                timeframe,
+                count,
+                last_error,
+            )
+            return None
+
+        logger.info(
+            "Latest MT5 candles retrieved | "
+            "symbol=%s | timeframe=%s | count=%s",
+            symbol,
+            timeframe,
+            rate_count,
+        )
 
         return rates

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import select
@@ -14,8 +15,8 @@ from app.core.constants import (
 )
 from app.database.models.order import Order
 from app.database.models.symbol import Symbol
-from app.repositories.order_repository import OrderRepository
 from app.events import EventBus, event_bus
+from app.repositories.order_repository import OrderRepository
 from app.schemas.execution import (
     ExecutionOrder,
     ExecutionResult,
@@ -37,7 +38,6 @@ from .events import (
 from .exceptions import ExecutionBrokerError, ExecutionRejectedError
 from .mapper import RiskDecisionMapper
 
-
 SessionFactory = async_sessionmaker[AsyncSession]
 
 
@@ -57,6 +57,8 @@ class ExecutionEngine:
             ↓
         persist AQE Order
             ↓
+        mark SUBMITTED
+            ↓
         ExecutionSubmittedEvent
             ↓
         BrokerManager.place_order()
@@ -65,18 +67,21 @@ class ExecutionEngine:
             ↓
         reconcile persisted AQE Order
             ↓
-        ExecutionCompletedEvent
-            or
-        ExecutionFailedEvent
+        SUCCESS
+            └── ExecutionCompletedEvent
+        REJECTED / FAILED
+            └── ExecutionFailedEvent
 
     Responsibilities:
         - accept only approved RiskDecision objects;
         - convert RiskDecision to ExecutionOrder;
         - resolve canonical AQE symbols to broker symbols;
         - persist an AQE Order before broker submission;
+        - mark the order SUBMITTED before broker submission;
         - use RiskDecision.decision_id as the execution correlation ID;
         - submit through BrokerManager;
         - persist broker execution identifiers;
+        - persist final execution lifecycle state;
         - publish execution lifecycle events.
 
     The execution engine does NOT:
@@ -121,6 +126,10 @@ class ExecutionEngine:
 
         The broker is called only after the AQE Order exists.
 
+        The persisted order is marked SUBMITTED before the broker call.
+        This distinguishes an order that has not crossed the broker
+        boundary from an order whose broker outcome is unknown.
+
         After broker execution, a new database session is used to reconcile
         the persisted Order with the broker result.
         """
@@ -156,7 +165,34 @@ class ExecutionEngine:
         )
 
         # ------------------------------------------------------------------
-        # 3. Publish submission event
+        # 3. Mark the order SUBMITTED
+        # ------------------------------------------------------------------
+
+        try:
+            order = await self._mark_order_submitted(
+                execution_correlation_id=order.execution_correlation_id,
+            )
+        except Exception as exc:
+            await self._publish_failed(
+                decision=decision,
+                exc=exc,
+                symbol=execution_order.symbol,
+                execution_submitted=False,
+                order=order,
+                metadata={
+                    "order_submission_state_update_failed": True,
+                },
+            )
+
+            raise ExecutionBrokerError(
+                "AQE Order was created but could not be marked SUBMITTED "
+                "before broker execution. "
+                f"execution_correlation_id="
+                f"{order.execution_correlation_id!s}."
+            ) from exc
+
+        # ------------------------------------------------------------------
+        # 4. Publish submission event
         # ------------------------------------------------------------------
 
         submitted_event = ExecutionSubmittedEvent.from_decision(
@@ -164,42 +200,56 @@ class ExecutionEngine:
             symbol=execution_order.symbol,
             metadata={
                 "canonical_symbol": decision.symbol,
-                "execution_correlation_id": str(
-                    order.execution_correlation_id
-                ),
+                "execution_correlation_id": str(order.execution_correlation_id),
                 "order_id": str(order.id),
+                "order_status": order.status.value,
             },
         )
 
         await self._publish(submitted_event)
 
         # ------------------------------------------------------------------
-        # 4. Submit to broker
+        # 5. Submit to broker
         # ------------------------------------------------------------------
 
         try:
-            result = await self._broker_manager.place_order(
-                execution_order
-            )
+            result = await self._broker_manager.place_order(execution_order)
         except Exception as exc:
+            """
+            The broker boundary has been crossed.
+
+            A broker/network exception does not necessarily mean that
+            the broker rejected the order. The broker may have accepted
+            the request while AQE failed to receive the response.
+
+            Therefore the persisted AQE Order intentionally remains
+            SUBMITTED until reconciliation establishes the broker state.
+            """
+
             await self._publish_failed(
                 decision=decision,
                 exc=exc,
                 symbol=execution_order.symbol,
                 execution_submitted=True,
                 order=order,
+                metadata={
+                    "broker_execution_outcome": "unknown",
+                },
             )
 
             raise ExecutionBrokerError(
-                "Broker execution failed for "
+                "Broker execution failed or returned no confirmed result "
+                "for "
                 f"symbol={execution_order.symbol!r}, "
                 f"account_id={execution_order.account_id!s}, "
                 f"execution_correlation_id="
-                f"{order.execution_correlation_id!s}."
+                f"{order.execution_correlation_id!s}. "
+                "The AQE Order remains SUBMITTED because the broker "
+                "outcome is not confirmed."
             ) from exc
 
         # ------------------------------------------------------------------
-        # 5. Reconcile broker result into AQE persistence
+        # 6. Reconcile broker result into AQE persistence
         # ------------------------------------------------------------------
 
         try:
@@ -210,7 +260,7 @@ class ExecutionEngine:
             )
         except Exception as exc:
             """
-            The broker has already accepted/responded to the order.
+            The broker has already returned a result.
 
             NEVER submit the same RiskDecision again merely because AQE
             persistence failed after broker execution.
@@ -226,38 +276,105 @@ class ExecutionEngine:
                 execution_submitted=True,
                 order=order,
                 metadata={
-                    "broker_execution_succeeded": True,
+                    "broker_execution_succeeded": (
+                        result.status is ExecutionStatus.SUCCESS
+                    ),
+                    "broker_execution_status": result.status.value,
                     "order_persistence_failed": True,
                 },
             )
 
             raise ExecutionBrokerError(
-                "Broker execution succeeded but AQE could not reconcile "
-                "the execution result. "
+                "Broker returned an execution result but AQE could not "
+                "reconcile the execution result. "
                 f"execution_correlation_id="
                 f"{order.execution_correlation_id!s}."
             ) from exc
 
         # ------------------------------------------------------------------
-        # 6. Publish completed event
+        # 7. Publish the appropriate lifecycle event
         # ------------------------------------------------------------------
 
-        completed_event = ExecutionCompletedEvent.from_result(
-            decision,
-            result,
+        if result.status is ExecutionStatus.SUCCESS:
+            completed_event = ExecutionCompletedEvent.from_result(
+                decision,
+                result,
+                symbol=execution_order.symbol,
+                metadata={
+                    "canonical_symbol": decision.symbol,
+                    "execution_correlation_id": str(
+                        persisted_order.execution_correlation_id
+                    ),
+                    "order_id": str(persisted_order.id),
+                    "order_status": persisted_order.status.value,
+                },
+            )
+
+            await self._publish(completed_event)
+
+            return result
+
+        # ------------------------------------------------------------------
+        # Explicit broker rejection
+        # ------------------------------------------------------------------
+
+        if result.status is ExecutionStatus.REJECTED:
+            rejection_exception = ExecutionRejectedError(
+                result.message
+                or (
+                    "Broker rejected execution for "
+                    f"symbol={execution_order.symbol!r}."
+                )
+            )
+
+            await self._publish_failed(
+                decision=decision,
+                exc=rejection_exception,
+                symbol=execution_order.symbol,
+                execution_submitted=True,
+                order=persisted_order,
+                metadata={
+                    "broker_execution_outcome": "rejected",
+                    "broker_execution_status": result.status.value,
+                    "broker_order_id": _string_or_none(result.broker_order_id),
+                    "broker_deal_id": _string_or_none(result.broker_deal_id),
+                    "broker_position_id": _string_or_none(result.broker_position_id),
+                },
+            )
+
+            raise ExecutionRejectedError(
+                result.message
+                or (
+                    "Broker rejected execution for "
+                    f"symbol={execution_order.symbol!r}."
+                )
+            )
+
+        # ------------------------------------------------------------------
+        # Generic broker failure
+        # ------------------------------------------------------------------
+
+        failure_exception = ExecutionBrokerError(
+            result.message
+            or (
+                "Broker returned an unsuccessful execution result for "
+                f"symbol={execution_order.symbol!r}."
+            )
+        )
+
+        await self._publish_failed(
+            decision=decision,
+            exc=failure_exception,
             symbol=execution_order.symbol,
+            execution_submitted=True,
+            order=persisted_order,
             metadata={
-                "canonical_symbol": decision.symbol,
-                "execution_correlation_id": str(
-                    persisted_order.execution_correlation_id
-                ),
-                "order_id": str(persisted_order.id),
+                "broker_execution_outcome": "unknown",
+                "broker_execution_status": result.status.value,
             },
         )
 
-        await self._publish(completed_event)
-
-        return result
+        raise failure_exception
 
     # ======================================================================
     # ORDER PERSISTENCE
@@ -281,10 +398,8 @@ class ExecutionEngine:
         async with self._session_factory() as db:
             orders = OrderRepository(db)
 
-            existing_order = (
-                await orders.get_by_execution_correlation_id(
-                    decision.decision_id
-                )
+            existing_order = await orders.get_by_execution_correlation_id(
+                decision.decision_id
             )
 
             if existing_order is not None:
@@ -303,16 +418,10 @@ class ExecutionEngine:
                 execution_correlation_id=decision.decision_id,
                 strategy=decision.strategy_name,
                 comment=execution_order.comment,
-                account_id=self._require_account_id(
-                    execution_order.account_id
-                ),
+                account_id=self._require_account_id(execution_order.account_id),
                 symbol_id=symbol_id,
-                order_type=self._map_order_type(
-                    execution_order.order_type
-                ),
-                side=self._map_order_side(
-                    execution_order.side
-                ),
+                order_type=self._map_order_type(execution_order.order_type),
+                side=self._map_order_side(execution_order.side),
                 volume=execution_order.volume,
                 requested_price=execution_order.price,
                 executed_price=None,
@@ -326,10 +435,8 @@ class ExecutionEngine:
             except IntegrityError as exc:
                 await db.rollback()
 
-                existing_order = (
-                    await orders.get_by_execution_correlation_id(
-                        decision.decision_id
-                    )
+                existing_order = await orders.get_by_execution_correlation_id(
+                    decision.decision_id
                 )
 
                 if existing_order is not None:
@@ -347,6 +454,53 @@ class ExecutionEngine:
 
             return created_order
 
+    async def _mark_order_submitted(
+        self,
+        *,
+        execution_correlation_id: UUID,
+    ) -> Order:
+        """
+        Mark a persisted AQE order as SUBMITTED.
+
+        This transition occurs immediately before crossing the broker
+        execution boundary.
+
+        If the broker later becomes unreachable, SUBMITTED represents
+        an execution attempt whose final broker outcome is not yet known.
+        """
+
+        async with self._session_factory() as db:
+            orders = OrderRepository(db)
+
+            order = await orders.get_by_execution_correlation_id(
+                execution_correlation_id
+            )
+
+            if order is None:
+                raise ExecutionBrokerError(
+                    "AQE Order could not be found while marking it "
+                    "SUBMITTED. "
+                    f"execution_correlation_id="
+                    f"{execution_correlation_id!s}."
+                )
+
+            if order.status is not OrderStatus.CREATED:
+                raise ExecutionRejectedError(
+                    "AQE Order cannot transition to SUBMITTED from its "
+                    f"current state {order.status.value!r}. "
+                    f"execution_correlation_id="
+                    f"{execution_correlation_id!s}."
+                )
+
+            order.status = OrderStatus.SUBMITTED
+
+            db.add(order)
+
+            await db.commit()
+            await db.refresh(order)
+
+            return order
+
     async def _update_order_from_result(
         self,
         *,
@@ -360,6 +514,9 @@ class ExecutionEngine:
         A completely fresh database session is used because the original
         persistence session was intentionally closed before broker
         execution.
+
+        The persisted volume represents the broker-confirmed executed
+        volume when the broker provides it.
         """
 
         async with self._session_factory() as db:
@@ -384,8 +541,14 @@ class ExecutionEngine:
             if result.price is not None:
                 order.executed_price = result.price
 
-            if result.volume is not None:
-                order.volume = result.volume
+            executed_volume = result.volume
+
+            if executed_volume is not None:
+                order.volume = executed_volume
+
+            # --------------------------------------------------------------
+            # Successful execution
+            # --------------------------------------------------------------
 
             if result.status is ExecutionStatus.SUCCESS:
                 if execution_order.order_type in {
@@ -393,32 +556,46 @@ class ExecutionEngine:
                     ExecutionOrderType.STOP,
                 }:
                     order.status = OrderStatus.PENDING
+
                 else:
-                    order.status = OrderStatus.FILLED
+                    requested_volume = execution_order.volume
+
+                    if (
+                        executed_volume is not None
+                        and executed_volume < requested_volume
+                    ):
+                        order.status = OrderStatus.PARTIALLY_FILLED
+                    else:
+                        order.status = OrderStatus.FILLED
+
+            # --------------------------------------------------------------
+            # Explicit broker rejection
+            # --------------------------------------------------------------
 
             elif result.status is ExecutionStatus.REJECTED:
-                """
-                The current AQE OrderStatus enum does not define REJECTED.
+                order.status = OrderStatus.REJECTED
 
-                Do not incorrectly represent a broker rejection as
-                CANCELLED or FILLED.
-
-                The execution event contains the authoritative broker
-                rejection information, while reconciliation can later
-                introduce a dedicated failure/rejection state.
-                """
-
-                order.status = OrderStatus.CREATED
+            # --------------------------------------------------------------
+            # Generic execution failure
+            # --------------------------------------------------------------
 
             elif result.status is ExecutionStatus.FAILED:
                 """
-                The current AQE OrderStatus enum does not define FAILED.
+                FAILED does not necessarily mean broker rejection.
 
-                Keep the order CREATED so reconciliation can distinguish
-                an unconfirmed execution from a cancelled or filled order.
+                If the broker adapter explicitly returns FAILED without
+                establishing that no broker-side execution occurred,
+                retain SUBMITTED so that reconciliation can determine
+                the final state.
                 """
 
-                order.status = OrderStatus.CREATED
+                order.status = OrderStatus.SUBMITTED
+
+            else:
+                raise ExecutionBrokerError(
+                    "Unsupported ExecutionResult status during order "
+                    f"reconciliation: {result.status!r}."
+                )
 
             db.add(order)
 
@@ -450,9 +627,7 @@ class ExecutionEngine:
             )
 
         result = await db.execute(
-            select(Symbol.id).where(
-                Symbol.name == canonical_symbol
-            )
+            select(Symbol.id).where(Symbol.name == canonical_symbol)
         )
 
         symbol_id = result.scalar_one_or_none()
@@ -489,13 +664,8 @@ class ExecutionEngine:
             Order.symbol_id
         """
 
-        account_id = self._require_account_id(
-            execution_order.account_id
-        )
+        account_id = self._require_account_id(execution_order.account_id)
 
-        # AccountSymbolResolver is intentionally created for this
-        # operation rather than holding a database session for the
-        # lifetime of ExecutionEngine.
         async with self._session_factory() as db:
             resolver = AccountSymbolResolver(db)
 
@@ -570,10 +740,9 @@ class ExecutionEngine:
         if order is not None:
             event_metadata.update(
                 {
-                    "execution_correlation_id": str(
-                        order.execution_correlation_id
-                    ),
+                    "execution_correlation_id": str(order.execution_correlation_id),
                     "order_id": str(order.id),
+                    "order_status": order.status.value,
                 }
             )
 
@@ -625,6 +794,11 @@ class ExecutionEngine:
                 "Execution requires a RiskDecision with a position_size."
             )
 
+        if decision.position_size <= Decimal("0"):
+            raise ExecutionRejectedError(
+                "Execution requires a positive RiskDecision position_size."
+            )
+
     # ======================================================================
     # ENUM MAPPING
     # ======================================================================
@@ -643,17 +817,14 @@ class ExecutionEngine:
         if side is ExecutionOrderSide.SELL:
             return PersistedOrderSide.SELL
 
-        raise ExecutionRejectedError(
-            f"Unsupported execution order side: {side!r}."
-        )
+        raise ExecutionRejectedError(f"Unsupported execution order side: {side!r}.")
 
     @staticmethod
     def _map_order_type(
         order_type: ExecutionOrderType,
     ) -> PersistedOrderType:
         """
-        Map the execution-layer order type enum to the persisted
-        AQE order enum.
+        Map the execution-layer order type to the persisted AQE enum.
         """
 
         if order_type is ExecutionOrderType.MARKET:
@@ -682,9 +853,7 @@ class ExecutionEngine:
         """
 
         if account_id is None:
-            raise ExecutionRejectedError(
-                "Execution requires an account_id."
-            )
+            raise ExecutionRejectedError("Execution requires an account_id.")
 
         if isinstance(account_id, UUID):
             return account_id
@@ -695,3 +864,18 @@ class ExecutionEngine:
             raise ExecutionRejectedError(
                 f"Invalid execution account_id: {account_id!r}."
             ) from exc
+
+
+def _string_or_none(value: object) -> str | None:
+    """
+    Convert an optional broker identifier to a string.
+
+    Broker adapters may expose identifiers as integers, strings, or
+    another scalar representation. Execution events use strings so the
+    event contract remains serialization-safe and broker-neutral.
+    """
+
+    if value is None:
+        return None
+
+    return str(value)
