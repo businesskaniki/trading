@@ -33,6 +33,7 @@ class _IndicatorState:
     ema_slow: float | None = None
 
     atr: float | None = None
+    previous_atr: float | None = None
     previous_close: float | None = None
 
     initialized: bool = False
@@ -53,15 +54,16 @@ class EMATrendStrategy(BaseStrategy):
         current EMA fast < current EMA slow
         current close < current EMA slow
 
-    Risk levels are calculated from ATR:
+    Risk levels are calculated from the ATR of the previous
+    completed candle:
 
         LONG:
-            stop_loss   = entry - ATR * stop_loss_atr
-            take_profit = entry + ATR * take_profit_atr
+            stop_loss   = entry - previous_ATR * stop_loss_atr
+            take_profit = entry + previous_ATR * take_profit_atr
 
         SHORT:
-            stop_loss   = entry + ATR * stop_loss_atr
-            take_profit = entry - ATR * take_profit_atr
+            stop_loss   = entry + previous_ATR * stop_loss_atr
+            take_profit = entry - previous_ATR * take_profit_atr
 
     The strategy generates trading intent only. Risk approval,
     position sizing, and order execution are handled downstream.
@@ -69,7 +71,7 @@ class EMATrendStrategy(BaseStrategy):
 
     definition = StrategyDefinition(
         name="ema_trend",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "EMA crossover trend-following strategy with "
             "ATR-based stop-loss and take-profit."
@@ -152,8 +154,6 @@ class EMATrendStrategy(BaseStrategy):
         Warm up indicator state from historical market data.
 
         Historical data is accessed only through StrategyContext.
-        The strategy remains safe when no market-data provider is
-        available.
         """
 
         for symbol in self.symbols:
@@ -166,8 +166,19 @@ class EMATrendStrategy(BaseStrategy):
                     timeframe=timeframe,
                 )
 
+    async def on_start(self) -> None:
+        """Start the strategy."""
+
+        return None
+
     async def on_stop(self) -> None:
         """Clear runtime indicator state."""
+
+        self._states.clear()
+        self._last_signal_candle.clear()
+
+    async def on_shutdown(self) -> None:
+        """Release strategy state."""
 
         self._states.clear()
         self._last_signal_candle.clear()
@@ -201,18 +212,16 @@ class EMATrendStrategy(BaseStrategy):
             _IndicatorState(),
         )
 
-        candle_open = float(
-            candle.open
-        )
-        candle_high = float(
-            candle.high
-        )
-        candle_low = float(
-            candle.low
-        )
-        candle_close = float(
-            candle.close
-        )
+        candle_open = float(candle.open)
+        candle_high = float(candle.high)
+        candle_low = float(candle.low)
+        candle_close = float(candle.close)
+
+        if candle_open <= 0:
+            return None
+
+        if candle_high <= 0 or candle_low <= 0:
+            return None
 
         if candle_close <= 0:
             return None
@@ -220,12 +229,11 @@ class EMATrendStrategy(BaseStrategy):
         if candle_high < candle_low:
             return None
 
-        if candle_open <= 0:
-            return None
-
-        # Capture the previous indicator state BEFORE updating it.
+        # Capture the previous completed indicator state BEFORE
+        # processing the current candle.
         previous_ema_fast = state.ema_fast
         previous_ema_slow = state.ema_slow
+        previous_atr = state.atr
 
         self._update_indicators(
             state=state,
@@ -239,13 +247,16 @@ class EMATrendStrategy(BaseStrategy):
             or previous_ema_slow is None
             or state.ema_fast is None
             or state.ema_slow is None
-            or state.atr is None
         ):
             return None
 
-        if state.atr <= 0:
+        # The trade must use ATR from the previous completed candle.
+        if previous_atr is None or previous_atr <= 0:
             return None
 
+        # During the first live candle after warm-up, the indicator
+        # state is already populated, so normal crossover detection
+        # can begin immediately.
         if not state.initialized:
             state.initialized = True
             return None
@@ -261,18 +272,25 @@ class EMATrendStrategy(BaseStrategy):
         if direction is None:
             return None
 
-        candle_timestamp = candle.timestamp
+        candle_timestamp = int(
+            candle.timestamp
+        )
 
-        if self._last_signal_candle.get(key) == candle_timestamp:
+        if (
+            self._last_signal_candle.get(key)
+            == candle_timestamp
+        ):
             return None
+
+        signal = self._build_signal(
+            candle=candle,
+            direction=direction,
+            atr=previous_atr,
+        )
 
         self._last_signal_candle[key] = candle_timestamp
 
-        return self._build_signal(
-            candle=candle,
-            direction=direction,
-            atr=state.atr,
-        )
+        return signal
 
     async def _warm_up(
         self,
@@ -299,17 +317,18 @@ class EMATrendStrategy(BaseStrategy):
         state = _IndicatorState()
 
         for candle in ordered_candles:
-            high = float(
-                candle.high
-            )
-            low = float(
-                candle.low
-            )
-            close = float(
-                candle.close
-            )
+            high = float(candle.high)
+            low = float(candle.low)
+            close = float(candle.close)
 
-            if high < low or close <= 0:
+            if (
+                high <= 0
+                or low <= 0
+                or close <= 0
+            ):
+                continue
+
+            if high < low:
                 continue
 
             self._update_indicators(
@@ -341,7 +360,7 @@ class EMATrendStrategy(BaseStrategy):
         low: float,
         close: float,
     ) -> None:
-        """Update EMA and ATR values using one candle."""
+        """Update EMA and ATR values using one completed candle."""
 
         previous_close = state.previous_close
 
@@ -353,6 +372,10 @@ class EMATrendStrategy(BaseStrategy):
                 abs(high - previous_close),
                 abs(low - previous_close),
             )
+
+        # --------------------------------------------------------------
+        # Fast EMA
+        # --------------------------------------------------------------
 
         if state.ema_fast is None:
             state.ema_fast = close
@@ -366,6 +389,10 @@ class EMATrendStrategy(BaseStrategy):
                 + state.ema_fast * (1.0 - fast_alpha)
             )
 
+        # --------------------------------------------------------------
+        # Slow EMA
+        # --------------------------------------------------------------
+
         if state.ema_slow is None:
             state.ema_slow = close
         else:
@@ -377,6 +404,10 @@ class EMATrendStrategy(BaseStrategy):
                 close * slow_alpha
                 + state.ema_slow * (1.0 - slow_alpha)
             )
+
+        # --------------------------------------------------------------
+        # ATR
+        # --------------------------------------------------------------
 
         if state.atr is None:
             state.atr = true_range
@@ -440,6 +471,14 @@ class EMATrendStrategy(BaseStrategy):
             atr * self.take_profit_atr
         )
 
+        if (
+            stop_distance <= 0
+            or take_profit_distance <= 0
+        ):
+            raise StrategyConfigurationError(
+                "ATR-derived risk distances must be greater than zero."
+            )
+
         if direction is SignalDirection.LONG:
             stop_loss = (
                 entry_price - stop_distance
@@ -468,6 +507,10 @@ class EMATrendStrategy(BaseStrategy):
                 f"{candle.symbol} {candle.timeframe}."
             )
 
+        reward_risk = (
+            take_profit_distance / stop_distance
+        )
+
         return TradingSignal(
             strategy_id=self.strategy_id,
             strategy_name=self.strategy_name,
@@ -492,6 +535,7 @@ class EMATrendStrategy(BaseStrategy):
                 "atr": atr,
                 "stop_loss_atr": self.stop_loss_atr,
                 "take_profit_atr": self.take_profit_atr,
+                "reward_risk": reward_risk,
             },
         )
 
@@ -536,7 +580,7 @@ class EMATrendStrategy(BaseStrategy):
         name: str,
         default: float,
     ) -> float:
-        """Read a positive floating-point parameter."""
+        """Read a positive floating-point strategy parameter."""
 
         value = self.context.parameter(
             name,
@@ -584,14 +628,6 @@ class EMATrendStrategy(BaseStrategy):
             )
 
         return value
-
-    @staticmethod
-    def _timestamp_value(
-        timestamp: int,
-    ) -> int:
-        """Return the normalized Unix timestamp in seconds."""
-
-        return int(timestamp)
 
 
 __all__ = [

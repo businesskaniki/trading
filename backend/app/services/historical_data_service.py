@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from uuid import UUID
 
 from sqlalchemy import select
@@ -40,13 +40,20 @@ class HistoricalDataService:
        Used when a consumer such as the backtesting engine requires
        a specific historical range.
 
-    Historical backfill is intentionally strict:
+    Historical backfill remains strict:
 
-        - a selected symbol must return historical candles;
-        - an empty MT5 response is treated as a failure;
+        - successful candle responses are persisted;
         - malformed candle data is treated as a failure;
+        - empty responses are tolerated only when the requested chunk
+          contains no normal weekday trading period;
+        - an empty response for a chunk that contains a weekday is
+          treated as a failure;
         - failures are surfaced to the caller;
         - successful symbols are committed independently.
+
+    This distinction is important because MT5 legitimately returns
+    zero candles for markets that are closed during a requested
+    weekend-only interval.
 
     The backfill implementation uses an independent database session
     for each AccountSymbol. This is deliberate:
@@ -158,17 +165,18 @@ class HistoricalDataService:
         """
         Backfill historical candles for every enabled account symbol.
 
-        Every selected symbol must successfully return historical data.
+        A selected symbol is successful when it either:
 
-        A symbol returning zero candles is considered a failed backfill.
+            1. returns usable historical candles, or
+            2. has no market data anywhere in the requested range and
+               every empty chunk is a known closure-only interval.
+
+        Empty responses for chunks containing a normal weekday period
+        remain failures because they may indicate missing historical
+        data, an MT5 history problem, or an acquisition failure.
 
         Each AccountSymbol is processed using an independent database
         session and transaction.
-
-        Successful symbols are committed independently so a later symbol
-        failure does not discard already completed historical work.
-
-        The returned result contains detailed per-symbol diagnostics.
         """
 
         timeframe = self._normalize_timeframe(timeframe)
@@ -227,12 +235,7 @@ class HistoricalDataService:
         results: list[dict] = []
 
         # --------------------------------------------------------------
-        # IMPORTANT:
-        #
         # Every symbol gets its own AsyncSession.
-        #
-        # This prevents rollback() for one symbol from expiring ORM
-        # objects belonging to another symbol.
         # --------------------------------------------------------------
 
         for account_symbol_id in selected_symbol_ids:
@@ -255,7 +258,9 @@ class HistoricalDataService:
 
                     results.append(result)
 
-                    if result["status"] == "success":
+                    if self._is_non_fatal_backfill_status(
+                        result["status"],
+                    ):
                         await session.commit()
                     else:
                         await session.rollback()
@@ -293,7 +298,13 @@ class HistoricalDataService:
                         }
                     )
 
-        successful = [result for result in results if result["status"] == "success"]
+        successful = [
+            result
+            for result in results
+            if self._is_non_fatal_backfill_status(
+                result["status"],
+            )
+        ]
 
         failed = [result for result in results if result["status"] == "failed"]
 
@@ -319,11 +330,6 @@ class HistoricalDataService:
             len(successful),
             len(failed),
         )
-
-        # --------------------------------------------------------------
-        # Do not allow BacktestComposition to continue when any selected
-        # symbol could not be backfilled.
-        # --------------------------------------------------------------
 
         if failed:
             failed_symbols = ", ".join(
@@ -397,7 +403,9 @@ class HistoricalDataService:
                 chunk_delta=timedelta(days=chunk_days),
             )
 
-            if result["status"] == "success":
+            if self._is_non_fatal_backfill_status(
+                result["status"],
+            ):
                 await session.commit()
             else:
                 await session.rollback()
@@ -421,25 +429,19 @@ class HistoricalDataService:
         Backfill one enabled AccountSymbol.
 
         The canonical Symbol is explicitly loaded using an awaited
-        database operation. The method never accesses
-        account_symbol.symbol, which would permit implicit lazy loading.
+        database operation.
 
-        Empty bridge responses are treated as failures.
+        Backfill ranges are half-open:
 
-        The method does not silently convert broker failures into
-        successful backfills.
+            [start, end)
+
+        Empty bridge responses are tolerated only when the entire
+        chunk contains no normal weekday period. This covers normal
+        weekend-only intervals such as Saturday -> Sunday or
+        Sunday -> Monday.
+
+        Empty responses for chunks containing weekdays remain fatal.
         """
-
-        # --------------------------------------------------------------
-        # Explicitly load the canonical Symbol.
-        #
-        # DO NOT use:
-        #
-        #     account_symbol.symbol
-        #
-        # because that is a lazy relationship and can trigger implicit
-        # async database I/O from normal attribute access.
-        # --------------------------------------------------------------
 
         symbol = await session.get(
             Symbol,
@@ -464,6 +466,7 @@ class HistoricalDataService:
         chunks_requested = 0
         chunks_with_data = 0
         chunks_without_data = 0
+        chunks_closed_market = 0
 
         earliest_timestamp: datetime | None = None
         latest_timestamp: datetime | None = None
@@ -489,7 +492,7 @@ class HistoricalDataService:
                 end.isoformat(),
             )
 
-            while current_start <= end:
+            while current_start < end:
                 chunk_end = min(
                     current_start + chunk_delta,
                     end,
@@ -529,79 +532,104 @@ class HistoricalDataService:
                 )
 
                 # ------------------------------------------------------
-                # Empty response is NOT success.
+                # EMPTY RESPONSE
                 # ------------------------------------------------------
 
                 if not candles:
                     chunks_without_data += 1
 
-                    raise HistoricalBackfillError(
-                        "MT5 returned no historical candles for "
-                        f"symbol={broker_symbol}, "
-                        f"timeframe={timeframe}, "
-                        f"range={current_start.isoformat()}.."
-                        f"{chunk_end.isoformat()}.",
+                    if self._is_closure_only_window(
+                        current_start,
+                        chunk_end,
+                    ):
+                        chunks_closed_market += 1
+
+                        logger.info(
+                            "Historical chunk returned no candles because "
+                            "the requested interval contains no normal "
+                            "weekday trading period | "
+                            "symbol=%s | timeframe=%s | "
+                            "start=%s | end=%s",
+                            broker_symbol,
+                            timeframe,
+                            current_start.isoformat(),
+                            chunk_end.isoformat(),
+                        )
+                    else:
+                        raise HistoricalBackfillError(
+                            "MT5 returned no historical candles for "
+                            f"symbol={broker_symbol}, "
+                            f"timeframe={timeframe}, "
+                            f"range={current_start.isoformat()}.."
+                            f"{chunk_end.isoformat()}. "
+                            "The requested chunk contains a weekday "
+                            "period, so the empty response is treated "
+                            "as missing historical data.",
+                        )
+
+                else:
+                    chunks_with_data += 1
+
+                    normalized = self._normalize_candles(
+                        candles=candles,
+                        symbol_id=symbol.id,
+                        timeframe=timeframe,
                     )
 
-                chunks_with_data += 1
+                    chunk_candidates = [
+                        candle
+                        for candle in normalized
+                        if (
+                            candle["timestamp"] >= current_start
+                            and candle["timestamp"] < chunk_end
+                        )
+                    ]
 
-                normalized = self._normalize_candles(
-                    candles=candles,
-                    symbol_id=symbol.id,
-                    timeframe=timeframe,
-                )
+                    chunk_candidates.sort(
+                        key=lambda candle: candle["timestamp"],
+                    )
 
-                chunk_candidates = [
-                    candle
-                    for candle in normalized
+                    if not chunk_candidates:
+                        raise HistoricalBackfillError(
+                            "MT5 returned candles for "
+                            f"{broker_symbol}, but none were usable "
+                            "inside requested range "
+                            f"[{current_start.isoformat()}, "
+                            f"{chunk_end.isoformat()}).",
+                        )
+
+                    total_candidates += len(chunk_candidates)
+
+                    inserted = await repository.upsert_many(
+                        chunk_candidates,
+                    )
+
+                    total_inserted += inserted
+
+                    first_timestamp = chunk_candidates[0]["timestamp"]
+                    last_timestamp = chunk_candidates[-1]["timestamp"]
+
                     if (
-                        candle["timestamp"] >= current_start
-                        and candle["timestamp"] <= chunk_end
+                        earliest_timestamp is None
+                        or first_timestamp < earliest_timestamp
+                    ):
+                        earliest_timestamp = first_timestamp
+
+                    if latest_timestamp is None or last_timestamp > latest_timestamp:
+                        latest_timestamp = last_timestamp
+
+                    logger.info(
+                        "Historical chunk persisted | "
+                        "symbol=%s | timeframe=%s | "
+                        "candidates=%s | inserted=%s | "
+                        "first=%s | last=%s",
+                        broker_symbol,
+                        timeframe,
+                        len(chunk_candidates),
+                        inserted,
+                        first_timestamp.isoformat(),
+                        last_timestamp.isoformat(),
                     )
-                ]
-
-                chunk_candidates.sort(
-                    key=lambda candle: candle["timestamp"],
-                )
-
-                if not chunk_candidates:
-                    raise HistoricalBackfillError(
-                        "MT5 returned candles for "
-                        f"{broker_symbol}, but none were usable "
-                        "inside requested range "
-                        f"{current_start.isoformat()}.."
-                        f"{chunk_end.isoformat()}.",
-                    )
-
-                total_candidates += len(chunk_candidates)
-
-                inserted = await repository.upsert_many(
-                    chunk_candidates,
-                )
-
-                total_inserted += inserted
-
-                first_timestamp = chunk_candidates[0]["timestamp"]
-                last_timestamp = chunk_candidates[-1]["timestamp"]
-
-                if earliest_timestamp is None or first_timestamp < earliest_timestamp:
-                    earliest_timestamp = first_timestamp
-
-                if latest_timestamp is None or last_timestamp > latest_timestamp:
-                    latest_timestamp = last_timestamp
-
-                logger.info(
-                    "Historical chunk persisted | "
-                    "symbol=%s | timeframe=%s | "
-                    "candidates=%s | inserted=%s | "
-                    "first=%s | last=%s",
-                    broker_symbol,
-                    timeframe,
-                    len(chunk_candidates),
-                    inserted,
-                    first_timestamp.isoformat(),
-                    last_timestamp.isoformat(),
-                )
 
                 if chunk_end >= end:
                     break
@@ -616,7 +644,52 @@ class HistoricalDataService:
 
                 current_start = next_start
 
+            # ----------------------------------------------------------
+            # FINAL RESULT
+            # ----------------------------------------------------------
+
             if total_candidates == 0:
+                if chunks_requested > 0 and (
+                    chunks_closed_market == chunks_without_data
+                ):
+                    logger.info(
+                        "Historical backfill completed with no market "
+                        "activity in requested range | "
+                        "symbol=%s | timeframe=%s | "
+                        "chunks=%s | empty_chunks=%s",
+                        broker_symbol,
+                        timeframe,
+                        chunks_requested,
+                        chunks_without_data,
+                    )
+
+                    return {
+                        "status": "no_market_data",
+                        "account_symbol_id": account_symbol.id,
+                        "symbol_id": symbol.id,
+                        "symbol": symbol.name,
+                        "broker_symbol": broker_symbol,
+                        "timeframe": timeframe,
+                        "mode": "backfill",
+                        "start": start,
+                        "end": end,
+                        "chunks_requested": chunks_requested,
+                        "chunks_with_data": chunks_with_data,
+                        "chunks_without_data": chunks_without_data,
+                        "chunks_closed_market": chunks_closed_market,
+                        "received": total_received,
+                        "new_candidates": 0,
+                        "inserted": total_inserted,
+                        "earliest_timestamp": None,
+                        "latest_timestamp": None,
+                        "message": (
+                            "No historical candles exist in the "
+                            "requested range because the entire "
+                            "range contained no normal weekday "
+                            "trading period."
+                        ),
+                    }
+
                 raise HistoricalBackfillError(
                     "Historical backfill produced zero usable candles "
                     f"for {broker_symbol}/{timeframe}.",
@@ -625,12 +698,16 @@ class HistoricalDataService:
             logger.info(
                 "Historical backfill succeeded | "
                 "symbol=%s | timeframe=%s | "
-                "chunks=%s | received=%s | "
-                "candidates=%s | inserted=%s | "
+                "chunks=%s | data_chunks=%s | "
+                "empty_chunks=%s | closed_chunks=%s | "
+                "received=%s | candidates=%s | inserted=%s | "
                 "first=%s | last=%s",
                 broker_symbol,
                 timeframe,
                 chunks_requested,
+                chunks_with_data,
+                chunks_without_data,
+                chunks_closed_market,
                 total_received,
                 total_candidates,
                 total_inserted,
@@ -651,6 +728,7 @@ class HistoricalDataService:
                 "chunks_requested": chunks_requested,
                 "chunks_with_data": chunks_with_data,
                 "chunks_without_data": chunks_without_data,
+                "chunks_closed_market": chunks_closed_market,
                 "received": total_received,
                 "new_candidates": total_candidates,
                 "inserted": total_inserted,
@@ -684,6 +762,7 @@ class HistoricalDataService:
                 "chunks_requested": chunks_requested,
                 "chunks_with_data": chunks_with_data,
                 "chunks_without_data": chunks_without_data,
+                "chunks_closed_market": chunks_closed_market,
                 "received": total_received,
                 "new_candidates": total_candidates,
                 "inserted": total_inserted,
@@ -691,6 +770,77 @@ class HistoricalDataService:
                 "latest_timestamp": latest_timestamp,
                 "error": str(exc),
             }
+
+    # ==================================================================
+    # BACKFILL STATUS HELPERS
+    # ==================================================================
+
+    @staticmethod
+    def _is_non_fatal_backfill_status(
+        status: str,
+    ) -> bool:
+        """
+        Return True when a backfill result is allowed to commit and
+        does not cause the aggregate backfill to fail.
+        """
+
+        return status in {
+            "success",
+            "no_market_data",
+        }
+
+    @staticmethod
+    def _is_closure_only_window(
+        start: datetime,
+        end: datetime,
+    ) -> bool:
+        """
+        Determine whether a range contains no normal weekday period.
+
+        This is intentionally conservative.
+
+        It does NOT attempt to model exchange-specific holidays,
+        intraday breaks, or broker session calendars.
+
+        It only identifies intervals where every instant belongs to
+        Saturday and/or Sunday.
+
+        Examples:
+
+            Saturday -> Sunday  => True
+            Sunday -> Monday     => True
+            Friday -> Saturday   => False
+            Monday -> Tuesday    => False
+            Friday -> Monday     => False
+
+        This prevents a weekend-only MT5 query from being treated as
+        missing historical data while retaining strict behavior for
+        ranges that contain weekdays.
+        """
+
+        start = HistoricalDataService._normalize_datetime(
+            start,
+            field_name="start",
+        )
+
+        end = HistoricalDataService._normalize_datetime(
+            end,
+            field_name="end",
+        )
+
+        if start is None or end is None or start >= end:
+            return False
+
+        current_day = start.date()
+        final_day = (end - timedelta(microseconds=1)).date()
+
+        while current_day <= final_day:
+            if current_day.weekday() < 5:
+                return False
+
+            current_day += timedelta(days=1)
+
+        return True
 
     # ==================================================================
     # SYMBOL SYNCHRONIZATION
@@ -853,9 +1003,7 @@ class HistoricalDataService:
             new_candidates = [
                 candle
                 for candle in normalized
-                if (
-                    candle["timestamp"] >= next_timestamp and candle["timestamp"] <= now
-                )
+                if (candle["timestamp"] >= next_timestamp and candle["timestamp"] < now)
             ]
 
             inserted = await repository.upsert_many(
@@ -1015,8 +1163,6 @@ class HistoricalDataService:
     ) -> AccountSymbol:
         """
         Retrieve one enabled AccountSymbol by its primary key.
-
-        The query intentionally does not use a lazy relationship.
         """
 
         result = await session.execute(

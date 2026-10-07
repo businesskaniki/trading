@@ -50,6 +50,10 @@ class RiskConfig(BaseModel):
         le=Decimal("1"),
     )
 
+    enforce_daily_loss_limit: bool = True
+
+    enforce_drawdown_limit: bool = True
+
     # ------------------------------------------------------------------
     # Position limits
     # ------------------------------------------------------------------

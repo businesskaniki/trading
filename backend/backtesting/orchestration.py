@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import date, datetime, timezone
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -185,11 +186,11 @@ class BacktestOrchestrator:
                 |
                 v
         StrategyManager
-           /     |     \\
-          /      |      \\
+           /     |     \
+          /      |      \
     Strategy A  ...  Strategy N
-          **      |      /
-           **     |     /
+          \      |      /
+           \     |     /
             TradingSignal
                 |
                 v
@@ -202,13 +203,13 @@ class BacktestOrchestrator:
           ExecutionOrder
                 |
                 v
-        BacktestEngine
+          BacktestEngine
                 |
                 v
-       BacktestExecution
+        BacktestExecution
                 |
                 v
-       Shared BacktestPortfolio
+        Shared BacktestPortfolio
 
     Responsibilities:
         - coordinate isolated strategy instances
@@ -251,6 +252,12 @@ class BacktestOrchestrator:
         self._current_event: BacktestMarketEvent | None = None
         self._current_candle: BacktestCandle | None = None
         self._strategies_started = False
+
+        # Simulated daily-loss accounting. The RiskEngine expects
+        # ``daily_pnl`` to represent P&L accumulated during the current
+        # simulated calendar day, not the entire backtest lifetime.
+        self._daily_pnl_date: date | None = None
+        self._day_start_realized_pnl = Decimal("0")
 
     # ==================================================================
     # RUN
@@ -364,7 +371,7 @@ class BacktestOrchestrator:
 
         if not self.strategy_ids:
             raise BacktestOrchestrationError(
-                "Backtest cannot run without at least one resolved " "active strategy.",
+                "Backtest cannot run without at least one resolved active strategy.",
             )
 
         for strategy_id in self.strategy_ids:
@@ -442,7 +449,7 @@ class BacktestOrchestrator:
 
                 except Exception:
                     logger.exception(
-                        "Failed to clean up strategy after startup " "failure: id=%s",
+                        "Failed to clean up strategy after startup failure: id=%s",
                         strategy_id,
                     )
 
@@ -546,6 +553,14 @@ class BacktestOrchestrator:
 
         self._current_event = event
         self._current_candle = event.candle
+
+        # Keep daily-loss accounting synchronized with every historical
+        # event, not only events that produce strategy signals. This makes
+        # the daily baseline advance correctly even when a particular day
+        # contains no signals.
+        self._update_daily_pnl_clock(
+            event.timestamp,
+        )
 
         if self._market_data_view is not None:
             self._market_data_view.set_current_time(
@@ -661,7 +676,7 @@ class BacktestOrchestrator:
         symbol_result.signals_received += 1
 
         if self._current_candle is None:
-            message = "Received strategy signal without a current " "backtest candle."
+            message = "Received strategy signal without a current backtest candle."
 
             self.result.errors.append(
                 message,
@@ -714,7 +729,7 @@ class BacktestOrchestrator:
             message = "Signal processing failed: " f"{type(exc).__name__}: {exc}"
 
             logger.exception(
-                "Backtest signal processing failed: " "strategy=%s symbol=%s",
+                "Backtest signal processing failed: strategy=%s symbol=%s",
                 strategy_id,
                 symbol,
             )
@@ -746,7 +761,7 @@ class BacktestOrchestrator:
 
         if self._current_candle is None:
             raise BacktestOrchestrationError(
-                "Cannot evaluate risk without a current " "backtest candle.",
+                "Cannot evaluate risk without a current backtest candle.",
             )
 
         account = self._build_account_snapshot()
@@ -808,6 +823,12 @@ class BacktestOrchestrator:
         Equity is explicitly:
 
             balance + unrealized P&L
+
+        Daily P&L is explicitly:
+
+            cumulative realized P&L
+                -
+            realized P&L at start of current simulated UTC day
         """
 
         portfolio = self.engine.portfolio
@@ -824,9 +845,12 @@ class BacktestOrchestrator:
             portfolio.margin,
         )
 
-        # The current backtest portfolio does not model broker-reserved
-        # margin, so free margin equals marked equity.
-        free_margin = equity
+        # BacktestPortfolio is authoritative for simulated margin.
+        # Free margin therefore reflects equity less currently reserved
+        # position margin rather than simply mirroring equity.
+        free_margin = self._decimal(
+            portfolio.free_margin,
+        )
 
         margin_level = (
             (equity / margin) * Decimal("100") if margin > Decimal("0") else None
@@ -839,9 +863,7 @@ class BacktestOrchestrator:
             margin=margin,
             free_margin=free_margin,
             margin_level=margin_level,
-            daily_pnl=self._decimal(
-                portfolio.realized_pnl,
-            ),
+            daily_pnl=self._calculate_daily_pnl(),
             peak_equity=self._decimal(
                 portfolio.peak_equity,
             ),
@@ -877,6 +899,73 @@ class BacktestOrchestrator:
             prices=prices,
             contract_sizes=self._resolved_contract_sizes(),
         )
+
+    def _update_daily_pnl_clock(
+        self,
+        timestamp: datetime,
+    ) -> None:
+        """
+        Advance the simulated daily-P&L accounting clock.
+
+        The backtest RiskEngine operates on a simulated UTC calendar.
+        At the first market event of each UTC day, the cumulative
+        realized P&L at that point becomes the baseline for ``daily_pnl``.
+
+        Subsequent risk evaluations during that same day therefore see
+        only realized P&L generated during the current simulated day.
+        """
+
+        if not isinstance(timestamp, datetime):
+            raise BacktestOrchestrationError(
+                "Backtest market-event timestamp must be a datetime.",
+            )
+
+        if timestamp.tzinfo is None:
+            normalized_timestamp = timestamp.replace(
+                tzinfo=timezone.utc,
+            )
+        else:
+            normalized_timestamp = timestamp.astimezone(
+                timezone.utc,
+            )
+
+        current_date = normalized_timestamp.date()
+
+        realized_pnl = self._decimal(
+            self.engine.portfolio.realized_pnl,
+        )
+
+        if self._daily_pnl_date is None:
+            self._daily_pnl_date = current_date
+            self._day_start_realized_pnl = realized_pnl
+            return
+
+        if current_date != self._daily_pnl_date:
+            self._daily_pnl_date = current_date
+            self._day_start_realized_pnl = realized_pnl
+
+    def _calculate_daily_pnl(
+        self,
+    ) -> Decimal:
+        """
+        Return realized P&L accumulated during the current simulated day.
+
+        ``BacktestPortfolio.realized_pnl`` is cumulative for the entire
+        backtest. The RiskEngine's daily-loss rule must instead receive
+        the delta from the beginning of the current simulated UTC
+        calendar day.
+        """
+
+        if self._current_event is not None:
+            self._update_daily_pnl_clock(
+                self._current_event.timestamp,
+            )
+
+        realized_pnl = self._decimal(
+            self.engine.portfolio.realized_pnl,
+        )
+
+        return realized_pnl - self._day_start_realized_pnl
 
     # ==================================================================
     # POSITIONS
@@ -1027,8 +1116,12 @@ class BacktestOrchestrator:
 
             tick_value = tick_size * contract_size
 
-        This gives the RiskEngine a consistent monetary value per tick
-        per one volume unit.
+        The margin model uses the account's resolved leverage:
+
+            margin_rate = 1 / leverage
+
+        This means the RiskEngine receives the correct account-specific
+        margin requirement rather than assuming 100% notional margin.
         """
 
         normalized_symbol = symbol.strip().upper()
@@ -1085,7 +1178,6 @@ class BacktestOrchestrator:
 
         if specification is not None:
             specification_tick_value = specification.tick_value
-
         else:
             specification_tick_value = None
 
@@ -1168,6 +1260,34 @@ class BacktestOrchestrator:
                 f"'{normalized_symbol}': {volume_step}",
             )
 
+        # --------------------------------------------------------------
+        # Account leverage -> margin rate
+        # --------------------------------------------------------------
+
+        leverage = self.engine.config.leverage
+
+        if leverage is None:
+            raise BacktestOrchestrationError(
+                "Backtest account leverage has not been resolved.",
+            )
+
+        leverage = self._decimal(
+            leverage,
+        )
+
+        if leverage <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                f"Invalid backtest account leverage: {leverage}",
+            )
+
+        margin_rate = Decimal("1") / leverage
+
+        if not margin_rate.is_finite() or margin_rate <= Decimal("0"):
+            raise BacktestOrchestrationError(
+                "Failed to derive a valid margin rate from "
+                f"account leverage: {leverage}",
+            )
+
         return SymbolRiskConstraints(
             symbol=normalized_symbol,
             contract_size=contract_size,
@@ -1176,7 +1296,7 @@ class BacktestOrchestrator:
             volume_min=volume_min,
             volume_max=volume_max,
             volume_step=volume_step,
-            margin_rate=Decimal("1"),
+            margin_rate=margin_rate,
         )
 
     def _symbol_specification(
@@ -1228,12 +1348,12 @@ class BacktestOrchestrator:
 
         if not decision.approved:
             raise BacktestOrchestrationError(
-                "Cannot create ExecutionOrder from a rejected " "RiskDecision.",
+                "Cannot create ExecutionOrder from a rejected RiskDecision.",
             )
 
         if decision.position_size is None:
             raise BacktestOrchestrationError(
-                "Approved RiskDecision does not contain a " "position size.",
+                "Approved RiskDecision does not contain a position size.",
             )
 
         position_size = BacktestOrchestrator._decimal(
@@ -1242,7 +1362,7 @@ class BacktestOrchestrator:
 
         if position_size <= Decimal("0"):
             raise BacktestOrchestrationError(
-                "Approved RiskDecision contains an invalid " "position size.",
+                "Approved RiskDecision contains an invalid position size.",
             )
 
         if decision.direction == SignalDirection.LONG:
@@ -1506,7 +1626,9 @@ class BacktestOrchestrator:
     # CONTRACT SIZE
     # ==================================================================
 
-    def _resolved_contract_sizes(self) -> dict[str, Decimal]:
+    def _resolved_contract_sizes(
+        self,
+    ) -> dict[str, Decimal]:
         """
         Resolve contract sizes for all symbols participating in the
         current account-level backtest.
@@ -1531,9 +1653,15 @@ class BacktestOrchestrator:
             for symbol, contract_size in self.engine.config.contract_sizes.items()
         }
 
-        specifications: dict[str, BacktestSymbolSpecification] = {}
+        specifications: dict[
+            str,
+            BacktestSymbolSpecification,
+        ] = {}
 
-        for symbol, specification in self.engine.config.symbol_specifications.items():
+        for (
+            symbol,
+            specification,
+        ) in self.engine.config.symbol_specifications.items():
             normalized_symbol = symbol.strip().upper()
 
             if not normalized_symbol:

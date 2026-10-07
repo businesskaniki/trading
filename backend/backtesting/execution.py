@@ -74,6 +74,19 @@ class BacktestExecution:
               ↓
         BacktestPortfolio
 
+    Margin responsibilities:
+
+        BacktestConfig.leverage
+              ↓
+        margin_rate = 1 / leverage
+              ↓
+        BacktestExecution
+              ↓
+        required margin =
+            volume × fill_price × contract_size × margin_rate
+              ↓
+        BacktestPortfolio.reserve_margin()
+
     This component intentionally does not:
 
         - generate strategy signals
@@ -96,6 +109,7 @@ class BacktestExecution:
         self,
         portfolio: BacktestPortfolio,
         fill_engine: BacktestFillEngine,
+        margin_rate: Decimal,
     ) -> None:
         if portfolio is None:
             raise TypeError("portfolio is required.")
@@ -103,8 +117,21 @@ class BacktestExecution:
         if fill_engine is None:
             raise TypeError("fill_engine is required.")
 
+        if not isinstance(margin_rate, Decimal):
+            try:
+                margin_rate = Decimal(str(margin_rate))
+            except Exception as exc:
+                raise ValueError("margin_rate must be a valid Decimal.") from exc
+
+        if not margin_rate.is_finite():
+            raise ValueError("margin_rate must be finite.")
+
+        if margin_rate <= Decimal("0"):
+            raise ValueError("margin_rate must be greater than zero.")
+
         self.portfolio = portfolio
         self.fill_engine = fill_engine
+        self.margin_rate = margin_rate
 
     # ==================================================================
     # MARKET ORDER EXECUTION
@@ -175,6 +202,7 @@ class BacktestExecution:
             order=order,
             fill=fill,
             context=context,
+            contract_size=contract_size,
         )
 
         return self._success_result(
@@ -194,6 +222,7 @@ class BacktestExecution:
         order: ExecutionOrder,
         fill: BacktestFill,
         context: BacktestExecutionContext | None = None,
+        contract_size: Decimal = Decimal("1"),
     ) -> BacktestPosition:
         """
         Apply an already-generated fill to the shared portfolio.
@@ -209,6 +238,10 @@ class BacktestExecution:
         Entry commission is recorded directly when the position is
         created.
 
+        Required margin is calculated from the actual fill price and
+        the resolved contract size, then reserved against the shared
+        portfolio.
+
         The position model is responsible for accumulating the later
         exit commission when the position is closed.
         """
@@ -221,6 +254,7 @@ class BacktestExecution:
             raise BacktestExecutionError("Cannot apply a fill that is not FILLED.")
 
         self._validate_account(order)
+        self._validate_contract_size(contract_size)
 
         normalized_order_symbol = self._normalize_symbol(
             order.symbol,
@@ -269,11 +303,95 @@ class BacktestExecution:
             entry_commission=entry_commission,
         )
 
-        self.portfolio.add_position(
-            position,
+        # --------------------------------------------------------------
+        # Margin reservation
+        #
+        # required margin is based on the actual filled position:
+        #
+        #     notional =
+        #         volume × fill_price × contract_size
+        #
+        #     margin =
+        #         notional × margin_rate
+        # --------------------------------------------------------------
+
+        required_margin = self.calculate_required_margin(
+            volume=fill.volume,
+            price=fill.price,
+            contract_size=contract_size,
         )
 
+        try:
+            self.portfolio.add_position(
+                position,
+                reserved_margin=required_margin,
+            )
+        except BacktestExecutionError:
+            raise
+        except Exception as exc:
+            raise BacktestExecutionError(
+                "Failed to register filled position in the "
+                "backtest portfolio: "
+                f"{type(exc).__name__}: {exc}"
+            ) from exc
+
         return position
+
+    # ==================================================================
+    # MARGIN
+    # ==================================================================
+
+    def calculate_required_margin(
+        self,
+        *,
+        volume: Decimal,
+        price: Decimal,
+        contract_size: Decimal,
+    ) -> Decimal:
+        """
+        Calculate the margin required for a filled position.
+
+        Formula:
+
+            notional exposure =
+                volume × price × contract_size
+
+            required margin =
+                notional exposure × margin_rate
+
+        ``margin_rate`` is resolved from account leverage by the
+        BacktestEngine:
+
+            margin_rate = 1 / leverage
+        """
+
+        if volume <= Decimal("0"):
+            raise BacktestExecutionError(
+                "Volume must be greater than zero for margin calculation."
+            )
+
+        if price <= Decimal("0"):
+            raise BacktestExecutionError(
+                "Price must be greater than zero for margin calculation."
+            )
+
+        self._validate_contract_size(
+            contract_size,
+        )
+
+        notional = volume * price * contract_size
+
+        required_margin = notional * self.margin_rate
+
+        if not required_margin.is_finite():
+            raise BacktestExecutionError("Calculated required margin must be finite.")
+
+        if required_margin <= Decimal("0"):
+            raise BacktestExecutionError(
+                "Calculated required margin must be greater than zero."
+            )
+
+        return required_margin
 
     # ==================================================================
     # PENDING ORDER FILLS
@@ -285,14 +403,20 @@ class BacktestExecution:
         order: ExecutionOrder,
         fill: BacktestFill,
         context: BacktestExecutionContext | None = None,
+        contract_size: Decimal = Decimal("1"),
     ) -> ExecutionResult:
         """
         Apply a fill generated for a pending LIMIT or STOP order.
 
         BacktestEngine owns the pending-order lifecycle. This method only
         applies the already-generated fill to portfolio state.
+
+        Contract size is passed explicitly because pending orders may
+        involve instruments such as XAUUSD/XAUAUD whose contract size
+        is not one.
         """
         self._validate_order(order)
+        self._validate_contract_size(contract_size)
 
         if order.order_type not in {
             OrderType.LIMIT,
@@ -315,6 +439,7 @@ class BacktestExecution:
             order=order,
             fill=fill,
             context=context,
+            contract_size=contract_size,
         )
 
         return self._success_result(
@@ -349,6 +474,9 @@ class BacktestExecution:
 
         Therefore only the exit commission is passed to
         ``portfolio.close_position()``.
+
+        ``BacktestPortfolio.close_position()`` releases any margin that
+        was reserved for the position.
         """
         if not isinstance(position_id, UUID):
             raise BacktestExecutionError("position_id must be a UUID.")
@@ -584,6 +712,9 @@ class BacktestExecution:
 
         Only the exit commission is passed to the portfolio. The position
         already contains its entry commission.
+
+        The portfolio releases the position's reserved margin as part of
+        the close operation.
         """
         self._validate_contract_size(
             contract_size,

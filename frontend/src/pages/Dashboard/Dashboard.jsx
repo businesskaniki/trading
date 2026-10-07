@@ -13,14 +13,24 @@ import {
   FaPlay,
   FaStop,
   FaBolt,
+  FaPause,
+  FaRedo,
 } from "react-icons/fa";
 
-import { loadDashboard } from "../../redux/dashboard/dashboardThunks";
 import {
-  fetchBotStatus,
-  startBot,
-  stopBot,
-} from "../../redux/dashboard/botThunks";
+  fetchPositions,
+  fetchTrades,
+  fetchBrokerAccount,
+} from "../../redux/dashboard/dashboardThunks";
+
+import {
+  fetchEngineStatus,
+  startEngine,
+  stopEngine,
+  pauseEngine,
+  resumeEngine,
+} from "../../redux/dashboard/engine/engineThunks";
+
 import { fetchTradingUniverse } from "../../redux/dashboard/symbols/symbolsThunks";
 import { fetchAccounts } from "../../redux/dashboard/accounts/accountsThunks";
 
@@ -36,7 +46,6 @@ const Dashboard = () => {
   // --------------------------------------------------
 
   const {
-    accounts: dashboardAccounts = [],
     positions = [],
     trades = [],
     loading,
@@ -53,17 +62,9 @@ const Dashboard = () => {
 
   const selectedAccount = accountsState?.selectedAccount || null;
 
-  const accountList = useMemo(() => {
-    if (Array.isArray(accountsState?.accounts)) {
-      return accountsState.accounts;
-    }
-
-    if (Array.isArray(dashboardAccounts)) {
-      return dashboardAccounts;
-    }
-
-    return [];
-  }, [accountsState?.accounts, dashboardAccounts]);
+  // Accounts are owned by accountsSlice.
+  // Do not maintain a second account source in dashboardSlice.
+  const accountList = accountsState?.accounts || [];
 
   // --------------------------------------------------
   // SYMBOL STATE
@@ -73,15 +74,42 @@ const Dashboard = () => {
     (state) => state.symbols?.selectedSymbols || [],
   );
 
-  const accountSymbols = useSelector((state) =>
-    state.symbols?.symbolsByAccount?.[String(selectedAccount?.id)] || [],
+  const accountSymbols = useSelector(
+    (state) =>
+      state.symbols?.symbolsByAccount?.[String(selectedAccount?.id)] || [],
   );
 
   // --------------------------------------------------
-  // BOT STATE
+  // ENGINE STATE
   // --------------------------------------------------
 
-  const bot = useSelector((state) => state.bot);
+  const engine = useSelector(
+    (state) =>
+      state.engine || {
+        status: "STOPPED",
+        mode: null,
+        account: null,
+        market_data: null,
+        strategies: null,
+        pipeline: null,
+        execution: null,
+        loading: false,
+        actionLoading: false,
+        error: null,
+        lastUpdated: null,
+      },
+  );
+
+  const engineStatus = engine.status || "STOPPED";
+
+  const engineRunning = engineStatus === "RUNNING";
+  const enginePaused = engineStatus === "PAUSED";
+  const engineStarting = engineStatus === "STARTING";
+  const engineStopping = engineStatus === "STOPPING";
+
+  const engineBusy = engineStarting || engineStopping || engine.actionLoading;
+
+  const engineAccount = engine.account || null;
 
   // --------------------------------------------------
   // LOCAL STATE
@@ -90,93 +118,92 @@ const Dashboard = () => {
   const [liveTicks, setLiveTicks] = useState({});
 
   // --------------------------------------------------
-  // LOAD DASHBOARD
+  // INITIAL DASHBOARD LOAD
+  // --------------------------------------------------
+  //
+  // These requests are independent and start concurrently:
+  //
+  //   - accounts
+  //   - positions
+  //   - trades
+  //   - engine status
+  //
+  // Account-dependent data is loaded separately once
+  // selectedAccount becomes available.
   // --------------------------------------------------
 
   useEffect(() => {
-    dispatch(loadDashboard());
-    dispatch(fetchBotStatus());
     dispatch(fetchAccounts());
+    dispatch(fetchPositions());
+    dispatch(fetchTrades());
+    dispatch(fetchEngineStatus());
   }, [dispatch]);
 
   // --------------------------------------------------
-  // LOAD SELECTED ACCOUNT'S TRADING UNIVERSE
+  // LOAD SELECTED ACCOUNT DATA
+  // --------------------------------------------------
+  //
+  // Once the account slice has selected an account,
+  // these requests execute concurrently:
+  //
+  //   - trading universe
+  //   - broker account
   // --------------------------------------------------
 
   useEffect(() => {
-    if (!selectedAccount?.id) {
+    const accountId = selectedAccount?.id;
+
+    if (!accountId) {
       return;
     }
 
-    dispatch(fetchTradingUniverse(selectedAccount.id));
+    dispatch(fetchTradingUniverse(accountId));
+    dispatch(fetchBrokerAccount(accountId));
   }, [dispatch, selectedAccount?.id]);
 
   // --------------------------------------------------
-  // REFRESH DASHBOARD
+  // PERIODIC DASHBOARD REFRESH
+  // --------------------------------------------------
+  //
+  // Only refresh data that changes continuously during
+  // normal Dashboard operation.
+  //
+  // Accounts, trading universe and broker account are
+  // intentionally excluded. They are refreshed when the
+  // selected account changes or during manual refresh.
   // --------------------------------------------------
 
   useEffect(() => {
     const refresh = window.setInterval(() => {
-      dispatch(loadDashboard());
-      dispatch(fetchAccounts());
-
-      if (selectedAccount?.id) {
-        dispatch(fetchTradingUniverse(selectedAccount.id));
-      }
+      dispatch(fetchPositions());
+      dispatch(fetchTrades());
+      dispatch(fetchEngineStatus());
     }, 30000);
 
     return () => window.clearInterval(refresh);
-  }, [dispatch, selectedAccount?.id]);
+  }, [dispatch]);
 
   // --------------------------------------------------
   // LIVE TICK STREAMS
   // --------------------------------------------------
 
-  useEffect(() => {
-    const symbolsForStream =
-      selectedSymbols.length > 0
-        ? selectedSymbols
-        : accountSymbols.filter((symbol) => symbol.enabled === true);
-
-    const sockets = symbolsForStream
-      .filter((symbol) => symbol.enabled !== false)
-      .map(
-        (symbol) =>
-          symbol.name ||
-          symbol.symbol ||
-          symbol.symbol_name ||
-          symbol.broker_symbol ||
-          symbol.symbol?.name,
-      )
-      .filter(Boolean)
-      .map((symbol) =>
-        openTickStream(
-          symbol,
-          (payload) =>
-            setLiveTicks((current) => ({
-              ...current,
-              [symbol]: payload.tick,
-            })),
-          () => undefined,
-        ),
-      );
-
-    return () => {
-      sockets.forEach((socket) => socket.close());
-    };
-  }, [selectedSymbols, accountSymbols]);
-
   // --------------------------------------------------
   // MANUAL REFRESH
   // --------------------------------------------------
+  //
+  // Manual refresh reloads all currently relevant
+  // Dashboard data.
+  // --------------------------------------------------
 
   const handleRefresh = () => {
-    dispatch(loadDashboard());
-    dispatch(fetchBotStatus());
     dispatch(fetchAccounts());
+    dispatch(fetchPositions());
+    dispatch(fetchTrades());
+    dispatch(fetchEngineStatus());
 
     if (selectedAccount?.id) {
       dispatch(fetchTradingUniverse(selectedAccount.id));
+      dispatch(fetchBrokerAccount(selectedAccount.id));
     }
   };
 
@@ -184,30 +211,36 @@ const Dashboard = () => {
   // ENGINE CONTROLS
   // --------------------------------------------------
 
-  const handleStartEngine = () => {
-    const symbols = selectedSymbols
-      .map(
-        (symbol) =>
-          symbol.broker_symbol ||
-          symbol.name ||
-          symbol.symbol ||
-          symbol.symbol_name,
-      )
-      .filter(Boolean);
+  const handleStartEngine = async () => {
+    if (!selectedAccount?.id || engineBusy) {
+      return;
+    }
 
-    dispatch(
-      startBot({
-        strategy_name: "ema_cross",
-        strategy_version: "1.0.0",
-        symbols,
-        timeframe: "M1",
-        risk_percent: 1,
-      }),
-    );
+    await dispatch(startEngine(selectedAccount.id));
   };
 
-  const handleStopEngine = () => {
-    dispatch(stopBot());
+  const handleStopEngine = async () => {
+    if (engineBusy) {
+      return;
+    }
+
+    await dispatch(stopEngine());
+  };
+
+  const handlePauseEngine = async () => {
+    if (!engineRunning || engineBusy) {
+      return;
+    }
+
+    await dispatch(pauseEngine());
+  };
+
+  const handleResumeEngine = async () => {
+    if (!enginePaused || engineBusy) {
+      return;
+    }
+
+    await dispatch(resumeEngine());
   };
 
   // --------------------------------------------------
@@ -271,6 +304,21 @@ const Dashboard = () => {
 
     return accountList[0] || null;
   }, [selectedAccount, connectedAccounts, accountList]);
+
+  // --------------------------------------------------
+  // ENGINE ACCOUNT MATCH
+  // --------------------------------------------------
+
+  const engineAccountId = engineAccount?.id ? String(engineAccount.id) : null;
+
+  const selectedAccountId = selectedAccount?.id
+    ? String(selectedAccount.id)
+    : null;
+
+  const engineAccountMatchesSelection =
+    !engineAccountId ||
+    !selectedAccountId ||
+    engineAccountId === selectedAccountId;
 
   // --------------------------------------------------
   // ACCOUNT CURRENCY
@@ -469,10 +517,68 @@ const Dashboard = () => {
   const winRate = trades.length > 0 ? (winningTrades / trades.length) * 100 : 0;
 
   // --------------------------------------------------
-  // ENGINE STATUS
+  // ENGINE STATUS LABEL
   // --------------------------------------------------
 
-  const engineRunning = Boolean(bot.status?.active);
+  const engineStatusLabel = useMemo(() => {
+    switch (engineStatus) {
+      case "STARTING":
+        return "STARTING";
+
+      case "RUNNING":
+        return "RUNNING";
+
+      case "PAUSED":
+        return "PAUSED";
+
+      case "STOPPING":
+        return "STOPPING";
+
+      case "STOPPED":
+      default:
+        return "STOPPED";
+    }
+  }, [engineStatus]);
+
+  // --------------------------------------------------
+  // ENGINE STATUS CLASS
+  // --------------------------------------------------
+
+  const engineStatusClass = useMemo(() => {
+    switch (engineStatus) {
+      case "RUNNING":
+        return "engine-status engine-status--active";
+
+      case "PAUSED":
+        return "engine-status engine-status--paused";
+
+      case "STARTING":
+      case "STOPPING":
+        return "engine-status engine-status--transitioning";
+
+      case "STOPPED":
+      default:
+        return "engine-status";
+    }
+  }, [engineStatus]);
+
+  // --------------------------------------------------
+  // ENGINE MODE
+  // --------------------------------------------------
+
+  const engineModeLabel =
+    engine.mode ||
+    (engineAccount?.is_demo
+      ? "DEMO"
+      : activeAccount?.is_demo
+        ? "DEMO"
+        : "LIVE");
+
+  // --------------------------------------------------
+  // ENGINE ERROR
+  // --------------------------------------------------
+
+  const dashboardError = error || engine.error;
 
   // --------------------------------------------------
   // RENDER
@@ -497,11 +603,11 @@ const Dashboard = () => {
           type="button"
           className="dashboard-refresh"
           onClick={handleRefresh}
-          disabled={loading}
+          disabled={loading || engine.loading}
         >
-          <FaSyncAlt className={loading ? "spin" : ""} />
+          <FaSyncAlt className={loading || engine.loading ? "spin" : ""} />
 
-          {loading ? "Refreshing..." : "Refresh"}
+          {loading || engine.loading ? "Refreshing..." : "Refresh"}
         </button>
       </header>
 
@@ -516,56 +622,180 @@ const Dashboard = () => {
             <h2>Trading Engine</h2>
 
             <p>
-              {selectedAccount
-                ? `Running against ${selectedAccount.account_name || "selected account"}`
-                : "Select a trading account to operate the engine."}
+              {engineRunning || enginePaused
+                ? engineAccount
+                  ? `Engine attached to ${
+                      engineAccount.account_name ||
+                      engineAccount.login ||
+                      "active account"
+                    }`
+                  : "Engine is operating."
+                : selectedAccount
+                  ? `Ready to operate ${
+                      selectedAccount.account_name || "selected account"
+                    }`
+                  : "Select a trading account to operate the engine."}
             </p>
+
+            {(engineRunning || enginePaused) &&
+              !engineAccountMatchesSelection && (
+                <small className="engine-account-warning">
+                  The selected account is different from the account currently
+                  running the engine.
+                </small>
+              )}
           </div>
         </div>
 
         <div className="engine-control__actions">
-          <span
-            className={`engine-status ${
-              engineRunning ? "engine-status--active" : ""
-            }`}
-          >
+          <span className={engineStatusClass}>
             <span className="engine-status__dot" />
 
-            {engineRunning ? "RUNNING" : "STOPPED"}
+            {engineStatusLabel}
           </span>
 
-          <span className="engine-mode">
-            {activeAccount?.is_demo ? "DEMO" : "LIVE"}
-          </span>
+          <span className="engine-mode">{engineModeLabel}</span>
 
-          {!engineRunning ? (
+          {/* STOPPED */}
+          {engineStatus === "STOPPED" && (
             <button
               type="button"
               className="engine-button engine-button--start"
               onClick={handleStartEngine}
-              disabled={!selectedAccount || activeSymbols.length === 0}
+              disabled={!selectedAccount?.id || engineBusy}
             >
               <FaPlay />
               Start Engine
             </button>
-          ) : (
-            <button
-              type="button"
-              className="engine-button engine-button--stop"
-              onClick={handleStopEngine}
-            >
-              <FaStop />
-              Stop Engine
+          )}
+
+          {/* STARTING */}
+          {engineStatus === "STARTING" && (
+            <button type="button" className="engine-button" disabled>
+              <FaSyncAlt className="spin" />
+              Starting...
+            </button>
+          )}
+
+          {/* RUNNING */}
+          {engineStatus === "RUNNING" && (
+            <>
+              <button
+                type="button"
+                className="engine-button"
+                onClick={handlePauseEngine}
+                disabled={engineBusy}
+              >
+                <FaPause />
+                Pause
+              </button>
+
+              <button
+                type="button"
+                className="engine-button engine-button--stop"
+                onClick={handleStopEngine}
+                disabled={engineBusy}
+              >
+                <FaStop />
+                Stop Engine
+              </button>
+            </>
+          )}
+
+          {/* PAUSED */}
+          {engineStatus === "PAUSED" && (
+            <>
+              <button
+                type="button"
+                className="engine-button engine-button--start"
+                onClick={handleResumeEngine}
+                disabled={engineBusy}
+              >
+                <FaRedo />
+                Resume
+              </button>
+
+              <button
+                type="button"
+                className="engine-button engine-button--stop"
+                onClick={handleStopEngine}
+                disabled={engineBusy}
+              >
+                <FaStop />
+                Stop Engine
+              </button>
+            </>
+          )}
+
+          {/* STOPPING */}
+          {engineStatus === "STOPPING" && (
+            <button type="button" className="engine-button" disabled>
+              <FaSyncAlt className="spin" />
+              Stopping...
             </button>
           )}
         </div>
       </section>
 
+      {/* ENGINE DETAILS */}
+      {(engineRunning || enginePaused) && (
+        <section className="engine-runtime">
+          <div className="engine-runtime__item">
+            <span>Account</span>
+
+            <strong>
+              {engineAccount?.account_name ||
+                engineAccount?.login ||
+                engineAccount?.id ||
+                "—"}
+            </strong>
+          </div>
+
+          <div className="engine-runtime__item">
+            <span>Mode</span>
+
+            <strong>{engineModeLabel}</strong>
+          </div>
+
+          <div className="engine-runtime__item">
+            <span>Market Data</span>
+
+            <strong>{engine.market_data ? "ACTIVE" : "—"}</strong>
+          </div>
+
+          <div className="engine-runtime__item">
+            <span>Strategies</span>
+
+            <strong>
+              {engine.strategies
+                ? Array.isArray(engine.strategies)
+                  ? engine.strategies.length
+                  : (engine.strategies.count ??
+                    engine.strategies.active ??
+                    "ACTIVE")
+                : "—"}
+            </strong>
+          </div>
+
+          <div className="engine-runtime__item">
+            <span>Pipeline</span>
+
+            <strong>{engine.pipeline ? "ACTIVE" : "—"}</strong>
+          </div>
+
+          <div className="engine-runtime__item">
+            <span>Execution</span>
+
+            <strong>{engine.execution ? "ACTIVE" : "—"}</strong>
+          </div>
+        </section>
+      )}
+
       {/* ERROR */}
-      {error && (
+      {dashboardError && (
         <div className="dashboard-error">
-          {typeof error === "string"
-            ? error
+          {typeof dashboardError === "string"
+            ? dashboardError
             : "Unable to load some dashboard data."}
         </div>
       )}
@@ -982,9 +1212,11 @@ const Dashboard = () => {
                 <span>Engine</span>
 
                 <strong
-                  className={engineRunning ? "connected" : "disconnected"}
+                  className={
+                    engineRunning || enginePaused ? "connected" : "disconnected"
+                  }
                 >
-                  {engineRunning ? "RUNNING" : "STOPPED"}
+                  {engineStatusLabel}
                 </strong>
               </div>
             </div>
@@ -1005,6 +1237,14 @@ const Dashboard = () => {
         <span>Positions: {openPositions.length}</span>
 
         <span>Trades: {trades.length}</span>
+
+        <span>Engine: {engineStatusLabel}</span>
+
+        {engine.lastUpdated && (
+          <span>
+            Engine Updated: {new Date(engine.lastUpdated).toLocaleTimeString()}
+          </span>
+        )}
 
         {lastUpdated && (
           <span>Updated: {new Date(lastUpdated).toLocaleTimeString()}</span>

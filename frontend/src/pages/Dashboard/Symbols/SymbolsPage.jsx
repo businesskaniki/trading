@@ -1,4 +1,6 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
+import { useVirtualizer } from "@tanstack/react-virtual";
 import { useDispatch, useSelector } from "react-redux";
 
 import { FaCheckCircle, FaCoins, FaSearch, FaSyncAlt } from "react-icons/fa";
@@ -48,10 +50,17 @@ const SymbolsPage = () => {
   // ====================================================================
 
   const accountId = selectedAccount?.id || null;
+
   const symbols = useMemo(
     () => symbolsByAccount[String(accountId)] || [],
     [symbolsByAccount, accountId],
   );
+
+  // ====================================================================
+  // VIRTUAL TABLE
+  // ====================================================================
+
+  const tableWrapperRef = useRef(null);
 
   // ====================================================================
   // LOAD ACCOUNTS
@@ -166,6 +175,57 @@ const SymbolsPage = () => {
       return matchesSearch && matchesAssetClass && matchesSelection;
     });
   }, [symbols, searchTerm, assetFilter, selectionFilter]);
+
+  // ====================================================================
+  // VIRTUALIZED ROWS
+  // ====================================================================
+
+  const rowVirtualizer = useVirtualizer({
+    count: filteredSymbols.length,
+    getScrollElement: () => tableWrapperRef.current,
+
+    /*
+     * Most symbol rows have a very similar height.
+     * Keeping this estimate stable makes scrolling extremely cheap.
+     */
+    estimateSize: () => 72,
+
+    /*
+     * Render a few additional rows above/below the viewport so that
+     * fast scrolling does not expose an empty area.
+     */
+    overscan: 8,
+
+    /*
+     * Measuring actual rows lets TanStack correct the initial estimate
+     * if the CSS causes a row to be taller or shorter.
+     */
+    measureElement: (element) => element?.getBoundingClientRect().height ?? 72,
+  });
+
+  const virtualRows = rowVirtualizer.getVirtualItems();
+
+  const totalVirtualHeight = rowVirtualizer.getTotalSize();
+
+  const firstVirtualRow = virtualRows[0];
+  const lastVirtualRow = virtualRows[virtualRows.length - 1];
+
+  const topSpacerHeight = firstVirtualRow?.start ?? 0;
+
+  const bottomSpacerHeight = lastVirtualRow
+    ? Math.max(0, totalVirtualHeight - lastVirtualRow.end)
+    : 0;
+
+  // Reset scroll position whenever the visible dataset changes.
+  useEffect(() => {
+    if (!tableWrapperRef.current) {
+      return;
+    }
+
+    tableWrapperRef.current.scrollTop = 0;
+
+    rowVirtualizer.scrollToIndex(0);
+  }, [accountId, searchTerm, assetFilter, selectionFilter, rowVirtualizer]);
 
   // ====================================================================
   // ACCOUNT CHANGE
@@ -451,7 +511,6 @@ const SymbolsPage = () => {
 
           <div>
             <span>Total Symbols</span>
-
             <strong>{symbols.length}</strong>
           </div>
         </div>
@@ -461,7 +520,6 @@ const SymbolsPage = () => {
 
           <div>
             <span>Selected</span>
-
             <strong>{selectedCount}</strong>
           </div>
         </div>
@@ -471,7 +529,6 @@ const SymbolsPage = () => {
 
           <div>
             <span>Unselected</span>
-
             <strong>{unselectedCount}</strong>
           </div>
         </div>
@@ -481,7 +538,6 @@ const SymbolsPage = () => {
 
           <div>
             <span>Asset Classes</span>
-
             <strong>{assetClasses.length}</strong>
           </div>
         </div>
@@ -622,27 +678,25 @@ const SymbolsPage = () => {
           </div>
         </header>
 
-        <div className="symbols-table-wrapper">
+        <div ref={tableWrapperRef} className="symbols-table-wrapper">
           <table className="symbols-table">
             <thead>
               <tr>
                 <th>Symbol</th>
-
                 <th>Broker Symbol</th>
-
                 <th>Asset Class</th>
-
                 <th>Precision</th>
-
                 <th>Contract</th>
-
                 <th>Volume Range</th>
-
                 <th>Selection</th>
               </tr>
             </thead>
 
             <tbody>
+              {/* --------------------------------------------------------
+                  LOADING
+              -------------------------------------------------------- */}
+
               {loading && (
                 <tr>
                   <td colSpan="7" className="symbols-empty">
@@ -654,6 +708,10 @@ const SymbolsPage = () => {
                   </td>
                 </tr>
               )}
+
+              {/* --------------------------------------------------------
+                  EMPTY / NO MATCHES
+              -------------------------------------------------------- */}
 
               {!loading && filteredSymbols.length === 0 && (
                 <tr>
@@ -698,115 +756,158 @@ const SymbolsPage = () => {
                 </tr>
               )}
 
-              {!loading &&
-                filteredSymbols.map((accountSymbol) => {
-                  const symbolName =
-                    accountSymbol.symbol_name ||
-                    accountSymbol.name ||
-                    accountSymbol.symbol?.name ||
-                    accountSymbol.broker_symbol ||
-                    "Unknown";
+              {/* --------------------------------------------------------
+                  VIRTUALIZED TABLE
+              -------------------------------------------------------- */}
 
-                  const assetClass =
-                    accountSymbol.asset_class ||
-                    accountSymbol.symbol?.asset_class ||
-                    "OTHER";
+              {!loading && filteredSymbols.length > 0 && (
+                <>
+                  {/* Top spacer */}
 
-                  const enabled = Boolean(accountSymbol.enabled);
-
-                  return (
-                    <tr
-                      key={accountSymbol.id}
-                      className={enabled ? "symbol-row--selected" : ""}
-                    >
-                      {/* ------------------------------------------------
-                            SYMBOL
-                        ------------------------------------------------ */}
-
-                      <td>
-                        <div className="symbol-name">
-                          <div className="symbol-icon">
-                            <FaCoins />
-                          </div>
-
-                          <div>
-                            <strong>{symbolName}</strong>
-
-                            <span>
-                              {accountSymbol.path || "MT5 instrument"}
-                            </span>
-                          </div>
-                        </div>
-                      </td>
-
-                      {/* ------------------------------------------------
-                            BROKER SYMBOL
-                        ------------------------------------------------ */}
-
-                      <td>
-                        <strong>{accountSymbol.broker_symbol || "—"}</strong>
-                      </td>
-
-                      {/* ------------------------------------------------
-                            ASSET CLASS
-                        ------------------------------------------------ */}
-
-                      <td>
-                        <span className="symbol-asset">{assetClass}</span>
-                      </td>
-
-                      {/* ------------------------------------------------
-                            PRECISION
-                        ------------------------------------------------ */}
-
-                      <td>
-                        <strong>{accountSymbol.digits ?? "—"}</strong>
-
-                        <span className="symbol-subvalue">digits</span>
-                      </td>
-
-                      {/* ------------------------------------------------
-                            CONTRACT
-                        ------------------------------------------------ */}
-
-                      <td>{accountSymbol.contract_size ?? "—"}</td>
-
-                      {/* ------------------------------------------------
-                            VOLUME
-                        ------------------------------------------------ */}
-
-                      <td>
-                        {accountSymbol.min_volume ?? "—"} -{" "}
-                        {accountSymbol.max_volume ?? "—"}
-                        <span className="symbol-subvalue">
-                          step {accountSymbol.volume_step ?? "—"}
-                        </span>
-                      </td>
-
-                      {/* ------------------------------------------------
-                            SELECTION
-                        ------------------------------------------------ */}
-
-                      <td>
-                        <button
-                          type="button"
-                          className={`symbol-selection ${
-                            enabled ? "symbol-selection--enabled" : ""
-                          }`}
-                          onClick={() => handleToggleSelection(accountSymbol)}
-                          disabled={selecting}
-                          title={enabled ? "Disable symbol" : "Enable symbol"}
-                        >
-                          <span className="symbol-selection__indicator">
-                            {enabled && <FaCheckCircle />}
-                          </span>
-
-                          <span>{enabled ? "Enabled" : "Disabled"}</span>
-                        </button>
-                      </td>
+                  {topSpacerHeight > 0 && (
+                    <tr aria-hidden="true" className="symbols-virtual-spacer">
+                      <td
+                        colSpan="7"
+                        style={{
+                          height: topSpacerHeight,
+                          padding: 0,
+                          border: 0,
+                        }}
+                      />
                     </tr>
-                  );
-                })}
+                  )}
+
+                  {/* Visible rows only */}
+
+                  {virtualRows.map((virtualRow) => {
+                    const accountSymbol = filteredSymbols[virtualRow.index];
+
+                    const symbolName =
+                      accountSymbol.symbol_name ||
+                      accountSymbol.name ||
+                      accountSymbol.symbol?.name ||
+                      accountSymbol.broker_symbol ||
+                      "Unknown";
+
+                    const assetClass =
+                      accountSymbol.asset_class ||
+                      accountSymbol.symbol?.asset_class ||
+                      "OTHER";
+
+                    const enabled = Boolean(accountSymbol.enabled);
+
+                    return (
+                      <tr
+                        key={accountSymbol.id}
+                        ref={rowVirtualizer.measureElement}
+                        data-index={virtualRow.index}
+                        className={enabled ? "symbol-row--selected" : ""}
+                      >
+                        {/* ------------------------------------------------
+                                SYMBOL
+                            ------------------------------------------------ */}
+
+                        <td>
+                          <div className="symbol-name">
+                            <div className="symbol-icon">
+                              <FaCoins />
+                            </div>
+
+                            <div>
+                              <strong>{symbolName}</strong>
+
+                              <span>
+                                {accountSymbol.path || "MT5 instrument"}
+                              </span>
+                            </div>
+                          </div>
+                        </td>
+
+                        {/* ------------------------------------------------
+                                BROKER SYMBOL
+                            ------------------------------------------------ */}
+
+                        <td>
+                          <strong>{accountSymbol.broker_symbol || "—"}</strong>
+                        </td>
+
+                        {/* ------------------------------------------------
+                                ASSET CLASS
+                            ------------------------------------------------ */}
+
+                        <td>
+                          <span className="symbol-asset">{assetClass}</span>
+                        </td>
+
+                        {/* ------------------------------------------------
+                                PRECISION
+                            ------------------------------------------------ */}
+
+                        <td>
+                          <strong>{accountSymbol.digits ?? "—"}</strong>
+
+                          <span className="symbol-subvalue">digits</span>
+                        </td>
+
+                        {/* ------------------------------------------------
+                                CONTRACT
+                            ------------------------------------------------ */}
+
+                        <td>{accountSymbol.contract_size ?? "—"}</td>
+
+                        {/* ------------------------------------------------
+                                VOLUME
+                            ------------------------------------------------ */}
+
+                        <td>
+                          {accountSymbol.min_volume ?? "—"} -{" "}
+                          {accountSymbol.max_volume ?? "—"}
+                          <span className="symbol-subvalue">
+                            step {accountSymbol.volume_step ?? "—"}
+                          </span>
+                        </td>
+
+                        {/* ------------------------------------------------
+                                SELECTION
+                            ------------------------------------------------ */}
+
+                        <td>
+                          <button
+                            type="button"
+                            className={`symbol-selection ${
+                              enabled ? "symbol-selection--enabled" : ""
+                            }`}
+                            onClick={() => handleToggleSelection(accountSymbol)}
+                            disabled={selecting}
+                            title={enabled ? "Disable symbol" : "Enable symbol"}
+                          >
+                            <span className="symbol-selection__indicator">
+                              {enabled && <FaCheckCircle />}
+                            </span>
+
+                            <span>{enabled ? "Enabled" : "Disabled"}</span>
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+
+                  {/* Bottom spacer */}
+
+                  {bottomSpacerHeight > 0 && (
+                    <tr aria-hidden="true" className="symbols-virtual-spacer">
+                      <td
+                        colSpan="7"
+                        style={{
+                          height: bottomSpacerHeight,
+                          padding: 0,
+                          border: 0,
+                        }}
+                      />
+                    </tr>
+                  )}
+                </>
+              )}
             </tbody>
           </table>
         </div>

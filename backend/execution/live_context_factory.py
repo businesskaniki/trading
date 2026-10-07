@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Awaitable, Callable
+from typing import Any, Awaitable, Callable
 from uuid import UUID
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -25,7 +25,6 @@ from .live_context_provider import (
     LiveSymbolState,
 )
 
-
 AccountIdResolver = Callable[
     [TradingSignal],
     Awaitable[UUID] | UUID,
@@ -38,17 +37,35 @@ class LiveContextFactory:
     """
     Construct the concrete live Risk Context provider.
 
-    This is the application wiring layer between AQE persistence,
-    the broker abstraction, and the Risk Engine.
+    Current broker trading state is authoritative for LIVE risk evaluation:
+
+        MT5
+        ├── account_info()
+        ├── positions_get()
+        ├── symbol_info()
+        └── tick
+
+    AQE persistence remains authoritative for AQE-specific metadata:
+
+        PostgreSQL
+        ├── TradingAccount identity/configuration
+        ├── Position.id
+        ├── Position.ticket
+        ├── Position.broker_position_id
+        ├── Position.strategy
+        ├── Position.initial_risk
+        ├── AccountSymbol
+        └── canonical symbol mapping
 
     Responsibilities:
         - create database sessions per operation;
-        - create repositories using those sessions;
-        - resolve trading-account state;
+        - retrieve current broker account state;
+        - retrieve current broker positions;
+        - correlate broker positions with AQE positions;
         - resolve AccountSymbol mappings;
         - retrieve live broker symbol metadata;
         - retrieve live broker market prices;
-        - convert AQE Position records into Risk Engine state;
+        - convert state into Risk Engine models;
         - provide RiskConfig.
 
     This class does NOT:
@@ -137,11 +154,7 @@ class LiveContextFactory:
 
         result = self._account_id_resolver(signal)
 
-        account_id = (
-            await result
-            if hasattr(result, "__await__")
-            else result
-        )
+        account_id = await result if hasattr(result, "__await__") else result
 
         if not isinstance(account_id, UUID):
             try:
@@ -158,65 +171,83 @@ class LiveContextFactory:
         account_id: UUID,
     ) -> LiveAccountState:
         """
-        Load the current AQE account state.
+        Load the current account financial state directly from the broker.
 
-        TradingAccount is the authoritative AQE account-state model used
-        by the risk context.
+        MT5 account_info() is authoritative for:
 
-        The account's balance/equity/margin fields are expected to be
-        maintained by the broker/account synchronization layer.
+            balance
+            equity
+            margin
+            margin_free
+            margin_level
 
-        A fresh database session is used for this operation.
+        PostgreSQL TradingAccount remains useful for AQE account metadata,
+        but its synchronized financial snapshot must not be treated as the
+        authoritative source for a LIVE risk decision.
+
+        A fresh broker request is performed for every risk-context build.
         """
 
-        async with self._session_factory() as db:
-            repository = TradingAccountRepository(db)
+        data = await self._broker_manager.get_account()
 
-            account: TradingAccount | None = (
-                await repository.get_by_id(account_id)
-            )
+        if not isinstance(data, dict):
+            raise ValueError("Broker returned invalid account state.")
 
-        if account is None:
-            raise ValueError(
-                f"Trading account {account_id} was not found."
-            )
-
-        equity = self._decimal(
-            account.equity,
-            field="account.equity",
+        balance = self._required_decimal(
+            data,
+            "balance",
+            "account",
         )
 
-        balance = self._decimal(
-            account.balance,
-            field="account.balance",
+        equity = self._required_decimal(
+            data,
+            "equity",
+            "account",
         )
 
-        margin = self._decimal(
-            account.margin,
-            field="account.margin",
+        margin = self._required_decimal(
+            data,
+            "margin",
+            "account",
         )
 
-        free_margin = self._decimal(
-            account.free_margin,
-            field="account.free_margin",
+        free_margin = self._required_decimal(
+            data,
+            "margin_free",
+            "account",
         )
 
-        margin_level = (
-            self._decimal(
-                account.margin_level,
-                field="account.margin_level",
-            )
-            if account.margin_level is not None
-            else None
+        margin_level = self._optional_decimal(
+            data,
+            "margin_level",
+            "account",
         )
+
+        if balance < Decimal("0"):
+            raise ValueError(f"Broker returned invalid account balance: {balance}")
+
+        if equity < Decimal("0"):
+            raise ValueError(f"Broker returned invalid account equity: {equity}")
+
+        if margin < Decimal("0"):
+            raise ValueError(f"Broker returned invalid account margin: {margin}")
+
+        if free_margin < Decimal("0"):
+            raise ValueError(f"Broker returned invalid free margin: {free_margin}")
+
+        if margin_level is not None and margin_level < Decimal("0"):
+            raise ValueError(f"Broker returned invalid margin level: {margin_level}")
 
         return LiveAccountState(
-            account_id=account.id,
+            account_id=account_id,
             balance=balance,
             equity=equity,
             margin=margin,
             free_margin=free_margin,
             margin_level=margin_level,
+            # These are intentionally not fabricated from the current
+            # broker snapshot. Daily P/L and peak equity require a defined
+            # session/history policy and are handled separately.
             daily_pnl=Decimal("0"),
             peak_equity=None,
         )
@@ -230,111 +261,319 @@ class LiveContextFactory:
         account_id: UUID,
     ) -> list[LivePositionState]:
         """
-        Load open AQE positions for the account.
+        Load the broker's current open positions and correlate them with AQE.
 
-        Position synchronization remains responsible for keeping these
-        records aligned with the broker.
+        Broker state is authoritative for current:
 
-        The Risk Engine receives the normalized AQE representation and
-        remains unaware of SQLAlchemy models.
+            volume
+            entry price
+            current price
+            stop loss
+            take profit
+            floating profit
+            direction
 
-        A fresh database session is used for this operation.
+        AQE persistence supplies:
+
+            Position.id
+            canonical symbol
+            strategy
+            initial risk
+            broker correlation metadata
+
+        An open broker position that cannot be correlated to an AQE Position
+        is treated as a reconciliation failure rather than silently ignored.
+
+        Silently ignoring an externally-created or otherwise-unreconciled
+        live position could cause RiskEngine to underestimate exposure.
         """
 
-        async with self._session_factory() as db:
-            repository = PositionRepository(db)
+        broker_positions = await self._broker_manager.get_positions()
 
-            positions = (
-                await repository.get_open_positions_by_account(
-                    account_id
+        if broker_positions is None:
+            broker_positions = []
+
+        if not isinstance(broker_positions, list):
+            broker_positions = list(broker_positions)
+
+        async with self._session_factory() as db:
+            position_repository = PositionRepository(db)
+
+            aqe_positions = await position_repository.get_open_positions_by_account(
+                account_id,
+            )
+
+        by_ticket: dict[int, Position] = {}
+        by_broker_position_id: dict[str, Position] = {}
+
+        for position in aqe_positions:
+            if position.account_id != account_id:
+                continue
+
+            if position.ticket in by_ticket:
+                raise ValueError(
+                    f"Duplicate AQE position ticket detected for account "
+                    f"{account_id}: ticket={position.ticket}"
+                )
+
+            by_ticket[int(position.ticket)] = position
+
+            if position.broker_position_id is not None:
+                broker_position_id = str(position.broker_position_id).strip()
+
+                if broker_position_id:
+                    existing = by_broker_position_id.get(
+                        broker_position_id,
+                    )
+
+                    if existing is not None and existing.id != position.id:
+                        raise ValueError(
+                            "Duplicate AQE broker position ID detected for "
+                            f"account {account_id}: "
+                            f"broker_position_id={broker_position_id!r}"
+                        )
+
+                    by_broker_position_id[broker_position_id] = position
+
+        live_positions: list[LivePositionState] = []
+        matched_aqe_ids: set[UUID] = set()
+
+        for broker_position in broker_positions:
+            if not isinstance(broker_position, dict):
+                raise ValueError("Broker returned an invalid position object.")
+
+            aqe_position = self._correlate_broker_position(
+                broker_position=broker_position,
+                by_ticket=by_ticket,
+                by_broker_position_id=by_broker_position_id,
+                account_id=account_id,
+            )
+
+            if aqe_position.id in matched_aqe_ids:
+                raise ValueError(
+                    "Multiple broker positions resolved to the same AQE "
+                    f"position: position_id={aqe_position.id}"
+                )
+
+            matched_aqe_ids.add(aqe_position.id)
+
+            live_positions.append(
+                self._broker_position_to_live_state(
+                    broker_position=broker_position,
+                    aqe_position=aqe_position,
+                    account_id=account_id,
                 )
             )
 
-        return [
-            self._position_to_live_state(position)
-            for position in positions
-        ]
+        return live_positions
 
     @staticmethod
-    def _position_to_live_state(
-        position: Position,
+    def _correlate_broker_position(
+        *,
+        broker_position: dict[str, Any],
+        by_ticket: dict[int, Position],
+        by_broker_position_id: dict[str, Position],
+        account_id: UUID,
+    ) -> Position:
+        """
+        Correlate one current broker position with an AQE Position.
+
+        MT5 provides both:
+
+            ticket
+            identifier
+
+        AQE persists them separately as:
+
+            Position.ticket
+            Position.broker_position_id
+
+        The identifier is preferred when available. Ticket is retained as
+        a fallback because older AQE records may not yet have a
+        broker_position_id populated.
+        """
+
+        ticket = broker_position.get("ticket")
+        identifier = broker_position.get("identifier")
+
+        position_by_identifier: Position | None = None
+        position_by_ticket: Position | None = None
+
+        if identifier is not None:
+            identifier_key = str(identifier).strip()
+
+            if identifier_key:
+                position_by_identifier = by_broker_position_id.get(
+                    identifier_key,
+                )
+
+        if ticket is not None:
+            try:
+                ticket_value = int(ticket)
+            except (TypeError, ValueError) as exc:
+                raise ValueError("Broker returned an invalid position ticket.") from exc
+
+            position_by_ticket = by_ticket.get(
+                ticket_value,
+            )
+
+        if (
+            position_by_identifier is not None
+            and position_by_ticket is not None
+            and position_by_identifier.id != position_by_ticket.id
+        ):
+            raise ValueError(
+                "Broker position correlation is inconsistent: "
+                f"ticket={ticket!r} and identifier={identifier!r} "
+                "resolve to different AQE positions."
+            )
+
+        position = position_by_identifier or position_by_ticket
+
+        if position is None:
+            raise ValueError(
+                "Current broker position is not correlated with an AQE "
+                f"open position. account_id={account_id} "
+                f"ticket={ticket!r} identifier={identifier!r} "
+                f"symbol={broker_position.get('symbol')!r}."
+            )
+
+        return position
+
+    @staticmethod
+    def _broker_position_to_live_state(
+        *,
+        broker_position: dict[str, Any],
+        aqe_position: Position,
+        account_id: UUID,
     ) -> LivePositionState:
         """
-        Convert an AQE Position model into Risk Engine state.
+        Convert current MT5 position state plus AQE metadata into
+        LivePositionState.
         """
 
-        strategy_id = None
+        broker_account_id = aqe_position.account_id
 
-        if position.strategy is not None:
-            strategy_id = str(position.strategy)
+        if broker_account_id != account_id:
+            raise ValueError("Correlated AQE position belongs to a different account.")
+
+        symbol = aqe_position.symbol
+
+        if symbol is None:
+            raise ValueError(
+                f"AQE position {aqe_position.id} has no associated symbol."
+            )
+
+        canonical_symbol = getattr(
+            symbol,
+            "name",
+            None,
+        )
+
+        if canonical_symbol is None or not str(canonical_symbol).strip():
+            raise ValueError(
+                f"AQE position {aqe_position.id} has an invalid canonical symbol."
+            )
+
+        position_type = broker_position.get("type")
+
+        try:
+            direction = LiveContextFactory._resolve_position_direction(
+                position_type,
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Unable to resolve MT5 position direction for "
+                f"AQE position {aqe_position.id}: type={position_type!r}"
+            ) from exc
+
+        quantity = LiveContextFactory._required_decimal(
+            broker_position,
+            "volume",
+            f"position[{aqe_position.id}]",
+        )
+
+        entry_price = LiveContextFactory._required_decimal(
+            broker_position,
+            "price_open",
+            f"position[{aqe_position.id}]",
+        )
+
+        current_price = LiveContextFactory._required_decimal(
+            broker_position,
+            "price_current",
+            f"position[{aqe_position.id}]",
+        )
+
+        floating_pnl = LiveContextFactory._required_decimal(
+            broker_position,
+            "profit",
+            f"position[{aqe_position.id}]",
+        )
+
+        stop_loss = LiveContextFactory._optional_price(
+            broker_position.get("sl"),
+        )
+
+        take_profit = LiveContextFactory._optional_price(
+            broker_position.get("tp"),
+        )
+
+        initial_risk = (
+            LiveContextFactory._decimal(
+                aqe_position.initial_risk,
+                field=f"position[{aqe_position.id}].initial_risk",
+            )
+            if aqe_position.initial_risk is not None
+            else Decimal("0")
+        )
+
+        strategy_id = str(aqe_position.strategy).strip()
+
+        if not strategy_id:
+            strategy_id = None
 
         return LivePositionState(
-            position_id=position.id,
-            account_id=position.account_id,
-            symbol=LiveContextFactory._position_symbol(position),
-            direction=position.direction,
-            quantity=LiveContextFactory._decimal(
-                position.current_volume,
-                field="position.current_volume",
-            ),
-            entry_price=LiveContextFactory._decimal(
-                position.entry_price,
-                field="position.entry_price",
-            ),
-            current_price=LiveContextFactory._decimal(
-                position.current_price,
-                field="position.current_price",
-            ),
-            stop_loss=(
-                LiveContextFactory._decimal(
-                    position.stop_loss,
-                    field="position.stop_loss",
-                )
-                if position.stop_loss is not None
-                else None
-            ),
-            take_profit=(
-                LiveContextFactory._decimal(
-                    position.take_profit,
-                    field="position.take_profit",
-                )
-                if position.take_profit is not None
-                else None
-            ),
-            unrealized_pnl=LiveContextFactory._decimal(
-                position.floating_profit,
-                field="position.floating_profit",
-            ),
-            risk_amount=LiveContextFactory._decimal(
-                position.initial_risk,
-                field="position.initial_risk",
-            ),
+            position_id=aqe_position.id,
+            account_id=account_id,
+            symbol=str(canonical_symbol).strip().upper(),
+            direction=direction,
+            quantity=quantity,
+            entry_price=entry_price,
+            current_price=current_price,
+            stop_loss=stop_loss,
+            take_profit=take_profit,
+            unrealized_pnl=floating_pnl,
+            risk_amount=initial_risk,
             strategy_id=strategy_id,
         )
 
     @staticmethod
-    def _position_symbol(
-        position: Position,
-    ) -> str:
+    def _resolve_position_direction(
+        position_type: Any,
+    ):
         """
-        Resolve the canonical AQE symbol from the loaded Position.
+        Convert MT5 position type into AQE PositionDirection.
 
-        PositionRepository loads Position.symbol using selectinload().
+        MT5:
+            0 = BUY
+            1 = SELL
         """
 
-        if position.symbol is None:
-            raise ValueError(
-                f"Position {position.id} has no associated symbol."
-            )
+        from app.core.constants import PositionDirection
 
-        name = getattr(position.symbol, "name", None)
+        try:
+            value = int(position_type)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid MT5 position type: {position_type!r}") from exc
 
-        if not name or not str(name).strip():
-            raise ValueError(
-                f"Position {position.id} has an invalid symbol."
-            )
+        if value == 0:
+            return PositionDirection.BUY
 
-        return str(name).strip().upper()
+        if value == 1:
+            return PositionDirection.SELL
+
+        raise ValueError(f"Unsupported MT5 position type: {value!r}")
 
     # ======================================================================
     # SYMBOL
@@ -390,12 +629,13 @@ class LiveContextFactory:
                 "has an empty broker symbol."
             )
 
-        data = await self._broker_manager.get_symbol(broker_symbol)
+        data = await self._broker_manager.get_symbol(
+            broker_symbol,
+        )
 
         if not isinstance(data, dict):
             raise ValueError(
-                f"Broker returned invalid symbol metadata for "
-                f"{broker_symbol!r}."
+                f"Broker returned invalid symbol metadata for " f"{broker_symbol!r}."
             )
 
         return LiveSymbolState(
@@ -462,8 +702,8 @@ class LiveContextFactory:
         adding broker-specific behavior to the repository.
         """
 
-        account_symbols = (
-            await repository.list_by_account(account_id)
+        account_symbols = await repository.list_by_account(
+            account_id,
         )
 
         for account_symbol in account_symbols:
@@ -478,8 +718,7 @@ class LiveContextFactory:
 
             if (
                 symbol_name is not None
-                and str(symbol_name).strip().upper()
-                == canonical_symbol
+                and str(symbol_name).strip().upper() == canonical_symbol
             ):
                 return account_symbol
 
@@ -497,14 +736,16 @@ class LiveContextFactory:
         """
         Retrieve the current broker bid/ask.
 
-        account_id is accepted because the provider contract is
-        account-scoped. BrokerManager itself is already expected to be
-        connected to the appropriate account adapter.
+        The BrokerManager instance is already account-scoped by runtime
+        composition. account_id is therefore validated by the higher-level
+        runtime routing contract and is not passed into BrokerManager itself.
         """
 
         del account_id
 
-        data = await self._broker_manager.get_tick(broker_symbol)
+        data = await self._broker_manager.get_tick(
+            broker_symbol,
+        )
 
         if not isinstance(data, dict):
             raise ValueError(
@@ -514,25 +755,23 @@ class LiveContextFactory:
         bid = self._required_decimal(
             data,
             "bid",
-            broker_symbol,
+            f"tick[{broker_symbol}]",
         )
 
         ask = self._required_decimal(
             data,
             "ask",
-            broker_symbol,
+            f"tick[{broker_symbol}]",
         )
 
         if bid <= Decimal("0"):
             raise ValueError(
-                f"Broker returned an invalid bid for "
-                f"{broker_symbol!r}: {bid}"
+                f"Broker returned an invalid bid for " f"{broker_symbol!r}: {bid}"
             )
 
         if ask <= Decimal("0"):
             raise ValueError(
-                f"Broker returned an invalid ask for "
-                f"{broker_symbol!r}: {ask}"
+                f"Broker returned an invalid ask for " f"{broker_symbol!r}: {ask}"
             )
 
         if ask < bid:
@@ -568,16 +807,10 @@ class LiveContextFactory:
                 signal,
             )
 
-            config = (
-                await result
-                if hasattr(result, "__await__")
-                else result
-            )
+            config = await result if hasattr(result, "__await__") else result
 
             if not isinstance(config, RiskConfig):
-                raise TypeError(
-                    "risk_config_provider must return RiskConfig."
-                )
+                raise TypeError("risk_config_provider must return RiskConfig.")
 
             return config
 
@@ -588,19 +821,84 @@ class LiveContextFactory:
     # ======================================================================
 
     @staticmethod
+    def _required_decimal(
+        data: dict[str, Any],
+        key: str,
+        source: str,
+    ) -> Decimal:
+        """
+        Extract a required numeric value from a broker payload.
+        """
+
+        if key not in data or data[key] is None:
+            raise ValueError(f"{source} is missing required field {key!r}.")
+
+        try:
+            return Decimal(str(data[key]))
+        except Exception as exc:
+            raise ValueError(
+                f"{source} returned an invalid numeric value for "
+                f"{key!r}: {data[key]!r}"
+            ) from exc
+
+    @staticmethod
+    def _optional_decimal(
+        data: dict[str, Any],
+        key: str,
+        source: str,
+    ) -> Decimal | None:
+        """
+        Extract an optional numeric value from a broker payload.
+        """
+
+        value = data.get(key)
+
+        if value is None:
+            return None
+
+        try:
+            return Decimal(str(value))
+        except Exception as exc:
+            raise ValueError(
+                f"{source} returned an invalid numeric value for " f"{key!r}: {value!r}"
+            ) from exc
+
+    @staticmethod
+    def _optional_price(
+        value: Any,
+    ) -> Decimal | None:
+        """
+        Convert an MT5 price field to Decimal.
+
+        MT5 commonly represents an unset SL/TP as 0.0, which should become
+        None in the AQE risk model.
+        """
+
+        if value is None:
+            return None
+
+        try:
+            price = Decimal(str(value))
+        except Exception as exc:
+            raise ValueError(f"Invalid broker position price: {value!r}") from exc
+
+        if price <= Decimal("0"):
+            return None
+
+        return price
+
+    @staticmethod
     def _decimal(
-        value,
+        value: Any,
         *,
         field: str,
     ) -> Decimal:
         """
-        Convert a database/broker numeric value to Decimal.
+        Convert a numeric value to Decimal.
         """
 
         if value is None:
-            raise ValueError(
-                f"{field} cannot be None."
-            )
+            raise ValueError(f"{field} cannot be None.")
 
         try:
             return Decimal(str(value))
@@ -610,32 +908,8 @@ class LiveContextFactory:
             ) from exc
 
     @staticmethod
-    def _required_decimal(
-        data: dict,
-        key: str,
-        symbol: str,
-    ) -> Decimal:
-        """
-        Extract a required numeric broker field.
-        """
-
-        if key not in data or data[key] is None:
-            raise ValueError(
-                f"Broker symbol {symbol!r} is missing required "
-                f"field {key!r}."
-            )
-
-        try:
-            return Decimal(str(data[key]))
-        except Exception as exc:
-            raise ValueError(
-                f"Broker symbol {symbol!r} returned an invalid "
-                f"value for {key!r}: {data[key]!r}"
-            ) from exc
-
-    @staticmethod
     def _symbol_decimal(
-        data: dict,
+        data: dict[str, Any],
         key: str,
         *,
         fallback: Decimal | None = None,
@@ -664,8 +938,7 @@ class LiveContextFactory:
 
             if required:
                 raise ValueError(
-                    f"Broker symbol {symbol!r} is missing required "
-                    f"field {key!r}."
+                    f"Broker symbol {symbol!r} is missing required " f"field {key!r}."
                 )
 
             return Decimal("0")
@@ -700,16 +973,7 @@ def create_live_context_provider(
     margin_rate: Decimal = Decimal("0"),
 ) -> LiveRiskContextProvider:
     """
-    Create the application's concrete live Risk Context Provider.
-
-    Example:
-
-        provider = create_live_context_provider(
-            session_factory=SessionLocal,
-            broker_manager=broker_manager,
-            account_id_resolver=resolve_account,
-            risk_config=RiskConfig(),
-        )
+    Create the application's concrete Live Risk Context Provider.
     """
 
     factory = LiveContextFactory(
@@ -722,3 +986,9 @@ def create_live_context_provider(
     )
 
     return factory.create()
+
+
+__all__ = [
+    "LiveContextFactory",
+    "create_live_context_provider",
+]

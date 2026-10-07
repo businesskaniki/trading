@@ -1,27 +1,27 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 
 from app.api.dependencies import get_user_service
+from app.core.config import settings
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     verify_token,
 )
-from app.core.config import settings
 from app.schemas.auth import (
     LoginRequest,
+    MessageResponse,
     RefreshTokenRequest,
     TokenResponse,
-    MessageResponse,
 )
 from app.schemas.email_verification import (
-    VerifyEmailRequest,
     ResendOTPRequest,
+    VerifyEmailRequest,
 )
-from app.schemas.user import UserCreate, UserResponse
 from app.schemas.password_reset import (
     ForgotPasswordRequest,
     ResetPasswordRequest,
 )
+from app.schemas.user import UserCreate, UserResponse
 
 router = APIRouter(
     prefix="/auth",
@@ -62,7 +62,10 @@ async def register_user(
         await service.create_user(payload)
 
         return MessageResponse(
-            message="Registration successful. Please check your email for the verification code."
+            message=(
+                "Registration successful. "
+                "Please check your email for the verification code."
+            )
         )
 
     except ValueError as exc:
@@ -132,7 +135,10 @@ async def resend_otp(
 # ==========================================================
 
 
-@router.post("/login")
+@router.post(
+    "/login",
+    response_model=TokenResponse,
+)
 async def login(
     payload: LoginRequest,
     response: Response,
@@ -156,12 +162,25 @@ async def login(
             detail="Invalid email or password.",
         )
 
-    access_token = create_access_token(subject=str(user.id), token_version=user.token_version)
-    refresh_token = create_refresh_token(subject=str(user.id), token_version=user.token_version)
-    _set_refresh_cookie(response, refresh_token)
+    access_token = create_access_token(
+        subject=str(user.id),
+        token_version=user.token_version,
+    )
+
+    refresh_token = create_refresh_token(
+        subject=str(user.id),
+        token_version=user.token_version,
+    )
+
+    # Keep the refresh token in an HTTP-only cookie.
+    _set_refresh_cookie(
+        response,
+        refresh_token,
+    )
 
     return TokenResponse(
         access_token=access_token,
+        refresh_token=refresh_token,
         token_type="bearer",
         user=UserResponse.model_validate(user),
     )
@@ -183,12 +202,24 @@ async def refresh_token(
     service=Depends(get_user_service),
 ):
     try:
+        presented_refresh_token = (
+            payload.refresh_token
+            if payload
+            else request.cookies.get(
+                REFRESH_COOKIE_NAME,
+                "",
+            )
+        )
+
         token_data = verify_token(
-            (payload.refresh_token if payload else request.cookies.get(REFRESH_COOKIE_NAME, "")),
+            presented_refresh_token,
             expected_type="refresh",
         )
 
-        user = await service.get_user(token_data["sub"])
+        user = await service.get_user(
+            token_data["sub"],
+        )
+
         if token_data.get("ver") != user.token_version:
             raise ValueError("Token has been revoked")
 
@@ -198,13 +229,40 @@ async def refresh_token(
             detail=str(exc),
         )
 
-    # Rotate the refresh token and invalidate the presented one.
+    # ------------------------------------------------------
+    # Rotate the refresh token.
+    #
+    # Incrementing token_version invalidates the presented
+    # refresh token and makes the newly generated token the
+    # only valid refresh token for this user.
+    # ------------------------------------------------------
+
     user.token_version += 1
-    user = await service.repository.update(user, token_version=user.token_version)
-    new_refresh_token = create_refresh_token(subject=str(user.id), token_version=user.token_version)
-    _set_refresh_cookie(response, new_refresh_token)
+
+    user = await service.repository.update(
+        user,
+        token_version=user.token_version,
+    )
+
+    new_access_token = create_access_token(
+        subject=str(user.id),
+        token_version=user.token_version,
+    )
+
+    new_refresh_token = create_refresh_token(
+        subject=str(user.id),
+        token_version=user.token_version,
+    )
+
+    # Replace the old HTTP-only refresh cookie.
+    _set_refresh_cookie(
+        response,
+        new_refresh_token,
+    )
+
     return TokenResponse(
-        access_token=create_access_token(subject=str(user.id), token_version=user.token_version),
+        access_token=new_access_token,
+        refresh_token=new_refresh_token,
         token_type="bearer",
     )
 
@@ -223,17 +281,44 @@ async def logout(
     response: Response,
     service=Depends(get_user_service),
 ):
-    token = request.cookies.get(REFRESH_COOKIE_NAME)
+    token = request.cookies.get(
+        REFRESH_COOKIE_NAME,
+    )
+
     if token:
         try:
-            token_data = verify_token(token, expected_type="refresh")
-            user = await service.get_user(token_data["sub"])
+            token_data = verify_token(
+                token,
+                expected_type="refresh",
+            )
+
+            user = await service.get_user(
+                token_data["sub"],
+            )
+
             user.token_version += 1
-            await service.repository.update(user, token_version=user.token_version)
+
+            await service.repository.update(
+                user,
+                token_version=user.token_version,
+            )
+
         except ValueError:
+            # Logout should remain successful even when the
+            # existing refresh token is invalid or expired.
             pass
-    response.delete_cookie(REFRESH_COOKIE_NAME, path="/api/v1/auth")
+
+    response.delete_cookie(
+        REFRESH_COOKIE_NAME,
+        path="/api/v1/auth",
+    )
+
     return MessageResponse(message="Logout successful.")
+
+
+# ==========================================================
+# Forgot Password
+# ==========================================================
 
 
 @router.post(
@@ -256,6 +341,11 @@ async def forgot_password(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         )
+
+
+# ==========================================================
+# Reset Password
+# ==========================================================
 
 
 @router.post(

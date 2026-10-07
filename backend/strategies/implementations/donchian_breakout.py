@@ -1,4 +1,4 @@
-"""Donchian Channel breakout strategy with ATR-based risk management."""
+"""Donchian Channel breakout strategy with trend and volatility filters."""
 
 from __future__ import annotations
 
@@ -27,42 +27,116 @@ from strategies.indicators import ATR
 
 
 @dataclass
+class _EMAState:
+    """Incremental EMA state."""
+
+    period: int
+    value: float | None = None
+    previous_value: float | None = None
+
+    def update(
+        self,
+        price: float,
+    ) -> float:
+        """
+        Update the EMA with a completed candle close.
+
+        The first observed close seeds the EMA. The strategy supplies
+        sufficient historical warm-up candles so the resulting value
+        is stable before live/backtest signal generation begins.
+        """
+
+        price = float(price)
+
+        if self.value is None:
+            self.previous_value = None
+            self.value = price
+            return self.value
+
+        self.previous_value = self.value
+
+        multiplier = 2.0 / (self.period + 1.0)
+
+        self.value = price * multiplier + self.value * (1.0 - multiplier)
+
+        return self.value
+
+    @property
+    def slope(self) -> float | None:
+        """
+        Return the most recent EMA slope.
+
+        Positive means rising.
+        Negative means falling.
+        """
+
+        if self.value is None or self.previous_value is None:
+            return None
+
+        return self.value - self.previous_value
+
+
+@dataclass
 class _IndicatorState:
     """Indicator state for one symbol/timeframe pair."""
 
     highs: deque[float]
     lows: deque[float]
+
     atr: ATR
+
+    fast_ema: _EMAState
+    slow_ema: _EMAState
+
     previous_close: float | None = None
-    previous_upper: float | None = None
-    previous_lower: float | None = None
+    previous_atr: float | None = None
+
+    bars_since_signal: int | None = None
     last_signal_timestamp: datetime | None = None
 
 
 @register_strategy("donchian_breakout")
 class DonchianBreakoutStrategy(BaseStrategy):
     """
-    Donchian Channel breakout strategy.
+    Donchian Channel breakout strategy with trend confirmation,
+    breakout-strength filtering, and cooldown.
 
-    Long:
-        Price breaks above the previous Donchian upper channel.
+    Long setup:
 
-    Short:
-        Price breaks below the previous Donchian lower channel.
+        close >
+            previous Donchian upper channel
+            + ATR breakout buffer
 
-    The current candle is excluded from the breakout channel so that
-    the strategy detects an actual breakout rather than comparing the
-    candle against a channel containing itself.
+        AND fast EMA > slow EMA
 
-    Stop-loss and take-profit are calculated using ATR.
+        AND fast EMA is rising
+
+    Short setup:
+
+        close <
+            previous Donchian lower channel
+            - ATR breakout buffer
+
+        AND fast EMA < slow EMA
+
+        AND fast EMA is falling
+
+    The current candle is excluded from the Donchian channel.
+
+    The ATR from the previous completed candle is used for the
+    trade's stop, target, and breakout buffer.
+
+    A cooldown prevents repeated breakout entries in rapid succession,
+    reducing whipsaw participation after a fresh signal.
     """
 
     definition = StrategyDefinition(
         name="donchian_breakout",
-        version="1.0.0",
+        version="1.2.0",
         description=(
             "Donchian Channel breakout strategy with "
-            "ATR-based stop-loss and take-profit."
+            "EMA trend confirmation, ATR breakout filtering, "
+            "and cooldown-based whipsaw control."
         ),
         author="AQE",
         tags=(
@@ -70,14 +144,30 @@ class DonchianBreakoutStrategy(BaseStrategy):
             "donchian",
             "trend",
             "atr",
+            "ema",
+            "volatility",
         ),
     )
 
     DEFAULT_PARAMETERS = {
+        # Donchian channel.
         "donchian_period": 20,
+        # ATR risk model.
         "atr_period": 14,
         "stop_loss_atr": 1.5,
         "take_profit_atr": 3.0,
+        # Trend confirmation.
+        "fast_ema_period": 50,
+        "slow_ema_period": 200,
+        "require_ema_slope": True,
+        # Breakout quality.
+        #
+        # The breakout must close this many ATRs beyond the
+        # previous Donchian boundary.
+        "breakout_buffer_atr": 0.10,
+        # Prevent repeated entries immediately after a signal.
+        "cooldown_bars": 4,
+        # Signal confidence passed downstream to RiskEngine.
         "confidence": 0.70,
     }
 
@@ -97,39 +187,97 @@ class DonchianBreakoutStrategy(BaseStrategy):
         }
 
         self._donchian_period = int(
-            parameters["donchian_period"]
+            parameters["donchian_period"],
         )
+
         self._atr_period = int(
-            parameters["atr_period"]
+            parameters["atr_period"],
         )
+
         self._stop_loss_atr = float(
-            parameters["stop_loss_atr"]
+            parameters["stop_loss_atr"],
         )
+
         self._take_profit_atr = float(
-            parameters["take_profit_atr"]
+            parameters["take_profit_atr"],
         )
+
+        self._fast_ema_period = int(
+            parameters["fast_ema_period"],
+        )
+
+        self._slow_ema_period = int(
+            parameters["slow_ema_period"],
+        )
+
+        self._require_ema_slope = bool(
+            parameters["require_ema_slope"],
+        )
+
+        self._breakout_buffer_atr = float(
+            parameters["breakout_buffer_atr"],
+        )
+
+        self._cooldown_bars = int(
+            parameters["cooldown_bars"],
+        )
+
         self._confidence = float(
-            parameters["confidence"]
+            parameters["confidence"],
         )
+
+        # --------------------------------------------------------------
+        # Configuration validation
+        # --------------------------------------------------------------
 
         if self._donchian_period <= 0:
             raise ValueError(
-                "donchian_period must be greater than zero."
+                "donchian_period must be greater than zero.",
             )
 
         if self._atr_period <= 0:
             raise ValueError(
-                "atr_period must be greater than zero."
+                "atr_period must be greater than zero.",
             )
 
         if self._stop_loss_atr <= 0:
             raise ValueError(
-                "stop_loss_atr must be greater than zero."
+                "stop_loss_atr must be greater than zero.",
             )
 
         if self._take_profit_atr <= 0:
             raise ValueError(
-                "take_profit_atr must be greater than zero."
+                "take_profit_atr must be greater than zero.",
+            )
+
+        if self._fast_ema_period <= 0:
+            raise ValueError(
+                "fast_ema_period must be greater than zero.",
+            )
+
+        if self._slow_ema_period <= 0:
+            raise ValueError(
+                "slow_ema_period must be greater than zero.",
+            )
+
+        if self._fast_ema_period >= self._slow_ema_period:
+            raise ValueError(
+                "fast_ema_period must be smaller than " "slow_ema_period.",
+            )
+
+        if self._breakout_buffer_atr < 0:
+            raise ValueError(
+                "breakout_buffer_atr cannot be negative.",
+            )
+
+        if self._cooldown_bars < 0:
+            raise ValueError(
+                "cooldown_bars cannot be negative.",
+            )
+
+        if not 0.0 <= self._confidence <= 1.0:
+            raise ValueError(
+                "confidence must be between 0 and 1.",
             )
 
         self._states: dict[
@@ -137,13 +285,35 @@ class DonchianBreakoutStrategy(BaseStrategy):
             _IndicatorState,
         ] = {}
 
+    # ==================================================================
+    # LIFECYCLE
+    # ==================================================================
+
     async def on_initialize(self) -> None:
-        """Warm up the strategy using historical candles."""
+        """
+        Warm up the strategy using historical candles.
+
+        Enough candles are loaded to establish:
+
+            - Donchian channel
+            - ATR
+            - fast EMA
+            - slow EMA
+
+        The candles are always processed chronologically.
+        """
+
+        warmup_count = max(
+            self._donchian_period * 3,
+            self._atr_period * 3,
+            self._slow_ema_period * 3,
+            300,
+        )
 
         for symbol in self.symbols:
             for timeframe_name in self.timeframes:
                 timeframe = Timeframe(
-                    timeframe_name.strip().upper()
+                    timeframe_name.strip().upper(),
                 )
 
                 state = self._get_state(
@@ -154,11 +324,12 @@ class DonchianBreakoutStrategy(BaseStrategy):
                 candles = await self.context.get_candles(
                     symbol=symbol,
                     timeframe=timeframe.value,
-                    count=max(
-                        self._donchian_period * 3,
-                        self._atr_period * 3,
-                        100,
-                    ),
+                    count=warmup_count,
+                )
+
+                candles = sorted(
+                    candles,
+                    key=lambda candle: candle.datetime,
                 )
 
                 for candle in candles:
@@ -184,6 +355,10 @@ class DonchianBreakoutStrategy(BaseStrategy):
 
         self._states.clear()
 
+    # ==================================================================
+    # CANDLE PROCESSING
+    # ==================================================================
+
     async def on_candle(
         self,
         candle: MarketCandle,
@@ -193,7 +368,7 @@ class DonchianBreakoutStrategy(BaseStrategy):
         symbol = candle.symbol
 
         timeframe = Timeframe(
-            str(candle.timeframe).strip().upper()
+            str(candle.timeframe).strip().upper(),
         )
 
         state = self._get_state(
@@ -201,99 +376,232 @@ class DonchianBreakoutStrategy(BaseStrategy):
             timeframe,
         )
 
-        # Determine the breakout channel from candles received before
-        # the current candle is added to the state.
+        # --------------------------------------------------------------
+        # Capture indicator values from the PREVIOUS completed candle.
+        #
+        # The current candle must not determine its own Donchian
+        # channel, ATR-based trade risk, or trend state.
+        # --------------------------------------------------------------
+
         previous_upper = self._channel_high(
-            state
-        )
-        previous_lower = self._channel_low(
-            state
+            state,
         )
 
-        atr_value = self._update_state(
+        previous_lower = self._channel_low(
+            state,
+        )
+
+        previous_atr = state.previous_atr
+
+        previous_fast_ema = state.fast_ema.value
+        previous_slow_ema = state.slow_ema.value
+
+        previous_fast_ema_slope = state.fast_ema.slope
+        previous_slow_ema_slope = state.slow_ema.slope
+
+        # --------------------------------------------------------------
+        # Update state with the current completed candle.
+        # --------------------------------------------------------------
+
+        current_atr = self._update_state(
             state,
             candle.high,
             candle.low,
             candle.close,
         )
 
-        if (
-            previous_upper is None
-            or previous_lower is None
-        ):
+        # --------------------------------------------------------------
+        # Basic indicator readiness.
+        # --------------------------------------------------------------
+
+        if previous_upper is None or previous_lower is None:
             return None
 
-        if atr_value <= 0:
+        if previous_atr is None or previous_atr <= 0:
             return None
+
+        if current_atr <= 0:
+            return None
+
+        if previous_fast_ema is None or previous_slow_ema is None:
+            return None
+
+        # --------------------------------------------------------------
+        # Cooldown.
+        #
+        # bars_since_signal is advanced by _update_state().
+        # A signal is allowed only after the configured cooldown
+        # has elapsed.
+        # --------------------------------------------------------------
+
+        if state.bars_since_signal is not None:
+            if state.bars_since_signal < self._cooldown_bars:
+                return None
 
         timestamp = candle.datetime
 
+        # Never emit two signals for the same completed candle.
         if state.last_signal_timestamp == timestamp:
             return None
 
-        close = float(
-            candle.close
+        close = float(candle.close)
+
+        # --------------------------------------------------------------
+        # Breakout buffer.
+        #
+        # The breakout needs to exceed the Donchian boundary by a
+        # meaningful fraction of the previous ATR.
+        # --------------------------------------------------------------
+
+        atr = Decimal(
+            str(previous_atr),
         )
+
+        breakout_buffer = atr * Decimal(
+            str(self._breakout_buffer_atr),
+        )
+
+        upper_breakout_level = (
+            Decimal(
+                str(previous_upper),
+            )
+            + breakout_buffer
+        )
+
+        lower_breakout_level = (
+            Decimal(
+                str(previous_lower),
+            )
+            - breakout_buffer
+        )
+
+        entry_price = Decimal(
+            str(candle.close),
+        )
+
+        # --------------------------------------------------------------
+        # Trend filter.
+        #
+        # Long:
+        #     fast EMA > slow EMA
+        #
+        # Short:
+        #     fast EMA < slow EMA
+        #
+        # Optional slope confirmation requires the fast EMA to move
+        # in the direction of the proposed trade.
+        # --------------------------------------------------------------
+
+        trend_long = previous_fast_ema > previous_slow_ema
+
+        trend_short = previous_fast_ema < previous_slow_ema
+
+        slope_long = True
+        slope_short = True
+
+        if self._require_ema_slope:
+            slope_long = (
+                previous_fast_ema_slope is not None and previous_fast_ema_slope > 0
+            )
+
+            slope_short = (
+                previous_fast_ema_slope is not None and previous_fast_ema_slope < 0
+            )
+
+        # --------------------------------------------------------------
+        # Breakout detection.
+        # --------------------------------------------------------------
 
         direction: SignalDirection | None = None
         reason: str | None = None
 
-        if close > previous_upper:
+        if entry_price > upper_breakout_level and trend_long and slope_long:
             direction = SignalDirection.LONG
+
             reason = (
                 "Price broke above the Donchian "
-                f"{self._donchian_period}-period upper channel"
+                f"{self._donchian_period}-period upper channel "
+                "with ATR breakout confirmation and bullish "
+                "EMA trend alignment."
             )
 
-        elif close < previous_lower:
+        elif entry_price < lower_breakout_level and trend_short and slope_short:
             direction = SignalDirection.SHORT
+
             reason = (
                 "Price broke below the Donchian "
-                f"{self._donchian_period}-period lower channel"
+                f"{self._donchian_period}-period lower channel "
+                "with ATR breakout confirmation and bearish "
+                "EMA trend alignment."
             )
 
         if direction is None:
             return None
 
-        entry_price = Decimal(
-            str(candle.close)
+        # --------------------------------------------------------------
+        # ATR-based risk.
+        #
+        # Use previous completed candle ATR.
+        # --------------------------------------------------------------
+
+        stop_distance = atr * Decimal(
+            str(self._stop_loss_atr),
         )
 
-        atr = Decimal(
-            str(atr_value)
+        target_distance = atr * Decimal(
+            str(self._take_profit_atr),
         )
 
-        stop_distance = (
-            atr
-            * Decimal(
-                str(self._stop_loss_atr)
-            )
-        )
-
-        target_distance = (
-            atr
-            * Decimal(
-                str(self._take_profit_atr)
-            )
-        )
+        if stop_distance <= 0 or target_distance <= 0:
+            return None
 
         if direction is SignalDirection.LONG:
-            stop_loss = (
-                entry_price - stop_distance
-            )
-            take_profit = (
-                entry_price + target_distance
-            )
+            stop_loss = entry_price - stop_distance
+
+            take_profit = entry_price + target_distance
 
         else:
-            stop_loss = (
-                entry_price + stop_distance
+            stop_loss = entry_price + stop_distance
+
+            take_profit = entry_price - target_distance
+
+        risk_distance = abs(
+            entry_price - stop_loss,
+        )
+
+        reward_distance = abs(
+            take_profit - entry_price,
+        )
+
+        if risk_distance <= 0:
+            return None
+
+        reward_risk = reward_distance / risk_distance
+
+        # --------------------------------------------------------------
+        # Breakout diagnostics.
+        # --------------------------------------------------------------
+
+        if direction is SignalDirection.LONG:
+            breakout_distance = entry_price - Decimal(
+                str(previous_upper),
             )
-            take_profit = (
-                entry_price - target_distance
+        else:
+            breakout_distance = (
+                Decimal(
+                    str(previous_lower),
+                )
+                - entry_price
             )
 
+        breakout_distance_atr = breakout_distance / atr if atr > 0 else Decimal("0")
+
+        # --------------------------------------------------------------
+        # Mark the signal.
+        # --------------------------------------------------------------
+
         state.last_signal_timestamp = timestamp
+        state.bars_since_signal = 0
 
         return TradingSignal(
             strategy_id=self.strategy_id,
@@ -313,11 +621,37 @@ class DonchianBreakoutStrategy(BaseStrategy):
                 "donchian_period": self._donchian_period,
                 "upper_channel": previous_upper,
                 "lower_channel": previous_lower,
-                "atr": atr_value,
+                "atr": current_atr,
+                "trade_atr": previous_atr,
                 "stop_loss_atr": self._stop_loss_atr,
                 "take_profit_atr": self._take_profit_atr,
+                "reward_risk": float(reward_risk),
+                # Trend diagnostics.
+                "fast_ema_period": self._fast_ema_period,
+                "slow_ema_period": self._slow_ema_period,
+                "fast_ema": previous_fast_ema,
+                "slow_ema": previous_slow_ema,
+                "fast_ema_slope": previous_fast_ema_slope,
+                "slow_ema_slope": previous_slow_ema_slope,
+                "trend_long": trend_long,
+                "trend_short": trend_short,
+                # Breakout diagnostics.
+                "breakout_buffer_atr": self._breakout_buffer_atr,
+                "breakout_buffer": float(breakout_buffer),
+                "breakout_distance": float(
+                    breakout_distance,
+                ),
+                "breakout_distance_atr": float(
+                    breakout_distance_atr,
+                ),
+                # Cooldown diagnostics.
+                "cooldown_bars": self._cooldown_bars,
             },
         )
+
+    # ==================================================================
+    # STATE
+    # ==================================================================
 
     def _get_state(
         self,
@@ -331,26 +665,34 @@ class DonchianBreakoutStrategy(BaseStrategy):
             timeframe,
         )
 
-        state = self._states.get(
-            key
-        )
+        state = self._states.get(key)
 
         if state is None:
             state = _IndicatorState(
                 highs=deque(
-                    maxlen=self._donchian_period
+                    maxlen=self._donchian_period,
                 ),
                 lows=deque(
-                    maxlen=self._donchian_period
+                    maxlen=self._donchian_period,
                 ),
                 atr=ATR(
-                    self._atr_period
+                    self._atr_period,
+                ),
+                fast_ema=_EMAState(
+                    period=self._fast_ema_period,
+                ),
+                slow_ema=_EMAState(
+                    period=self._slow_ema_period,
                 ),
             )
 
             self._states[key] = state
 
         return state
+
+    # ==================================================================
+    # INDICATOR UPDATES
+    # ==================================================================
 
     def _update_state(
         self,
@@ -359,52 +701,91 @@ class DonchianBreakoutStrategy(BaseStrategy):
         low: float | Decimal,
         close: float | Decimal,
     ) -> float:
-        """Update channel and ATR state."""
+        """
+        Update Donchian, ATR, and EMA state.
+
+        The resulting ATR and EMA values represent the current
+        completed candle and are used as previous-candle values
+        on the next candle.
+        """
+
+        close_float = float(close)
 
         atr_value = state.atr.update(
             high=float(high),
             low=float(low),
-            close=float(close),
+            close=close_float,
+        )
+
+        state.fast_ema.update(
+            close_float,
+        )
+
+        state.slow_ema.update(
+            close_float,
         )
 
         state.highs.append(
-            float(high)
+            float(high),
         )
 
         state.lows.append(
-            float(low)
+            float(low),
         )
 
-        state.previous_close = float(
-            close
-        )
+        state.previous_close = close_float
+
+        if atr_value is not None:
+            state.previous_atr = float(
+                atr_value,
+            )
+
+        # Advance cooldown after processing each completed candle.
+        if state.bars_since_signal is not None:
+            state.bars_since_signal += 1
 
         return atr_value
+
+    # ==================================================================
+    # DONCHIAN CHANNEL
+    # ==================================================================
 
     @staticmethod
     def _channel_high(
         state: _IndicatorState,
     ) -> float | None:
-        """Return the current stored upper channel."""
+        """
+        Return the stored upper Donchian channel.
 
-        if not state.highs:
+        The current candle is not present yet when this method is
+        called from on_candle(), so the returned channel represents
+        the previous completed candles only.
+        """
+
+        if len(state.highs) < 1:
             return None
 
         return max(
-            state.highs
+            state.highs,
         )
 
     @staticmethod
     def _channel_low(
         state: _IndicatorState,
     ) -> float | None:
-        """Return the current stored lower channel."""
+        """
+        Return the stored lower Donchian channel.
 
-        if not state.lows:
+        The current candle is not present yet when this method is
+        called from on_candle(), so the returned channel represents
+        the previous completed candles only.
+        """
+
+        if len(state.lows) < 1:
             return None
 
         return min(
-            state.lows
+            state.lows,
         )
 
 

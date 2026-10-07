@@ -1,67 +1,49 @@
-import React from "react";
-import { StrictMode } from "react";
+import React, { StrictMode } from "react";
 import { BrowserRouter } from "react-router-dom";
 import { Provider } from "react-redux";
 import { MantineProvider } from "@mantine/core";
-
 import "@mantine/core/styles.css";
-
 import ReactDOM from "react-dom/client";
 
 import App from "./App";
 import store from "./redux/store";
-
 import { refreshAccessToken } from "./redux/auth/authThunks";
-
-import { setAuthInitialized } from "./redux/auth/authSlice";
 
 import "./index.css";
 
-// ==========================================================
-// Restore authentication before rendering the application
-// ==========================================================
+// --------------------------------------------------
+// START AUTH RESTORATION
+// --------------------------------------------------
+//
+// Do not block React mounting on the refresh request.
+//
+// ProtectedRoute/PublicRoute already use authInitialized
+// to wait for authentication state before deciding where
+// the user should go.
+//
+// This allows the application shell to mount immediately
+// while authentication is restored in the background.
+// --------------------------------------------------
 
-const restoreAuthentication = async () => {
-  // --------------------------------------------------
-  // Try to restore the session from the HttpOnly refresh cookie
-  //
-  // This happens on EVERY browser reload.
-  //
-  // If the access token is still valid, the backend
-  // may still issue a fresh one depending on your
-  // backend implementation.
-  //
-  // If it is expired, the refresh token keeps the
-  // user logged in.
-  // --------------------------------------------------
+store
+  .dispatch(refreshAccessToken())
+  .unwrap()
+  .catch((error) => {
+    console.info("No active session could be restored.", error);
+  });
 
-  try {
-    await store.dispatch(refreshAccessToken()).unwrap();
-  } catch (error) {
-    console.log("Session could not be restored:", error);
+// --------------------------------------------------
+// MOUNT APPLICATION
+// --------------------------------------------------
 
-    store.dispatch(setAuthInitialized());
-  }
-};
-
-// ==========================================================
-// Bootstrap application
-// ==========================================================
-
-const bootstrap = async () => {
-  await restoreAuthentication();
-
-  ReactDOM.createRoot(document.getElementById("root")).render(
-    <StrictMode>
-      <Provider store={store}>
-        <MantineProvider>
-          <BrowserRouter>
-            <App />
-          </BrowserRouter>
-        </MantineProvider>
-      </Provider>
-    </StrictMode>,
-  );
-};
-
-bootstrap();
+ReactDOM.createRoot(document.getElementById("root")).render(
+  <StrictMode>
+    <Provider store={store}>
+      <MantineProvider>
+        <BrowserRouter>
+          <App />
+        </BrowserRouter>
+      </MantineProvider>
+    </Provider>
+  </StrictMode>,
+);

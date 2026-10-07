@@ -1,229 +1,189 @@
-import { NavLink } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { useDispatch } from "react-redux";
-import { useNavigate } from "react-router-dom";
 
 import {
-    FaChartPie,
-    FaWallet,
-    FaCoins,
-    FaClipboardList,
-    FaExchangeAlt,
-    FaHistory,
-    FaRobot,
-    FaChartLine,
-    FaShieldAlt,
-    FaSignOutAlt,
+  FaChartPie,
+  FaWallet,
+  FaCoins,
+  FaClipboardList,
+  FaExchangeAlt,
+  FaHistory,
+  FaRobot,
+  FaChartLine,
+  FaShieldAlt,
+  FaSignOutAlt,
+  FaFlask,
 } from "react-icons/fa";
 
 import { logoutUser } from "../../redux/auth/authThunks";
 
 import "../../css/dashboardNav.css";
 
-
 const DashboardNav = () => {
-    const dispatch = useDispatch();
-    const navigate = useNavigate();
+  const dispatch = useDispatch();
+  const navigate = useNavigate();
 
-    const navigation = [
+  const navigation = [
+    {
+      title: "Overview",
+      items: [
         {
-            title: "Overview",
-            items: [
-                {
-                    label: "Dashboard",
-                    path: "/dashboard",
-                    icon: <FaChartPie />,
-                    end: true,
-                },
-            ],
+          label: "Dashboard",
+          path: "/dashboard",
+          icon: <FaChartPie />,
+          end: true,
         },
+      ],
+    },
 
+    {
+      title: "Trading",
+      items: [
         {
-            title: "Trading",
-            items: [
-                {
-                    label: "Accounts",
-                    path: "/dashboard/accounts",
-                    icon: <FaWallet />,
-                },
-                {
-                    label: "Symbols",
-                    path: "/dashboard/symbols",
-                    icon: <FaCoins />,
-                },
-                {
-                    label: "Orders",
-                    path: "/dashboard/orders",
-                    icon: <FaClipboardList />,
-                },
-                {
-                    label: "Positions",
-                    path: "/dashboard/positions",
-                    icon: <FaExchangeAlt />,
-                },
-                {
-                    label: "Trades",
-                    path: "/dashboard/trades",
-                    icon: <FaHistory />,
-                },
-            ],
+          label: "Accounts",
+          path: "/dashboard/accounts",
+          icon: <FaWallet />,
         },
-
         {
-            title: "Strategies",
-            items: [
-                {
-                    label: "Strategy Runs",
-                    path: "/dashboard/strategies",
-                    icon: <FaRobot />,
-                },
-            ],
+          label: "Symbols",
+          path: "/dashboard/symbols",
+          icon: <FaCoins />,
         },
-
         {
-            title: "Analytics",
-            items: [
-                {
-                    label: "Performance",
-                    path: "/dashboard/performance",
-                    icon: <FaChartLine />,
-                },
-            ],
+          label: "Orders",
+          path: "/dashboard/orders",
+          icon: <FaClipboardList />,
         },
-
         {
-            title: "Risk",
-            items: [
-                {
-                    label: "Risk Management",
-                    path: "/dashboard/risk",
-                    icon: <FaShieldAlt />,
-                },
-            ],
+          label: "Positions",
+          path: "/dashboard/positions",
+          icon: <FaExchangeAlt />,
         },
-    ];
+        {
+          label: "Trades",
+          path: "/dashboard/trades",
+          icon: <FaHistory />,
+        },
+      ],
+    },
 
+    {
+      title: "Strategies",
+      items: [
+        {
+          label: "Strategy Runs",
+          path: "/dashboard/strategies",
+          icon: <FaRobot />,
+        },
+      ],
+    },
 
-    return (
-        <aside className="dashboard-nav">
+    {
+      title: "Analytics",
+      items: [
+        {
+          label: "Performance",
+          path: "/dashboard/performance",
+          icon: <FaChartLine />,
+        },
+        {
+          label: "Backtesting",
+          path: "/dashboard/backtesting",
+          icon: <FaFlask />,
+        },
+      ],
+    },
 
-            {/* ==========================================
+    {
+      title: "Risk",
+      items: [
+        {
+          label: "Risk Management",
+          path: "/dashboard/risk",
+          icon: <FaShieldAlt />,
+        },
+      ],
+    },
+  ];
+
+  return (
+    <aside className="dashboard-nav">
+      {/* ==========================================
                 HEADER
             ========================================== */}
 
-            <div className="dashboard-nav__header">
+      <div className="dashboard-nav__header">
+        <div className="dashboard-nav__logo">AQE</div>
 
-                <div className="dashboard-nav__logo">
-                    AQE
-                </div>
+        <div className="dashboard-nav__title">
+          <strong>Trading Console</strong>
 
-                <div className="dashboard-nav__title">
+          <span>Athena Quant Engine</span>
+        </div>
+      </div>
 
-                    <strong>
-                        Trading Console
-                    </strong>
-
-                    <span>
-                        Athena Quant Engine
-                    </span>
-
-                </div>
-
-            </div>
-
-
-            {/* ==========================================
+      {/* ==========================================
                 NAVIGATION
             ========================================== */}
 
-            <nav className="dashboard-nav__menu">
+      <nav className="dashboard-nav__menu">
+        {navigation.map((section) => (
+          <div className="dashboard-nav__section" key={section.title}>
+            <span className="dashboard-nav__section-title">
+              {section.title}
+            </span>
 
-                {navigation.map((section) => (
+            <div className="dashboard-nav__items">
+              {section.items.map((item) => (
+                <NavLink
+                  key={item.path}
+                  to={item.path}
+                  end={item.end}
+                  className={({ isActive }) =>
+                    isActive
+                      ? "dashboard-nav__item dashboard-nav__item--active"
+                      : "dashboard-nav__item"
+                  }
+                >
+                  <span className="dashboard-nav__icon">{item.icon}</span>
 
-                    <div
-                        className="dashboard-nav__section"
-                        key={section.title}
-                    >
+                  <span className="dashboard-nav__label">{item.label}</span>
+                </NavLink>
+              ))}
+            </div>
+          </div>
+        ))}
+      </nav>
 
-                        <span className="dashboard-nav__section-title">
-                            {section.title}
-                        </span>
-
-
-                        <div className="dashboard-nav__items">
-
-                            {section.items.map((item) => (
-
-                                <NavLink
-                                    key={item.path}
-                                    to={item.path}
-                                    end={item.end}
-                                    className={({ isActive }) =>
-                                        isActive
-                                            ? "dashboard-nav__item dashboard-nav__item--active"
-                                            : "dashboard-nav__item"
-                                    }
-                                >
-
-                                    <span className="dashboard-nav__icon">
-                                        {item.icon}
-                                    </span>
-
-                                    <span className="dashboard-nav__label">
-                                        {item.label}
-                                    </span>
-
-                                </NavLink>
-
-                            ))}
-
-                        </div>
-
-                    </div>
-
-                ))}
-
-            </nav>
-
-
-            {/* ==========================================
+      {/* ==========================================
                 FOOTER
             ========================================== */}
 
-            <div className="dashboard-nav__footer">
+      <div className="dashboard-nav__footer">
+        <div className="dashboard-nav__status">
+          <span className="dashboard-nav__status-dot" />
 
-                <div className="dashboard-nav__status">
+          <div>
+            <strong>System Online</strong>
 
-                    <span className="dashboard-nav__status-dot" />
+            <span>Trading infrastructure</span>
+          </div>
+        </div>
 
-                    <div>
-                        <strong>
-                            System Online
-                        </strong>
-
-                        <span>
-                            Trading infrastructure
-                        </span>
-                    </div>
-
-                </div>
-
-                <button
-                    type="button"
-                    className="dashboard-nav__logout"
-                    onClick={async () => {
-                        await dispatch(logoutUser());
-                        navigate("/login", { replace: true });
-                    }}
-                >
-                    <FaSignOutAlt />
-                    <span>Log out</span>
-                </button>
-
-            </div>
-
-        </aside>
-    );
+        <button
+          type="button"
+          className="dashboard-nav__logout"
+          onClick={async () => {
+            await dispatch(logoutUser());
+            navigate("/login", { replace: true });
+          }}
+        >
+          <FaSignOutAlt />
+          <span>Log out</span>
+        </button>
+      </div>
+    </aside>
+  );
 };
-
 
 export default DashboardNav;

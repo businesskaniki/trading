@@ -74,6 +74,11 @@ class StrategyInstance:
               │
               ▼
         StrategySignalEvent
+
+    The instance is also responsible for enforcing the StrategyRun
+    boundary. A strategy implementation may only publish signals that
+    belong to this configured strategy instance and its configured
+    symbol/timeframe universe.
     """
 
     strategy: BaseStrategy
@@ -347,14 +352,23 @@ class StrategyInstance:
         """
         Process a market tick and publish generated signals.
 
+        The instance performs a defensive capability check before
+        invoking the strategy implementation.
+
         The underlying strategy remains responsible only for analysis.
-        Any resulting TradingSignal is handed to the signal publisher.
+        Any resulting TradingSignal is validated against this
+        StrategyRun before publication.
 
         Returns:
             Published strategy-signal events.
         """
 
         try:
+            if not self.supports_tick(
+                event.symbol,
+            ):
+                return ()
+
             result = await self.strategy.handle_tick(
                 event,
             )
@@ -379,11 +393,20 @@ class StrategyInstance:
         """
         Process a market candle and publish generated signals.
 
+        The instance performs a defensive capability check before
+        invoking the strategy implementation.
+
         Returns:
             Published strategy-signal events.
         """
 
         try:
+            if not self.supports_candle(
+                symbol=event.symbol,
+                timeframe=event.timeframe,
+            ):
+                return ()
+
             result = await self.strategy.handle_candle(
                 event,
             )
@@ -402,6 +425,107 @@ class StrategyInstance:
             ) from exc
 
     # ==================================================================
+    # SIGNAL VALIDATION
+    # ==================================================================
+
+    @staticmethod
+    def _normalize_symbol(
+        symbol: Any,
+    ) -> str:
+        """
+        Normalize a symbol for runtime comparison.
+        """
+
+        return str(symbol).strip().upper()
+
+    @staticmethod
+    def _normalize_timeframe(
+        timeframe: Any,
+    ) -> str:
+        """
+        Normalize a timeframe for runtime comparison.
+
+        Supports both plain strings and enum-like timeframe values.
+        """
+
+        value = getattr(
+            timeframe,
+            "value",
+            timeframe,
+        )
+
+        return str(value).strip().upper()
+
+    def _validate_signal(
+        self,
+        signal: TradingSignal,
+    ) -> None:
+        """
+        Validate a generated signal against this StrategyRun.
+
+        This is the final strategy-runtime boundary before the signal
+        enters the downstream AQE signal pipeline.
+
+        A signal is valid only when:
+
+            - it belongs to this strategy instance
+            - it belongs to this strategy implementation
+            - its symbol is configured for this StrategyRun
+            - its timeframe is configured for this StrategyRun
+        """
+
+        signal_strategy_id = str(
+            signal.strategy_id,
+        )
+
+        if signal_strategy_id != str(self.strategy_id):
+            raise StrategyExecutionError(
+                f"Strategy instance '{self.strategy_id}' generated "
+                f"a signal belonging to strategy instance "
+                f"'{signal_strategy_id}'."
+            )
+
+        if signal.strategy_name != self.strategy_name:
+            raise StrategyExecutionError(
+                f"Strategy instance '{self.strategy_id}' generated "
+                f"a signal with strategy_name "
+                f"'{signal.strategy_name}', expected "
+                f"'{self.strategy_name}'."
+            )
+
+        normalized_symbol = self._normalize_symbol(
+            signal.symbol,
+        )
+
+        allowed_symbols = {self._normalize_symbol(symbol) for symbol in self.symbols}
+
+        if normalized_symbol not in allowed_symbols:
+            raise StrategyExecutionError(
+                f"Strategy instance '{self.strategy_id}' "
+                f"('{self.strategy_name}') generated a signal for "
+                f"symbol '{signal.symbol}', which is outside its "
+                f"configured StrategyRun symbol universe "
+                f"{self.symbols!r}."
+            )
+
+        normalized_timeframe = self._normalize_timeframe(
+            signal.timeframe,
+        )
+
+        allowed_timeframes = {
+            self._normalize_timeframe(timeframe) for timeframe in self.timeframes
+        }
+
+        if normalized_timeframe not in allowed_timeframes:
+            raise StrategyExecutionError(
+                f"Strategy instance '{self.strategy_id}' "
+                f"('{self.strategy_name}') generated a signal for "
+                f"timeframe '{signal.timeframe}', which is outside "
+                f"its configured StrategyRun timeframe universe "
+                f"{self.timeframes!r}."
+            )
+
+    # ==================================================================
     # SIGNAL PUBLISHING
     # ==================================================================
 
@@ -410,7 +534,7 @@ class StrategyInstance:
         result: TradingSignal | list[TradingSignal] | tuple[TradingSignal, ...] | None,
     ) -> tuple[StrategySignalEvent, ...]:
         """
-        Publish signals generated by the strategy.
+        Validate and publish signals generated by the strategy.
 
         Supported strategy return values:
 
@@ -418,6 +542,9 @@ class StrategyInstance:
             TradingSignal
             list[TradingSignal]
             tuple[TradingSignal, ...]
+
+        Every TradingSignal is validated against this StrategyRun
+        before it is handed to the signal publisher.
 
         The StrategyInstance does not perform risk validation,
         position sizing, or execution.
@@ -444,6 +571,10 @@ class StrategyInstance:
                     f"Strategy '{self.strategy_id}' returned an "
                     f"unsupported signal type: {type(signal).__name__}."
                 )
+
+            self._validate_signal(
+                signal,
+            )
 
             event = await self.signal_publisher.publish(
                 signal,

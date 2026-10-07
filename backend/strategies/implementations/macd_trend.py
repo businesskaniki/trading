@@ -30,8 +30,11 @@ class _IndicatorState:
 
     macd: MACD
     atr: ATR
+
     previous_macd: float | None = None
     previous_signal: float | None = None
+    previous_atr: float | None = None
+
     last_signal_timestamp: datetime | None = None
 
 
@@ -46,12 +49,14 @@ class MACDTrendStrategy(BaseStrategy):
     Short:
         MACD crosses below the signal line.
 
-    Stop-loss and take-profit are calculated using ATR.
+    Stop-loss and take-profit are calculated using ATR from
+    the previous completed candle so that the signal candle
+    does not determine its own risk distance.
     """
 
     definition = StrategyDefinition(
         name="macd_trend",
-        version="1.0.0",
+        version="1.1.0",
         description=(
             "MACD trend-following strategy with "
             "ATR-based stop-loss and take-profit."
@@ -93,12 +98,15 @@ class MACDTrendStrategy(BaseStrategy):
         self._fast_period = int(
             parameters["fast_period"]
         )
+
         self._slow_period = int(
             parameters["slow_period"]
         )
+
         self._signal_period = int(
             parameters["signal_period"]
         )
+
         self._atr_period = int(
             parameters["atr_period"]
         )
@@ -106,12 +114,54 @@ class MACDTrendStrategy(BaseStrategy):
         self._stop_loss_atr = float(
             parameters["stop_loss_atr"]
         )
+
         self._take_profit_atr = float(
             parameters["take_profit_atr"]
         )
+
         self._confidence = float(
             parameters["confidence"]
         )
+
+        if self._fast_period <= 0:
+            raise ValueError(
+                "fast_period must be greater than zero."
+            )
+
+        if self._slow_period <= 0:
+            raise ValueError(
+                "slow_period must be greater than zero."
+            )
+
+        if self._signal_period <= 0:
+            raise ValueError(
+                "signal_period must be greater than zero."
+            )
+
+        if self._atr_period <= 0:
+            raise ValueError(
+                "atr_period must be greater than zero."
+            )
+
+        if self._fast_period >= self._slow_period:
+            raise ValueError(
+                "fast_period must be smaller than slow_period."
+            )
+
+        if self._stop_loss_atr <= 0:
+            raise ValueError(
+                "stop_loss_atr must be greater than zero."
+            )
+
+        if self._take_profit_atr <= 0:
+            raise ValueError(
+                "take_profit_atr must be greater than zero."
+            )
+
+        if not 0.0 <= self._confidence <= 1.0:
+            raise ValueError(
+                "confidence must be between 0 and 1."
+            )
 
         self._states: dict[
             tuple[str, Timeframe],
@@ -141,6 +191,13 @@ class MACDTrendStrategy(BaseStrategy):
                         self._atr_period * 3,
                         100,
                     ),
+                )
+
+                # Indicator state must always be constructed
+                # in chronological order.
+                candles = sorted(
+                    candles,
+                    key=lambda candle: candle.datetime,
                 )
 
                 for candle in candles:
@@ -183,18 +240,18 @@ class MACDTrendStrategy(BaseStrategy):
             timeframe,
         )
 
-        macd_value, atr_value = self._update_indicators(
+        # Preserve previous values before processing the
+        # current completed candle.
+        previous_macd = state.previous_macd
+        previous_signal = state.previous_signal
+        previous_atr = state.previous_atr
+
+        macd_value, current_atr = self._update_indicators(
             state,
             candle.high,
             candle.low,
             candle.close,
         )
-
-        previous_macd = state.previous_macd
-        previous_signal = state.previous_signal
-
-        state.previous_macd = macd_value.macd
-        state.previous_signal = macd_value.signal
 
         if (
             previous_macd is None
@@ -202,8 +259,15 @@ class MACDTrendStrategy(BaseStrategy):
         ):
             return None
 
-        if atr_value <= 0:
+        if previous_atr is None or previous_atr <= 0:
             return None
+
+        if current_atr <= 0:
+            return None
+
+        # Store the current MACD values for the next candle.
+        state.previous_macd = macd_value.macd
+        state.previous_signal = macd_value.signal
 
         timestamp = candle.datetime
 
@@ -213,7 +277,10 @@ class MACDTrendStrategy(BaseStrategy):
         direction: SignalDirection | None = None
         reason: str | None = None
 
-        # MACD crosses above signal line.
+        # --------------------------------------------------------------
+        # Bullish MACD crossover
+        # --------------------------------------------------------------
+
         if (
             previous_macd <= previous_signal
             and macd_value.macd > macd_value.signal
@@ -223,7 +290,10 @@ class MACDTrendStrategy(BaseStrategy):
                 "MACD crossed above the signal line"
             )
 
-        # MACD crosses below signal line.
+        # --------------------------------------------------------------
+        # Bearish MACD crossover
+        # --------------------------------------------------------------
+
         elif (
             previous_macd >= previous_signal
             and macd_value.macd < macd_value.signal
@@ -240,8 +310,9 @@ class MACDTrendStrategy(BaseStrategy):
             str(candle.close)
         )
 
+        # Use the ATR from the previous completed candle.
         atr = Decimal(
-            str(atr_value)
+            str(previous_atr)
         )
 
         stop_distance = (
@@ -258,10 +329,17 @@ class MACDTrendStrategy(BaseStrategy):
             )
         )
 
+        if (
+            stop_distance <= 0
+            or target_distance <= 0
+        ):
+            return None
+
         if direction is SignalDirection.LONG:
             stop_loss = (
                 entry_price - stop_distance
             )
+
             take_profit = (
                 entry_price + target_distance
             )
@@ -270,9 +348,25 @@ class MACDTrendStrategy(BaseStrategy):
             stop_loss = (
                 entry_price + stop_distance
             )
+
             take_profit = (
                 entry_price - target_distance
             )
+
+        reward_distance = abs(
+            take_profit - entry_price
+        )
+
+        risk_distance = abs(
+            entry_price - stop_loss
+        )
+
+        if risk_distance <= 0:
+            return None
+
+        reward_risk = (
+            reward_distance / risk_distance
+        )
 
         state.last_signal_timestamp = timestamp
 
@@ -297,12 +391,14 @@ class MACDTrendStrategy(BaseStrategy):
                 "histogram": macd_value.histogram,
                 "previous_macd": previous_macd,
                 "previous_signal": previous_signal,
-                "atr": atr_value,
+                "atr": current_atr,
+                "trade_atr": previous_atr,
                 "fast_period": self._fast_period,
                 "slow_period": self._slow_period,
                 "signal_period": self._signal_period,
                 "stop_loss_atr": self._stop_loss_atr,
                 "take_profit_atr": self._take_profit_atr,
+                "reward_risk": float(reward_risk),
             },
         )
 
@@ -318,9 +414,7 @@ class MACDTrendStrategy(BaseStrategy):
             timeframe,
         )
 
-        state = self._states.get(
-            key
-        )
+        state = self._states.get(key)
 
         if state is None:
             state = _IndicatorState(
@@ -356,6 +450,11 @@ class MACDTrendStrategy(BaseStrategy):
             low=float(low),
             close=float(close),
         )
+
+        if atr_value is not None:
+            state.previous_atr = float(
+                atr_value
+            )
 
         return (
             macd_value,

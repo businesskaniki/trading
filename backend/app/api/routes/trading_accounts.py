@@ -9,7 +9,6 @@ from ..dependencies import (
     get_trading_account_service,
 )
 
-from app.services.symbol_sync_service import SymbolSyncError
 from app.core.constants import AccountStatus
 from app.database.models.user import User
 from app.schemas.trading_account import (

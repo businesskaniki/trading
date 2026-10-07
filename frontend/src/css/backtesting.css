@@ -1,0 +1,972 @@
+```css
+/* =========================================================
+   AQE — Backtesting Page
+   ========================================================= */
+
+.backtesting-page {
+  min-height: 100%;
+  padding: 28px;
+  color: #f3f6fb;
+  background: #0b111a;
+}
+
+/* =========================================================
+   Header
+   ========================================================= */
+
+.backtesting-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  margin-bottom: 24px;
+}
+
+.backtesting-title-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.backtesting-title-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 46px;
+  height: 46px;
+  flex: 0 0 46px;
+  border: 1px solid #26354a;
+  border-radius: 12px;
+  background: #111a27;
+  color: #4da3ff;
+  font-size: 19px;
+}
+
+.backtesting-header h1 {
+  margin: 0;
+  font-size: 25px;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: #f3f6fb;
+}
+
+.backtesting-header p {
+  margin: 5px 0 0;
+  color: #8d9aae;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.backtesting-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+}
+
+/* =========================================================
+   Buttons
+   ========================================================= */
+
+.backtesting-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 38px;
+  padding: 0 14px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease,
+    opacity 0.18s ease;
+}
+
+.backtesting-button:hover:not(:disabled) {
+  transform: translateY(-1px);
+}
+
+.backtesting-button:active:not(:disabled) {
+  transform: translateY(0);
+}
+
+.backtesting-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.backtesting-button.primary {
+  background: #2563eb;
+  border-color: #2563eb;
+  color: #ffffff;
+}
+
+.backtesting-button.primary:hover:not(:disabled) {
+  background: #3274f0;
+  border-color: #3274f0;
+}
+
+.backtesting-button.secondary {
+  background: #111a27;
+  border-color: #26354a;
+  color: #c7d0dc;
+}
+
+.backtesting-button.secondary:hover:not(:disabled) {
+  background: #172235;
+  border-color: #34465f;
+  color: #f3f6fb;
+}
+
+.backtesting-button.danger {
+  background: #dc3545;
+  border-color: #dc3545;
+  color: #ffffff;
+}
+
+.backtesting-button.danger:hover:not(:disabled) {
+  background: #e34857;
+  border-color: #e34857;
+}
+
+.backtesting-button.danger-outline {
+  background: transparent;
+  border-color: #61303a;
+  color: #ef7b88;
+}
+
+.backtesting-button.danger-outline:hover:not(:disabled) {
+  background: #211319;
+  border-color: #82404c;
+  color: #ff8d98;
+}
+
+.backtesting-button.large {
+  min-height: 42px;
+  padding: 0 18px;
+}
+
+.backtesting-spin {
+  animation: backtesting-spin 0.9s linear infinite;
+}
+
+@keyframes backtesting-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* =========================================================
+   Error Banner
+   ========================================================= */
+
+.backtesting-error {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+  padding: 12px 14px;
+  border: 1px solid #5b2d36;
+  border-radius: 9px;
+  background: #21141a;
+  color: #f18b97;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+/* =========================================================
+   Main Layout
+   ========================================================= */
+
+.backtesting-layout {
+  display: grid;
+  grid-template-columns: 330px minmax(0, 1fr);
+  gap: 20px;
+  min-width: 0;
+}
+
+.backtesting-sidebar,
+.backtesting-content {
+  min-width: 0;
+}
+
+.backtesting-sidebar {
+  display: flex;
+  flex-direction: column;
+  min-height: 620px;
+  overflow: hidden;
+  border: 1px solid #202c3e;
+  border-radius: 12px;
+  background: #0d141f;
+}
+
+.backtesting-sidebar-header {
+  padding: 17px 18px;
+  border-bottom: 1px solid #202c3e;
+}
+
+.backtesting-sidebar-header h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 700;
+  color: #f3f6fb;
+}
+
+.backtesting-sidebar-header p {
+  margin: 4px 0 0;
+  color: #758297;
+  font-size: 12px;
+}
+
+.backtesting-section-label {
+  display: block;
+  margin-bottom: 9px;
+  color: #718096;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+/* =========================================================
+   Sidebar Empty / List
+   ========================================================= */
+
+.backtesting-sidebar-empty {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 300px;
+  padding: 30px;
+  text-align: center;
+  color: #69778b;
+}
+
+.backtesting-sidebar-empty svg {
+  margin-bottom: 4px;
+  font-size: 22px;
+  color: #435268;
+}
+
+.backtesting-sidebar-empty strong {
+  color: #aeb8c6;
+  font-size: 13px;
+}
+
+.backtesting-sidebar-empty span {
+  max-width: 230px;
+  color: #69778b;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.backtesting-list {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 8px;
+}
+
+.backtesting-list::-webkit-scrollbar {
+  width: 5px;
+}
+
+.backtesting-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.backtesting-list::-webkit-scrollbar-thumb {
+  border-radius: 10px;
+  background: #26354a;
+}
+
+.backtesting-list-item {
+  width: 100%;
+  padding: 13px 12px;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease;
+}
+
+.backtesting-list-item + .backtesting-list-item {
+  margin-top: 4px;
+}
+
+.backtesting-list-item:hover {
+  background: #111a27;
+  border-color: #1e2b3d;
+}
+
+.backtesting-list-item.selected {
+  background: #132033;
+  border-color: #2a4c72;
+}
+
+.backtesting-list-item-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+
+.backtesting-list-item-top strong {
+  min-width: 0;
+  overflow: hidden;
+  color: #e7edf5;
+  font-size: 13px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtesting-list-item-meta {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #758297;
+  font-size: 11px;
+}
+
+.backtesting-list-item-meta span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtesting-list-item-meta svg {
+  flex-shrink: 0;
+}
+
+/* =========================================================
+   Status Badges
+   ========================================================= */
+
+.backtesting-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  min-height: 22px;
+  padding: 0 7px;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.backtesting-status.created {
+  background: #172033;
+  border-color: #293952;
+  color: #9eacc0;
+}
+
+.backtesting-status.running {
+  background: #102943;
+  border-color: #24517d;
+  color: #65b4ff;
+}
+
+.backtesting-status.completed {
+  background: #102b20;
+  border-color: #235a3f;
+  color: #64d89a;
+}
+
+.backtesting-status.stopped {
+  background: #292514;
+  border-color: #574b26;
+  color: #d9bd69;
+}
+
+.backtesting-status.failed {
+  background: #28161b;
+  border-color: #5a2d37;
+  color: #ef7d8b;
+}
+
+.backtesting-status.unknown {
+  background: #171d27;
+  border-color: #293342;
+  color: #8995a7;
+}
+
+/* =========================================================
+   Main Content
+   ========================================================= */
+
+.backtesting-content {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.backtesting-card {
+  overflow: hidden;
+  border: 1px solid #202c3e;
+  border-radius: 12px;
+  background: #0d141f;
+}
+
+.backtesting-card-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 18px 20px;
+  border-bottom: 1px solid #202c3e;
+}
+
+.backtesting-card-header h2 {
+  margin: 0;
+  color: #f3f6fb;
+  font-size: 15px;
+  font-weight: 700;
+}
+
+.backtesting-card-header p {
+  margin: 5px 0 0;
+  color: #778499;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+/* =========================================================
+   Configuration Form
+   ========================================================= */
+
+.backtesting-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+  padding: 20px;
+}
+
+.backtesting-field {
+  min-width: 0;
+}
+
+.backtesting-field.full {
+  grid-column: 1 / -1;
+}
+
+.backtesting-field label {
+  display: block;
+  margin-bottom: 7px;
+  color: #aeb8c6;
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.backtesting-input-icon {
+  position: relative;
+}
+
+.backtesting-input-icon svg {
+  position: absolute;
+  top: 50%;
+  left: 12px;
+  z-index: 1;
+  color: #627087;
+  font-size: 13px;
+  pointer-events: none;
+  transform: translateY(-50%);
+}
+
+.backtesting-form input,
+.backtesting-form select {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid #29364a;
+  border-radius: 8px;
+  outline: none;
+  background: #111a27;
+  color: #e8edf5;
+  font: inherit;
+  font-size: 12px;
+  transition:
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.backtesting-form input::placeholder {
+  color: #59677b;
+}
+
+.backtesting-form input:focus,
+.backtesting-form select:focus {
+  border-color: #3479c5;
+  background: #121d2b;
+  box-shadow: 0 0 0 3px rgba(52, 121, 197, 0.12);
+}
+
+.backtesting-form input[type="datetime-local"] {
+  color-scheme: dark;
+}
+
+.backtesting-input-icon input {
+  padding-left: 36px;
+}
+
+.backtesting-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 40px;
+  padding: 0 2px;
+  cursor: pointer;
+}
+
+.backtesting-checkbox input {
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  accent-color: #3479c5;
+  cursor: pointer;
+}
+
+.backtesting-checkbox span {
+  color: #9ca8b8;
+  font-size: 12px;
+}
+
+.backtesting-form-actions {
+  display: flex;
+  justify-content: flex-end;
+  grid-column: 1 / -1;
+  gap: 10px;
+  padding-top: 3px;
+}
+
+/* =========================================================
+   Selected Backtest
+   ========================================================= */
+
+.backtesting-selected-card {
+  flex-shrink: 0;
+}
+
+.backtesting-status-large {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border: 1px solid #26354a;
+  border-radius: 7px;
+  background: #111a27;
+  color: #aab6c6;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.backtesting-status-large.running {
+  border-color: #24517d;
+  background: #102943;
+  color: #65b4ff;
+}
+
+.backtesting-status-large.completed {
+  border-color: #235a3f;
+  background: #102b20;
+  color: #64d89a;
+}
+
+.backtesting-status-large.stopped {
+  border-color: #574b26;
+  background: #292514;
+  color: #d9bd69;
+}
+
+.backtesting-status-large.failed {
+  border-color: #5a2d37;
+  background: #28161b;
+  color: #ef7d8b;
+}
+
+.backtesting-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.backtesting-status-large.running .backtesting-status-dot {
+  animation: backtesting-status-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes backtesting-status-pulse {
+  0%,
+  100% {
+    opacity: 0.45;
+    transform: scale(0.85);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1.1);
+  }
+}
+
+/* =========================================================
+   Detail Grid
+   ========================================================= */
+
+.backtesting-details-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 20px;
+  overflow: hidden;
+  border: 1px solid #202c3e;
+  border-radius: 9px;
+  background: #202c3e;
+}
+
+.backtesting-detail {
+  min-width: 0;
+  padding: 13px 14px;
+  background: #111a27;
+}
+
+.backtesting-detail-label {
+  display: block;
+  margin-bottom: 6px;
+  color: #69778b;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.backtesting-detail-value {
+  display: block;
+  overflow: hidden;
+  color: #dbe2eb;
+  font-size: 12px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backtesting-run-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 9px;
+  padding: 0 20px 20px;
+}
+
+/* =========================================================
+   Running Panel
+   ========================================================= */
+
+.backtesting-running-panel {
+  display: flex;
+  align-items: center;
+  gap: 15px;
+  margin: 0 20px 20px;
+  padding: 16px;
+  border: 1px solid #23415f;
+  border-radius: 9px;
+  background: #0e1d2d;
+}
+
+.backtesting-running-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 38px;
+  border-radius: 9px;
+  background: #15324f;
+  color: #61b1ff;
+  font-size: 15px;
+}
+
+.backtesting-running-panel strong {
+  display: block;
+  margin-bottom: 3px;
+  color: #dce8f6;
+  font-size: 12px;
+}
+
+.backtesting-running-panel span {
+  color: #71859b;
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+/* =========================================================
+   Result States
+   ========================================================= */
+
+.backtesting-result-placeholder {
+  display: flex;
+  align-items: flex-start;
+  gap: 13px;
+  margin: 0 20px 20px;
+  padding: 16px;
+  border: 1px solid #283548;
+  border-radius: 9px;
+  background: #111a27;
+}
+
+.backtesting-result-placeholder.stopped {
+  border-color: #4c4326;
+  background: #1b1912;
+}
+
+.backtesting-result-placeholder.failed {
+  border-color: #512b34;
+  background: #21151a;
+}
+
+.backtesting-result-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 34px;
+  border-radius: 8px;
+  background: #172033;
+  color: #8ea0b6;
+}
+
+.backtesting-result-placeholder.stopped .backtesting-result-icon {
+  background: #2b2617;
+  color: #d6b965;
+}
+
+.backtesting-result-placeholder.failed .backtesting-result-icon {
+  background: #2d191f;
+  color: #ed7785;
+}
+
+.backtesting-result-placeholder strong {
+  display: block;
+  margin-bottom: 4px;
+  color: #d8e0ea;
+  font-size: 12px;
+}
+
+.backtesting-result-placeholder span {
+  display: block;
+  color: #758297;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.backtesting-detail-loading {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 20px 20px;
+  color: #718095;
+  font-size: 11px;
+}
+
+/* =========================================================
+   Empty State
+   ========================================================= */
+
+.backtesting-empty-state {
+  display: flex;
+  min-height: 430px;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 50px 30px;
+  border: 1px dashed #27364b;
+  border-radius: 12px;
+  background: #0d141f;
+  text-align: center;
+}
+
+.backtesting-empty-state > svg {
+  margin-bottom: 15px;
+  color: #3e4e63;
+  font-size: 34px;
+}
+
+.backtesting-empty-state h2 {
+  margin: 0 0 7px;
+  color: #dce3ec;
+  font-size: 17px;
+}
+
+.backtesting-empty-state p {
+  max-width: 440px;
+  margin: 0 0 20px;
+  color: #718095;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* =========================================================
+   Responsive — Tablet
+   ========================================================= */
+
+@media (max-width: 1100px) {
+  .backtesting-layout {
+    grid-template-columns: 285px minmax(0, 1fr);
+  }
+
+  .backtesting-details-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* =========================================================
+   Responsive — Smaller Tablet
+   ========================================================= */
+
+@media (max-width: 850px) {
+  .backtesting-page {
+    padding: 20px;
+  }
+
+  .backtesting-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .backtesting-header-actions {
+    justify-content: flex-start;
+  }
+
+  .backtesting-layout {
+    grid-template-columns: 1fr;
+  }
+
+  .backtesting-sidebar {
+    min-height: 0;
+    max-height: 380px;
+  }
+
+  .backtesting-list {
+    max-height: 285px;
+  }
+
+  .backtesting-form {
+    grid-template-columns: 1fr;
+  }
+
+  .backtesting-field.full {
+    grid-column: auto;
+  }
+
+  .backtesting-form-actions {
+    grid-column: auto;
+  }
+}
+
+/* =========================================================
+   Responsive — Mobile
+   ========================================================= */
+
+@media (max-width: 600px) {
+  .backtesting-page {
+    padding: 14px;
+  }
+
+  .backtesting-title-row {
+    align-items: flex-start;
+  }
+
+  .backtesting-title-icon {
+    width: 40px;
+    height: 40px;
+    flex-basis: 40px;
+    border-radius: 10px;
+  }
+
+  .backtesting-header h1 {
+    font-size: 21px;
+  }
+
+  .backtesting-header p {
+    font-size: 12px;
+  }
+
+  .backtesting-header-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .backtesting-header-actions .backtesting-button {
+    width: 100%;
+  }
+
+  .backtesting-card-header {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .backtesting-form {
+    padding: 15px;
+  }
+
+  .backtesting-form-actions {
+    flex-direction: column;
+  }
+
+  .backtesting-form-actions .backtesting-button {
+    width: 100%;
+  }
+
+  .backtesting-details-grid {
+    grid-template-columns: 1fr;
+    margin: 15px;
+  }
+
+  .backtesting-run-actions {
+    flex-direction: column;
+    align-items: stretch;
+    padding: 0 15px 15px;
+  }
+
+  .backtesting-run-actions .backtesting-button {
+    width: 100%;
+  }
+
+  .backtesting-running-panel,
+  .backtesting-result-placeholder {
+    margin-right: 15px;
+    margin-left: 15px;
+  }
+
+  .backtesting-card-header {
+    padding: 15px;
+  }
+
+  .backtesting-empty-state {
+    min-height: 340px;
+    padding: 35px 20px;
+  }
+}
+```

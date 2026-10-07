@@ -3,533 +3,980 @@
 ========================================== */
 
 .accounts-page {
-    width: 100%;
-    max-width: 1600px;
-    margin: 0 auto;
+  width: 100%;
+  max-width: 1600px;
+  margin: 0 auto;
 }
 
+/* ==========================================
+   SERVER
+========================================== */
+
+.account-table-server {
+  min-width: 150px;
+  max-width: 220px;
+}
+
+.account-table-server span {
+  display: block;
+
+  overflow: hidden;
+
+  color: #aeb9c8;
+
+  font-size: 11px;
+
+  text-overflow: ellipsis;
+
+  white-space: nowrap;
+}
+
+/* SERVER COLUMN WIDTH */
+
+.accounts-table th:nth-child(3),
+.accounts-table td:nth-child(3) {
+  min-width: 150px;
+}
 
 /* ==========================================
    HEADER
 ========================================== */
 
 .accounts-header {
-    display: flex;
-    align-items: flex-end;
-    justify-content: space-between;
-    gap: 30px;
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 30px;
 
-    margin-bottom: 30px;
+  margin-bottom: 30px;
 }
-
 
 .accounts-eyebrow {
-    display: block;
+  display: block;
 
-    margin-bottom: 8px;
+  margin-bottom: 8px;
 
-    color: #46c7ff;
+  color: #46c7ff;
 
-    font-size: 10px;
-    font-weight: 800;
+  font-size: 10px;
+  font-weight: 800;
 
-    letter-spacing: 2px;
+  letter-spacing: 2px;
 }
-
 
 .accounts-header h1 {
-    margin: 0;
+  margin: 0;
 
-    color: #f1f5fa;
+  color: #f1f5fa;
 
-    font-size: 32px;
-    font-weight: 700;
+  font-size: 32px;
+  font-weight: 700;
 
-    letter-spacing: -0.8px;
+  letter-spacing: -0.8px;
 }
-
 
 .accounts-header p {
-    margin: 9px 0 0;
+  margin: 9px 0 0;
 
-    color: #78869a;
+  color: #78869a;
 
-    font-size: 14px;
+  font-size: 14px;
 }
-
 
 /* ==========================================
    PRIMARY BUTTON
 ========================================== */
 
 .accounts-primary-button {
-    display: flex;
-    align-items: center;
-    gap: 9px;
+  display: flex;
+  align-items: center;
+  gap: 9px;
 
-    padding: 12px 18px;
+  padding: 12px 18px;
 
-    border: none;
-    border-radius: 7px;
+  border: none;
+  border-radius: 7px;
 
-    background: #46c7ff;
-    color: #061019;
+  background: #46c7ff;
+  color: #061019;
 
-    font-size: 12px;
-    font-weight: 800;
+  font-size: 12px;
+  font-weight: 800;
 
-    cursor: pointer;
+  cursor: pointer;
 
-    transition:
-        transform 0.2s ease,
-        box-shadow 0.2s ease;
+  transition:
+    transform 0.2s ease,
+    box-shadow 0.2s ease,
+    opacity 0.2s ease;
 }
 
+.accounts-primary-button:hover:not(:disabled) {
+  transform: translateY(-2px);
 
-.accounts-primary-button:hover {
-    transform: translateY(-2px);
-
-    box-shadow:
-        0 10px 30px rgba(70, 199, 255, 0.18);
+  box-shadow: 0 10px 30px rgba(70, 199, 255, 0.18);
 }
 
+.accounts-primary-button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
 
 /* ==========================================
    STATISTICS
 ========================================== */
 
 .accounts-stats {
-    display: grid;
+  display: grid;
 
-    grid-template-columns:
-        repeat(4, 1fr);
+  grid-template-columns: repeat(4, 1fr);
 
-    gap: 16px;
+  gap: 16px;
 
-    margin-bottom: 20px;
+  margin-bottom: 20px;
 }
-
 
 .account-stat {
-    display: flex;
-    align-items: center;
+  display: flex;
+  align-items: center;
 
-    gap: 14px;
+  gap: 14px;
 
-    padding: 20px;
+  padding: 20px;
 
-    border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 
-    border-radius: 10px;
+  border-radius: 10px;
 
-    background:
-        linear-gradient(
-            145deg,
-            rgba(255, 255, 255, 0.035),
-            rgba(255, 255, 255, 0.015)
-        );
+  background: linear-gradient(
+    145deg,
+    rgba(255, 255, 255, 0.035),
+    rgba(255, 255, 255, 0.015)
+  );
 
-    box-shadow:
-        0 10px 30px rgba(0, 0, 0, 0.12);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.12);
 }
-
 
 .account-stat-icon {
-    width: 42px;
-    height: 42px;
+  width: 42px;
+  height: 42px;
 
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 
-    border-radius: 8px;
+  flex: 0 0 42px;
 
-    background: rgba(70, 199, 255, 0.08);
+  border-radius: 8px;
 
-    color: #46c7ff;
+  background: rgba(70, 199, 255, 0.08);
 
-    font-size: 16px;
+  color: #46c7ff;
+
+  font-size: 16px;
 }
-
 
 .account-stat span {
-    display: block;
+  display: block;
 
-    margin-bottom: 5px;
+  margin-bottom: 5px;
 
-    color: #657388;
+  color: #657388;
 
-    font-size: 10px;
+  font-size: 10px;
 
-    font-weight: 700;
+  font-weight: 700;
 
-    letter-spacing: 1px;
+  letter-spacing: 1px;
 
-    text-transform: uppercase;
+  text-transform: uppercase;
 }
-
 
 .account-stat strong {
-    color: #eaf0f7;
+  color: #eaf0f7;
 
-    font-size: 22px;
+  font-size: 22px;
 }
-
 
 /* ==========================================
    TOOLBAR
 ========================================== */
 
 .accounts-toolbar {
-    display: flex;
+  display: flex;
 
-    align-items: center;
-    justify-content: space-between;
+  align-items: center;
+  justify-content: space-between;
 
-    gap: 15px;
+  gap: 15px;
 
-    margin-bottom: 16px;
+  margin-bottom: 16px;
 }
-
 
 .accounts-search {
-    flex: 1;
+  flex: 1;
 
-    max-width: 500px;
+  max-width: 500px;
 
-    display: flex;
+  display: flex;
 
-    align-items: center;
+  align-items: center;
 
-    gap: 10px;
+  gap: 10px;
 
-    padding: 0 14px;
+  padding: 0 14px;
 
-    height: 42px;
+  height: 42px;
 
-    border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.07);
 
-    border-radius: 7px;
+  border-radius: 7px;
 
-    background: rgba(255, 255, 255, 0.025);
+  background: rgba(255, 255, 255, 0.025);
 
-    color: #536176;
+  color: #536176;
 }
-
 
 .accounts-search input {
-    width: 100%;
+  width: 100%;
 
-    border: none;
-    outline: none;
+  border: none;
+  outline: none;
 
-    background: transparent;
+  background: transparent;
 
-    color: #dce5ef;
+  color: #dce5ef;
 
-    font-size: 12px;
+  font-size: 12px;
 }
-
 
 .accounts-search input::placeholder {
-    color: #536176;
+  color: #536176;
 }
-
 
 .accounts-filters {
-    display: flex;
+  display: flex;
 
-    gap: 8px;
+  align-items: center;
+
+  gap: 8px;
 }
-
 
 .accounts-filters select {
-    height: 42px;
+  height: 42px;
 
-    padding: 0 12px;
+  padding: 0 12px;
 
-    border: 1px solid rgba(255, 255, 255, 0.07);
+  border: 1px solid rgba(255, 255, 255, 0.07);
 
-    border-radius: 7px;
+  border-radius: 7px;
 
-    background: #0c131e;
+  background: #0c131e;
 
-    color: #aebaca;
+  color: #aebaca;
 
-    outline: none;
+  outline: none;
 
-    font-size: 11px;
+  font-size: 11px;
 
-    cursor: pointer;
+  cursor: pointer;
 }
 
+.accounts-filters select:focus {
+  border-color: rgba(70, 199, 255, 0.3);
+}
 
 .accounts-refresh {
-    width: 42px;
-    height: 42px;
+  width: 42px;
+  height: 42px;
 
-    display: flex;
-    align-items: center;
-    justify-content: center;
+  display: flex;
+  align-items: center;
+  justify-content: center;
 
-    border: 1px solid rgba(255, 255, 255, 0.07);
+  flex: 0 0 42px;
 
-    border-radius: 7px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
 
-    background: rgba(255, 255, 255, 0.025);
+  border-radius: 7px;
 
-    color: #8290a3;
+  background: rgba(255, 255, 255, 0.025);
 
-    cursor: pointer;
+  color: #8290a3;
 
-    transition: 0.2s ease;
+  cursor: pointer;
+
+  transition:
+    color 0.2s ease,
+    border-color 0.2s ease,
+    background 0.2s ease;
 }
 
+.accounts-refresh:hover:not(:disabled) {
+  color: #46c7ff;
 
-.accounts-refresh:hover {
-    color: #46c7ff;
+  border-color: rgba(70, 199, 255, 0.25);
 
-    border-color:
-        rgba(70, 199, 255, 0.25);
+  background: rgba(70, 199, 255, 0.04);
 }
 
+.accounts-refresh:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
 
 /* ==========================================
    TABLE CARD
 ========================================== */
 
 .accounts-card {
-    overflow: hidden;
+  overflow: hidden;
 
-    border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.06);
 
-    border-radius: 10px;
+  border-radius: 10px;
 
-    background: rgba(9, 15, 24, 0.8);
+  background: rgba(9, 15, 24, 0.8);
 
-    box-shadow:
-        0 20px 50px rgba(0, 0, 0, 0.15);
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.15);
 }
-
 
 .accounts-card-header {
-    display: flex;
+  display: flex;
 
-    align-items: center;
-    justify-content: space-between;
+  align-items: center;
+  justify-content: space-between;
 
-    padding: 20px 22px;
+  padding: 20px 22px;
 
-    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
 }
-
 
 .accounts-card-header span:first-child {
-    color: #657388;
+  color: #657388;
 
-    font-size: 9px;
+  font-size: 9px;
 
-    font-weight: 800;
+  font-weight: 800;
 
-    letter-spacing: 1.5px;
+  letter-spacing: 1.5px;
 }
-
 
 .accounts-card-header h2 {
-    margin: 5px 0 0;
+  margin: 5px 0 0;
 
-    color: #e9eef5;
+  color: #e9eef5;
 
-    font-size: 17px;
+  font-size: 17px;
 }
-
 
 .accounts-count {
-    color: #657388;
+  color: #657388;
 
-    font-size: 11px;
+  font-size: 11px;
 }
-
 
 /* ==========================================
    TABLE
 ========================================== */
 
 .accounts-table-wrapper {
-    width: 100%;
+  width: 100%;
 
-    overflow-x: auto;
+  overflow-x: auto;
 }
-
 
 .accounts-table {
-    width: 100%;
+  width: 100%;
 
-    border-collapse: collapse;
+  border-collapse: collapse;
 
-    min-width: 900px;
+  min-width: 1080px;
 }
-
 
 .accounts-table th {
-    padding: 13px 18px;
+  padding: 13px 18px;
 
-    background: rgba(255, 255, 255, 0.018);
+  background: rgba(255, 255, 255, 0.018);
 
-    border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
 
-    color: #56647a;
+  color: #56647a;
 
-    font-size: 9px;
+  font-size: 9px;
 
-    font-weight: 800;
+  font-weight: 800;
 
-    letter-spacing: 1.2px;
+  letter-spacing: 1.2px;
 
-    text-align: left;
+  text-align: left;
 
-    text-transform: uppercase;
+  text-transform: uppercase;
 }
-
 
 .accounts-table td {
-    padding: 16px 18px;
+  padding: 16px 18px;
 
-    border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
 
-    color: #aeb9c8;
+  color: #aeb9c8;
 
-    font-size: 12px;
+  font-size: 12px;
+
+  vertical-align: middle;
 }
 
+.accounts-table tbody tr {
+  transition: background 0.18s ease;
+}
+
+.accounts-table tbody tr:hover {
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.accounts-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+/* ==========================================
+   ACCOUNT CELL
+========================================== */
+
+.account-table-name {
+  display: flex;
+
+  align-items: center;
+
+  gap: 12px;
+
+  min-width: 180px;
+}
+
+.account-table-icon {
+  width: 36px;
+  height: 36px;
+
+  display: flex;
+  align-items: center;
+  justify-content: center;
+
+  flex: 0 0 36px;
+
+  border: 1px solid rgba(70, 199, 255, 0.12);
+
+  border-radius: 7px;
+
+  background: rgba(70, 199, 255, 0.06);
+
+  color: #46c7ff;
+
+  font-size: 13px;
+}
+
+.account-table-name > div:last-child {
+  min-width: 0;
+
+  display: flex;
+  flex-direction: column;
+
+  gap: 4px;
+}
+
+.account-table-name strong {
+  display: block;
+
+  overflow: hidden;
+
+  color: #dce5ef;
+
+  font-size: 12px;
+  font-weight: 700;
+
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-table-name span {
+  color: #657388;
+
+  font-size: 10px;
+}
+
+/* ==========================================
+   BROKER
+========================================== */
+
+.account-table-broker {
+  display: flex;
+  align-items: center;
+
+  min-width: 110px;
+}
+
+.account-table-broker strong {
+  color: #dce5ef;
+
+  font-size: 12px;
+  font-weight: 600;
+
+  white-space: nowrap;
+}
+
+/* ==========================================
+   ENVIRONMENT
+========================================== */
+
+.account-environment {
+  display: inline-flex;
+
+  align-items: center;
+  justify-content: center;
+
+  min-width: 48px;
+
+  padding: 5px 8px;
+
+  border: 1px solid transparent;
+
+  border-radius: 5px;
+
+  font-size: 9px;
+
+  font-weight: 800;
+
+  letter-spacing: 0.7px;
+
+  line-height: 1;
+}
+
+.account-environment.live {
+  border-color: rgba(70, 199, 255, 0.18);
+
+  background: rgba(70, 199, 255, 0.06);
+
+  color: #46c7ff;
+}
+
+.account-environment.demo {
+  border-color: rgba(148, 163, 184, 0.18);
+
+  background: rgba(148, 163, 184, 0.05);
+
+  color: #94a3b8;
+}
+
+/* ==========================================
+   STATUS
+========================================== */
+
+.account-status-cell {
+  display: flex;
+
+  flex-direction: column;
+
+  align-items: flex-start;
+
+  justify-content: center;
+
+  gap: 6px;
+
+  min-width: 110px;
+}
+
+/* AQE STATUS */
+
+.account-status {
+  display: inline-flex;
+
+  align-items: center;
+
+  gap: 7px;
+
+  color: #aeb9c8;
+
+  font-size: 11px;
+
+  font-weight: 700;
+
+  line-height: 1;
+
+  white-space: nowrap;
+}
+
+.account-status-dot {
+  width: 7px;
+  height: 7px;
+
+  flex: 0 0 7px;
+
+  border-radius: 50%;
+}
+
+.account-status.active {
+  color: #4ade80;
+}
+
+.account-status.active .account-status-dot {
+  background: #4ade80;
+
+  box-shadow: 0 0 8px rgba(74, 222, 128, 0.45);
+}
+
+.account-status.inactive {
+  color: #94a3b8;
+}
+
+.account-status.inactive .account-status-dot {
+  background: #64748b;
+}
+
+/* BROKER CONNECTION */
+
+.account-connection-status {
+  display: inline-flex;
+
+  align-items: center;
+
+  padding: 4px 8px;
+
+  border: 1px solid #263449;
+
+  border-radius: 5px;
+
+  background: #111a28;
+
+  color: #94a3b8;
+
+  font-size: 8px;
+
+  font-weight: 800;
+
+  letter-spacing: 0.7px;
+
+  line-height: 1;
+
+  white-space: nowrap;
+}
+
+.account-connection-status.connected {
+  border-color: rgba(74, 222, 128, 0.22);
+
+  background: rgba(74, 222, 128, 0.07);
+
+  color: #4ade80;
+}
+
+.account-connection-status.disconnected {
+  border-color: rgba(148, 163, 184, 0.18);
+
+  background: rgba(148, 163, 184, 0.05);
+
+  color: #94a3b8;
+}
+
+.account-connection-status.connecting {
+  border-color: rgba(70, 199, 255, 0.22);
+
+  background: rgba(70, 199, 255, 0.07);
+
+  color: #46c7ff;
+}
+
+/* ==========================================
+   ACTIONS
+========================================== */
+
+.account-actions {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: flex-start;
+
+  gap: 8px;
+
+  min-width: 180px;
+}
+
+.account-actions button {
+  width: 34px;
+  height: 34px;
+
+  min-width: 34px;
+
+  display: inline-flex;
+
+  align-items: center;
+  justify-content: center;
+
+  padding: 0;
+
+  border: 1px solid #263449;
+
+  border-radius: 7px;
+
+  background: #111a28;
+
+  color: #8290a3;
+
+  cursor: pointer;
+
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.account-actions button:hover:not(:disabled) {
+  transform: translateY(-1px);
+
+  background: #172235;
+
+  border-color: #34445c;
+
+  color: #e2e8f0;
+}
+
+.account-actions button:disabled {
+  opacity: 0.4;
+
+  cursor: not-allowed;
+
+  transform: none;
+}
+
+/* VIEW */
+
+.account-actions .account-action-view:hover:not(:disabled) {
+  border-color: rgba(96, 165, 250, 0.4);
+
+  color: #60a5fa;
+}
+
+/* EDIT */
+
+.account-actions .account-action-edit:hover:not(:disabled) {
+  border-color: rgba(167, 139, 250, 0.4);
+
+  color: #a78bfa;
+}
+
+/* CONNECT / DISCONNECT */
+
+.account-actions .account-action-connect:hover:not(:disabled) {
+  border-color: rgba(74, 222, 128, 0.4);
+
+  color: #4ade80;
+}
+
+/* DELETE */
+
+.account-actions .account-action-delete:hover:not(:disabled) {
+  border-color: rgba(248, 113, 113, 0.4);
+
+  color: #f87171;
+}
+
+/* ==========================================
+   COLUMN WIDTHS
+========================================== */
+
+.accounts-table th:nth-child(1),
+.accounts-table td:nth-child(1) {
+  min-width: 220px;
+}
+
+.accounts-table th:nth-child(2),
+.accounts-table td:nth-child(2) {
+  min-width: 120px;
+}
+
+.accounts-table th:nth-child(3),
+.accounts-table td:nth-child(3) {
+  min-width: 120px;
+}
+
+.accounts-table th:nth-child(4),
+.accounts-table td:nth-child(4),
+.accounts-table th:nth-child(5),
+.accounts-table td:nth-child(5) {
+  min-width: 125px;
+
+  white-space: nowrap;
+}
+
+.accounts-table th:nth-child(6),
+.accounts-table td:nth-child(6) {
+  min-width: 130px;
+}
+
+.accounts-table th:last-child,
+.accounts-table td:last-child {
+  min-width: 200px;
+}
 
 /* ==========================================
    EMPTY STATE
 ========================================== */
 
 .accounts-empty {
-    height: 330px;
+  height: 330px;
 
-    text-align: center !important;
+  text-align: center !important;
 
-    vertical-align: middle;
+  vertical-align: middle;
 
-    color: #5e6c80 !important;
+  color: #5e6c80 !important;
 }
-
 
 .accounts-empty svg {
-    display: block;
+  display: block;
 
-    margin: 0 auto 16px;
+  margin: 0 auto 16px;
 
-    color: #344358;
+  color: #344358;
 
-    font-size: 32px;
+  font-size: 32px;
 }
-
 
 .accounts-empty strong {
-    display: block;
+  display: block;
 
-    margin-bottom: 7px;
+  margin-bottom: 7px;
 
-    color: #aeb9ba;
+  color: #aeb9ba;
 
-    font-size: 14px;
+  font-size: 14px;
 }
-
 
 .accounts-empty span {
-    display: block;
+  display: block;
 
-    margin-bottom: 20px;
+  margin-bottom: 20px;
 
-    color: #59677b;
+  color: #59677b;
 
-    font-size: 11px;
+  font-size: 11px;
 }
-
 
 .accounts-empty button {
-    display: inline-flex;
+  display: inline-flex;
 
-    align-items: center;
+  align-items: center;
 
-    gap: 7px;
+  gap: 7px;
 
-    padding: 9px 14px;
+  padding: 9px 14px;
 
-    border: 1px solid rgba(70, 199, 255, 0.2);
+  border: 1px solid rgba(70, 199, 255, 0.2);
 
-    border-radius: 6px;
+  border-radius: 6px;
 
-    background: rgba(70, 199, 255, 0.06);
+  background: rgba(70, 199, 255, 0.06);
 
-    color: #46c7ff;
+  color: #46c7ff;
 
-    font-size: 11px;
+  font-size: 11px;
 
-    font-weight: 700;
+  font-weight: 700;
 
-    cursor: pointer;
+  cursor: pointer;
+
+  transition:
+    background 0.18s ease,
+    border-color 0.18s ease;
 }
 
+.accounts-empty button:hover {
+  border-color: rgba(70, 199, 255, 0.35);
+
+  background: rgba(70, 199, 255, 0.1);
+}
+
+/* ==========================================
+   SPINNER
+========================================== */
+
+.accounts-spin {
+  animation: accounts-spin 0.9s linear infinite;
+}
+
+@keyframes accounts-spin {
+  from {
+    transform: rotate(0deg);
+  }
+
+  to {
+    transform: rotate(360deg);
+  }
+}
 
 /* ==========================================
    RESPONSIVE
 ========================================== */
 
 @media (max-width: 1100px) {
-
-    .accounts-stats {
-        grid-template-columns:
-            repeat(2, 1fr);
-    }
-
+  .accounts-stats {
+    grid-template-columns: repeat(2, 1fr);
+  }
 }
 
-
 @media (max-width: 700px) {
+  .accounts-header {
+    align-items: flex-start;
 
-    .accounts-header {
-        align-items: flex-start;
+    flex-direction: column;
+  }
 
-        flex-direction: column;
-    }
+  .accounts-primary-button {
+    width: 100%;
 
+    justify-content: center;
+  }
 
-    .accounts-primary-button {
-        width: 100%;
+  .accounts-toolbar {
+    flex-direction: column;
 
-        justify-content: center;
-    }
+    align-items: stretch;
+  }
 
+  .accounts-search {
+    max-width: none;
+  }
 
-    .accounts-toolbar {
-        flex-direction: column;
+  .accounts-filters {
+    width: 100%;
+  }
 
-        align-items: stretch;
-    }
+  .accounts-filters select {
+    flex: 1;
+  }
 
+  .accounts-stats {
+    grid-template-columns: 1fr;
+  }
+}
 
-    .accounts-search {
-        max-width: none;
-    }
+@media (max-width: 480px) {
+  .accounts-card-header {
+    padding: 17px;
+  }
 
+  .accounts-table th,
+  .accounts-table td {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
 
-    .accounts-filters {
-        width: 100%;
-    }
+  .account-actions {
+    gap: 6px;
+  }
 
+  .account-actions button {
+    width: 32px;
+    height: 32px;
 
-    .accounts-filters select {
-        flex: 1;
-    }
-
-
-    .accounts-stats {
-        grid-template-columns: 1fr;
-    }
-
+    min-width: 32px;
+  }
 }

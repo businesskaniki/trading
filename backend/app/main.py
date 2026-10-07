@@ -21,10 +21,10 @@ from app.infrastructure.redis import redis_client
 # application components can emit useful diagnostics.
 # ----------------------------------------------------------------------
 
-logging.basicConfig(
-    level=logging.INFO if settings.DEBUG else logging.WARNING,
-    format="%(asctime)s %(levelname)s %(name)s %(message)s",
-)
+# logging.basicConfig(
+#     level=logging.INFO if settings.DEBUG else logging.WARNING,
+#     format="%(asctime)s %(levelname)s %(name)s %(message)s",
+# )
 
 logger = logging.getLogger(__name__)
 

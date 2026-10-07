@@ -11,7 +11,8 @@ import {
   FaEye,
 } from "react-icons/fa";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+
 import { useDispatch, useSelector } from "react-redux";
 
 import AccountForm from "./AccountForm";
@@ -57,9 +58,25 @@ const Accounts = () => {
   const [environmentFilter, setEnvironmentFilter] = useState("ALL");
   const [statusFilter, setStatusFilter] = useState("ALL");
 
-  // =====================================================
+  // ---------------------------------------------------------
+  // AUTO RECONNECT STATE
+  // ---------------------------------------------------------
+
+  // Accounts currently being reconnected automatically.
+  //
+  // This prevents multiple connect requests from being
+  // created for the same account while the previous request
+  // is still running.
+  const autoReconnectInFlight = useRef(new Set());
+
+  // Accounts intentionally disconnected by the user.
+  //
+  // These accounts must not immediately reconnect themselves.
+  const manuallyDisconnectedAccounts = useRef(new Set());
+
+  // ---------------------------------------------------------
   // FETCH ACCOUNTS
-  // =====================================================
+  // ---------------------------------------------------------
 
   useEffect(() => {
     dispatch(fetchAccounts());
@@ -68,12 +85,77 @@ const Accounts = () => {
       dispatch(fetchAccounts());
     }, 10000);
 
-    return () => window.clearInterval(refreshTimer);
+    return () => {
+      window.clearInterval(refreshTimer);
+    };
   }, [dispatch]);
 
-  // =====================================================
-  // ACCOUNT STATISTICS
-  // =====================================================
+  // ---------------------------------------------------------
+  // AUTOMATIC RECONNECT
+  //
+  // When an ACTIVE account reports DISCONNECTED,
+  // automatically attempt to connect it again.
+  //
+  // Important:
+  //
+  // - inactive accounts are never auto-connected
+  // - intentionally disconnected accounts are left alone
+  // - duplicate reconnect requests are prevented
+  // ---------------------------------------------------------
+
+  useEffect(() => {
+    if (!accounts.length) {
+      return;
+    }
+
+    const reconnectDisconnectedAccounts = async () => {
+      for (const account of accounts) {
+        if (!account?.id) {
+          continue;
+        }
+
+        // Only active trading accounts should reconnect.
+        if (!account.active) {
+          continue;
+        }
+
+        const status = String(account.status || "DISCONNECTED").toUpperCase();
+
+        // Automatic reconnect only applies to DISCONNECTED.
+        if (status !== "DISCONNECTED") {
+          continue;
+        }
+
+        // Respect an intentional manual disconnect.
+        if (manuallyDisconnectedAccounts.current.has(account.id)) {
+          continue;
+        }
+
+        // Prevent duplicate reconnect requests.
+        if (autoReconnectInFlight.current.has(account.id)) {
+          continue;
+        }
+
+        autoReconnectInFlight.current.add(account.id);
+
+        try {
+          const result = await dispatch(connectTradingAccount(account.id));
+
+          if (connectTradingAccount.fulfilled.match(result)) {
+            dispatch(clearAccountOperationState());
+          }
+        } finally {
+          autoReconnectInFlight.current.delete(account.id);
+        }
+      }
+    };
+
+    reconnectDisconnectedAccounts();
+  }, [accounts, dispatch]);
+
+  // ---------------------------------------------------------
+  // STATISTICS
+  // ---------------------------------------------------------
 
   const totalAccounts = accounts.length;
 
@@ -89,14 +171,14 @@ const Accounts = () => {
     (account) => account.is_demo === true,
   ).length;
 
-  // =====================================================
+  // ---------------------------------------------------------
   // FILTER ACCOUNTS
-  // =====================================================
+  // ---------------------------------------------------------
 
   const filteredAccounts = useMemo(() => {
-    return accounts.filter((account) => {
-      const search = searchTerm.trim().toLowerCase();
+    const search = searchTerm.trim().toLowerCase();
 
+    return accounts.filter((account) => {
       const matchesSearch =
         !search ||
         String(account.login ?? "")
@@ -126,21 +208,19 @@ const Accounts = () => {
     });
   }, [accounts, searchTerm, environmentFilter, statusFilter]);
 
-  // =====================================================
+  // ---------------------------------------------------------
   // REFRESH
-  // =====================================================
+  // ---------------------------------------------------------
 
   const handleRefresh = () => {
     dispatch(fetchAccounts());
   };
 
-  // =====================================================
-  // CREATE ACCOUNT
-  // =====================================================
+  // ---------------------------------------------------------
+  // CREATE / UPDATE
+  // ---------------------------------------------------------
 
   const handleCreateAccount = async (data) => {
-    console.log("CREATE ACCOUNT PAYLOAD:", data);
-
     const result = await dispatch(createTradingAccount(data));
 
     if (createTradingAccount.fulfilled.match(result)) {
@@ -149,10 +229,6 @@ const Accounts = () => {
       dispatch(clearAccountOperationState());
     }
   };
-
-  // =====================================================
-  // CREATE / UPDATE ACCOUNT
-  // =====================================================
 
   const handleAccountSubmit = async (data) => {
     if (!editingAccount) {
@@ -173,9 +249,9 @@ const Accounts = () => {
     }
   };
 
-  // =====================================================
-  // CONNECT ACCOUNT
-  // =====================================================
+  // ---------------------------------------------------------
+  // CONNECT
+  // ---------------------------------------------------------
 
   const handleConnectAccount = async (account) => {
     if (!account?.id) {
@@ -190,6 +266,15 @@ const Accounts = () => {
       return;
     }
 
+    // -------------------------------------------------------
+    // The user explicitly requested a connection.
+    //
+    // Remove any previous intentional-disconnect marker so
+    // future unexpected disconnections can reconnect.
+    // -------------------------------------------------------
+
+    manuallyDisconnectedAccounts.current.delete(account.id);
+
     const result = await dispatch(connectTradingAccount(account.id));
 
     if (connectTradingAccount.fulfilled.match(result)) {
@@ -197,9 +282,9 @@ const Accounts = () => {
     }
   };
 
-  // =====================================================
-  // DISCONNECT ACCOUNT
-  // =====================================================
+  // ---------------------------------------------------------
+  // DISCONNECT
+  // ---------------------------------------------------------
 
   const handleDisconnectAccount = async (account) => {
     if (!account?.id) {
@@ -210,16 +295,34 @@ const Accounts = () => {
       return;
     }
 
+    // -------------------------------------------------------
+    // Record this as an intentional user disconnect.
+    //
+    // This prevents the automatic reconnect effect from
+    // immediately reconnecting the account.
+    // -------------------------------------------------------
+
+    manuallyDisconnectedAccounts.current.add(account.id);
+
     const result = await dispatch(disconnectTradingAccount(account.id));
 
     if (disconnectTradingAccount.fulfilled.match(result)) {
       dispatch(clearAccountOperationState());
+    } else {
+      // -----------------------------------------------------
+      // Disconnect failed.
+      //
+      // The user did not successfully disconnect the account,
+      // so automatic reconnect behavior should remain active.
+      // -----------------------------------------------------
+
+      manuallyDisconnectedAccounts.current.delete(account.id);
     }
   };
 
-  // =====================================================
-  // DELETE ACCOUNT
-  // =====================================================
+  // ---------------------------------------------------------
+  // DELETE
+  // ---------------------------------------------------------
 
   const handleDeleteAccount = async () => {
     if (!accountToDelete?.id) {
@@ -229,15 +332,24 @@ const Accounts = () => {
     const result = await dispatch(removeTradingAccount(accountToDelete.id));
 
     if (removeTradingAccount.fulfilled.match(result)) {
+      // -----------------------------------------------------
+      // Remove any reconnect state associated with the
+      // deleted account.
+      // -----------------------------------------------------
+
+      autoReconnectInFlight.current.delete(accountToDelete.id);
+
+      manuallyDisconnectedAccounts.current.delete(accountToDelete.id);
+
       setAccountToDelete(null);
 
       dispatch(clearAccountOperationState());
     }
   };
 
-  // =====================================================
+  // ---------------------------------------------------------
   // FORMAT MONEY
-  // =====================================================
+  // ---------------------------------------------------------
 
   const formatMoney = (value, currency = "USD") => {
     const number = Number(value);
@@ -252,15 +364,31 @@ const Accounts = () => {
     }).format(number);
   };
 
-  // =====================================================
+  // ---------------------------------------------------------
+  // ERROR MESSAGE
+  // ---------------------------------------------------------
+
+  const getErrorMessage = () => {
+    if (typeof error === "string") {
+      return error;
+    }
+
+    if (error?.detail) {
+      return typeof error.detail === "string"
+        ? error.detail
+        : JSON.stringify(error.detail);
+    }
+
+    return "Unable to process account request.";
+  };
+
+  // ---------------------------------------------------------
   // RENDER
-  // =====================================================
+  // ---------------------------------------------------------
 
   return (
     <main className="accounts-page">
-      {/* =====================================================
-          HEADER
-      ===================================================== */}
+      {/* HEADER */}
 
       <section className="accounts-header">
         <div>
@@ -274,30 +402,19 @@ const Accounts = () => {
           </p>
         </div>
 
-        {/* ERROR */}
-
         {error && (
           <div className="accounts-error">
-            <span>
-              {typeof error === "string"
-                ? error
-                : error?.detail
-                  ? typeof error.detail === "string"
-                    ? error.detail
-                    : JSON.stringify(error.detail)
-                  : "Unable to process account request."}
-            </span>
+            <span>{getErrorMessage()}</span>
 
             <button
               type="button"
               onClick={() => dispatch(clearAccountsError())}
+              aria-label="Dismiss error"
             >
               ×
             </button>
           </div>
         )}
-
-        {/* ADD ACCOUNT */}
 
         <button
           type="button"
@@ -307,14 +424,11 @@ const Accounts = () => {
           title="Add trading account"
         >
           <FaPlus />
-
           <span>Add Account</span>
         </button>
       </section>
 
-      {/* =====================================================
-          STATISTICS
-      ===================================================== */}
+      {/* STATISTICS */}
 
       <section className="accounts-stats">
         <div className="account-stat">
@@ -324,7 +438,6 @@ const Accounts = () => {
 
           <div>
             <span>Total Accounts</span>
-
             <strong>{totalAccounts}</strong>
           </div>
         </div>
@@ -336,7 +449,6 @@ const Accounts = () => {
 
           <div>
             <span>Active Accounts</span>
-
             <strong>{activeAccounts}</strong>
           </div>
         </div>
@@ -348,7 +460,6 @@ const Accounts = () => {
 
           <div>
             <span>Live Accounts</span>
-
             <strong>{liveAccounts}</strong>
           </div>
         </div>
@@ -360,19 +471,14 @@ const Accounts = () => {
 
           <div>
             <span>Demo Accounts</span>
-
             <strong>{demoAccounts}</strong>
           </div>
         </div>
       </section>
 
-      {/* =====================================================
-          TOOLBAR
-      ===================================================== */}
+      {/* TOOLBAR */}
 
       <section className="accounts-toolbar">
-        {/* SEARCH */}
-
         <div className="accounts-search">
           <FaSearch />
 
@@ -383,8 +489,6 @@ const Accounts = () => {
             onChange={(event) => setSearchTerm(event.target.value)}
           />
         </div>
-
-        {/* FILTERS */}
 
         <div className="accounts-filters">
           <select
@@ -421,9 +525,7 @@ const Accounts = () => {
         </div>
       </section>
 
-      {/* =====================================================
-          ACCOUNTS TABLE
-      ===================================================== */}
+      {/* ACCOUNTS TABLE */}
 
       <section className="accounts-card">
         <div className="accounts-card-header">
@@ -444,29 +546,20 @@ const Accounts = () => {
             <thead>
               <tr>
                 <th>Account</th>
-
                 <th>Broker</th>
-
+                <th>Server</th>
                 <th>Environment</th>
-
                 <th>Balance</th>
-
                 <th>Equity</th>
-
                 <th>Status</th>
-
                 <th>Actions</th>
               </tr>
             </thead>
 
             <tbody>
-              {/* =================================================
-                  LOADING
-              ================================================= */}
-
               {loading ? (
                 <tr>
-                  <td colSpan="7" className="accounts-empty">
+                  <td colSpan="8" className="accounts-empty">
                     <FaSyncAlt className="accounts-spin" />
 
                     <strong>Loading trading accounts...</strong>
@@ -475,12 +568,8 @@ const Accounts = () => {
                   </td>
                 </tr>
               ) : filteredAccounts.length === 0 ? (
-                /* =================================================
-                   EMPTY
-                ================================================= */
-
                 <tr>
-                  <td colSpan="7" className="accounts-empty">
+                  <td colSpan="8" className="accounts-empty">
                     <FaWallet />
 
                     <strong>
@@ -507,15 +596,9 @@ const Accounts = () => {
                   </td>
                 </tr>
               ) : (
-                /* =================================================
-                   ACCOUNTS
-                ================================================= */
-
                 filteredAccounts.map((account) => (
                   <tr key={account.id}>
-                    {/* =========================================
-                        ACCOUNT
-                    ========================================= */}
+                    {/* ACCOUNT */}
 
                     <td>
                       <div className="account-table-name">
@@ -533,21 +616,23 @@ const Accounts = () => {
                       </div>
                     </td>
 
-                    {/* =========================================
-                        BROKER
-                    ========================================= */}
+                    {/* BROKER */}
 
                     <td>
                       <div className="account-table-broker">
                         <strong>{account.broker || "—"}</strong>
-
-                        <span>{account.server || "No server"}</span>
                       </div>
                     </td>
 
-                    {/* =========================================
-                        ENVIRONMENT
-                    ========================================= */}
+                    {/* SERVER */}
+
+                    <td>
+                      <div className="account-table-server">
+                        <span>{account.server || "—"}</span>
+                      </div>
+                    </td>
+
+                    {/* ENVIRONMENT */}
 
                     <td>
                       <span
@@ -561,9 +646,7 @@ const Accounts = () => {
                       </span>
                     </td>
 
-                    {/* =========================================
-                        BALANCE
-                    ========================================= */}
+                    {/* BALANCE */}
 
                     <td>
                       <strong>
@@ -571,9 +654,7 @@ const Accounts = () => {
                       </strong>
                     </td>
 
-                    {/* =========================================
-                        EQUITY
-                    ========================================= */}
+                    {/* EQUITY */}
 
                     <td>
                       <strong>
@@ -581,14 +662,10 @@ const Accounts = () => {
                       </strong>
                     </td>
 
-                    {/* =========================================
-                        STATUS
-                    ========================================= */}
+                    {/* STATUS */}
 
                     <td>
                       <div className="account-status-cell">
-                        {/* AQE ACTIVE STATUS */}
-
                         <span
                           className={
                             account.active
@@ -601,28 +678,23 @@ const Accounts = () => {
                           {account.active ? "Active" : "Inactive"}
                         </span>
 
-                        {/* BROKER CONNECTION STATUS */}
-
-                        <small
+                        <span
                           className={`account-connection-status ${
                             account.status?.toLowerCase() || "disconnected"
                           }`}
                         >
                           {account.status || "DISCONNECTED"}
-                        </small>
+                        </span>
                       </div>
                     </td>
 
-                    {/* =========================================
-                        ACTIONS
-                    ========================================= */}
+                    {/* ACTIONS */}
 
                     <td>
                       <div className="account-actions">
-                        {/* VIEW */}
-
                         <button
                           type="button"
+                          className="account-action-view"
                           title="View account"
                           onClick={() => setViewingAccount(account)}
                           disabled={connecting || disconnecting}
@@ -630,10 +702,9 @@ const Accounts = () => {
                           <FaEye />
                         </button>
 
-                        {/* EDIT */}
-
                         <button
                           type="button"
+                          className="account-action-edit"
                           title="Edit account"
                           onClick={() => setEditingAccount(account)}
                           disabled={connecting || disconnecting}
@@ -641,11 +712,10 @@ const Accounts = () => {
                           <FaEdit />
                         </button>
 
-                        {/* CONNECT / DISCONNECT */}
-
                         {account.status === "CONNECTED" ? (
                           <button
                             type="button"
+                            className="account-action-connect"
                             title="Disconnect account"
                             onClick={() => handleDisconnectAccount(account)}
                             disabled={disconnecting || connecting}
@@ -659,6 +729,7 @@ const Accounts = () => {
                         ) : (
                           <button
                             type="button"
+                            className="account-action-connect"
                             title={
                               account.active
                                 ? "Connect account"
@@ -677,10 +748,9 @@ const Accounts = () => {
                           </button>
                         )}
 
-                        {/* DELETE */}
-
                         <button
                           type="button"
+                          className="account-action-delete"
                           title="Delete account"
                           onClick={() => setAccountToDelete(account)}
                           disabled={deleting || connecting || disconnecting}
@@ -697,16 +767,13 @@ const Accounts = () => {
         </div>
       </section>
 
-      {/* =====================================================
-          CREATE / EDIT ACCOUNT FORM
-      ===================================================== */}
+      {/* CREATE / EDIT ACCOUNT */}
 
       <AccountForm
         isOpen={isCreateOpen || Boolean(editingAccount)}
         onClose={() => {
           if (!creating && !updating) {
             setIsCreateOpen(false);
-
             setEditingAccount(null);
           }
         }}
@@ -715,9 +782,7 @@ const Accounts = () => {
         account={editingAccount}
       />
 
-      {/* =====================================================
-          ACCOUNT DETAILS MODAL
-      ===================================================== */}
+      {/* ACCOUNT DETAILS */}
 
       {viewingAccount && (
         <div
@@ -729,8 +794,6 @@ const Accounts = () => {
           }}
         >
           <div className="account-detail-modal" role="dialog" aria-modal="true">
-            {/* CLOSE */}
-
             <button
               type="button"
               className="account-detail-close"
@@ -787,7 +850,7 @@ const Accounts = () => {
               </div>
 
               <div>
-                <span>Status</span>
+                <span>Connection</span>
 
                 <strong>{viewingAccount.status || "DISCONNECTED"}</strong>
               </div>
@@ -818,9 +881,7 @@ const Accounts = () => {
         </div>
       )}
 
-      {/* =====================================================
-          DELETE CONFIRMATION
-      ===================================================== */}
+      {/* DELETE CONFIRMATION */}
 
       <ConfirmModal
         isOpen={Boolean(accountToDelete)}

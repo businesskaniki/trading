@@ -5,6 +5,7 @@ from decimal import Decimal
 from typing import Awaitable, Callable
 from uuid import UUID
 
+from risk.config import RiskConfig
 from risk.models import (
     AccountRiskSnapshot,
     MarketPricing,
@@ -12,7 +13,6 @@ from risk.models import (
     RiskContext,
     SymbolRiskConstraints,
 )
-from risk.config import RiskConfig
 from strategies.core.signal import TradingSignal
 
 # ============================================================================
@@ -58,6 +58,7 @@ class LiveSymbolState:
     Broker-specific symbol specification.
 
     The symbol here is the broker symbol, for example:
+
         XAUUSD.s
     """
 
@@ -92,6 +93,7 @@ class LiveMarketState:
 # ============================================================================
 # Provider contracts
 # ============================================================================
+
 
 AccountIdResolver = Callable[
     [TradingSignal],
@@ -172,6 +174,10 @@ class LiveRiskContextProvider:
         The canonical signal symbol is used to resolve the account-specific
         broker symbol through the supplied symbol provider.
 
+        Constraints are also resolved for every symbol represented by an
+        existing position so the Risk Engine can calculate portfolio,
+        symbol, and strategy exposure correctly.
+
         Example:
 
             signal.symbol = "XAUUSD"
@@ -179,6 +185,15 @@ class LiveRiskContextProvider:
             symbol provider
                 ↓
             broker symbol = "XAUUSD.s"
+
+        If the account already has positions in:
+
+            XAUUSD.s
+            US100
+            US30
+
+        then RiskContext.constraints_by_symbol will contain constraints
+        for all three symbols.
         """
 
         if not isinstance(signal, TradingSignal):
@@ -198,19 +213,34 @@ class LiveRiskContextProvider:
 
         canonical_symbol = self._normalize_symbol(signal.symbol)
 
-        symbol = await self._resolve_symbol(
+        # Resolve the incoming signal symbol first. This remains the
+        # dedicated symbol_constraints value used by RiskEngine for the
+        # proposed trade.
+        signal_symbol = await self._resolve_symbol(
             account_id=account_id,
             canonical_symbol=canonical_symbol,
         )
 
         market = await self._resolve_market(
             account_id=account_id,
-            broker_symbol=symbol.symbol,
+            broker_symbol=signal_symbol.symbol,
         )
 
         config = await self._resolve_risk_config(
             account_id=account_id,
             signal=signal,
+        )
+
+        signal_constraints = self._build_symbol_constraints(
+            symbol=signal_symbol,
+            canonical_symbol=canonical_symbol,
+        )
+
+        constraints_by_symbol = await self._build_constraints_by_symbol(
+            account_id=account_id,
+            positions=positions,
+            signal_symbol=signal_symbol,
+            signal_canonical_symbol=canonical_symbol,
         )
 
         return RiskContext(
@@ -219,10 +249,8 @@ class LiveRiskContextProvider:
                 positions=positions,
                 account_id=account_id,
             ),
-            symbol_constraints=self._build_symbol_constraints(
-                symbol=symbol,
-                canonical_symbol=canonical_symbol,
-            ),
+            symbol_constraints=signal_constraints,
+            constraints_by_symbol=constraints_by_symbol,
             market=self._build_market_pricing(market),
             config=config,
             signal=signal,
@@ -287,6 +315,11 @@ class LiveRiskContextProvider:
                 raise ValueError(
                     "PositionStateProvider returned a position belonging "
                     f"to account {position.account_id}, expected {account_id}."
+                )
+
+            if not position.symbol.strip():
+                raise ValueError(
+                    f"Position {position.position_id} has an empty symbol."
                 )
 
         return positions
@@ -360,6 +393,63 @@ class LiveRiskContextProvider:
 
         return config
 
+    async def _build_constraints_by_symbol(
+        self,
+        *,
+        account_id: UUID,
+        positions: list[LivePositionState],
+        signal_symbol: LiveSymbolState,
+        signal_canonical_symbol: str,
+    ) -> dict[str, SymbolRiskConstraints]:
+        """
+        Build symbol constraints for every symbol required by the Risk Engine.
+
+        The resulting mapping is keyed by the canonical uppercase symbol
+        used by PositionRiskSnapshot and ExposureRiskRule.
+
+        The signal symbol is inserted first and reused whenever an existing
+        position is on the same symbol. This prevents unnecessary duplicate
+        symbol-provider calls.
+
+        Existing positions on other symbols are resolved independently so
+        their own contract sizes and trading constraints are used when
+        calculating portfolio and strategy exposure.
+        """
+
+        constraints_by_symbol: dict[str, SymbolRiskConstraints] = {}
+
+        # The incoming signal symbol is always required.
+        constraints_by_symbol[signal_canonical_symbol] = self._build_symbol_constraints(
+            symbol=signal_symbol,
+            canonical_symbol=signal_canonical_symbol,
+        )
+
+        # Resolve constraints for every distinct existing-position symbol.
+        #
+        # Multiple positions can exist on the same symbol, so only perform
+        # one symbol-provider lookup per distinct symbol.
+        position_symbols: set[str] = set()
+
+        for position in positions:
+            position_symbol = self._normalize_symbol(position.symbol)
+            position_symbols.add(position_symbol)
+
+        for position_symbol in sorted(position_symbols):
+            if position_symbol in constraints_by_symbol:
+                continue
+
+            resolved_symbol = await self._resolve_symbol(
+                account_id=account_id,
+                canonical_symbol=position_symbol,
+            )
+
+            constraints_by_symbol[position_symbol] = self._build_symbol_constraints(
+                symbol=resolved_symbol,
+                canonical_symbol=position_symbol,
+            )
+
+        return constraints_by_symbol
+
     # ------------------------------------------------------------------
     # Model conversion
     # ------------------------------------------------------------------
@@ -420,6 +510,7 @@ class LiveRiskContextProvider:
         Convert broker symbol metadata into Risk Engine constraints.
 
         Risk Engine calculations require:
+
             contract_size
             tick_size
             tick_value
@@ -427,9 +518,8 @@ class LiveRiskContextProvider:
             volume_max
             volume_step
 
-        The risk engine does not currently consume margin_rate in its
-        position-size calculation, so a missing MT5 margin rate does not
-        prevent live risk evaluation.
+        margin_rate is preserved when supplied, but the current Risk Engine
+        does not yet use it for position sizing or margin validation.
         """
 
         if symbol.contract_size <= Decimal("0"):
@@ -495,11 +585,11 @@ class LiveRiskContextProvider:
     @staticmethod
     def _normalize_symbol(symbol: str) -> str:
         if not isinstance(symbol, str):
-            raise TypeError("Signal symbol must be a string.")
+            raise TypeError("Symbol must be a string.")
 
         normalized = symbol.strip().upper()
 
         if not normalized:
-            raise ValueError("Signal symbol cannot be empty.")
+            raise ValueError("Symbol cannot be empty.")
 
         return normalized

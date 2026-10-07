@@ -51,6 +51,12 @@ RiskConfigFactory = Callable[
 ]
 
 
+AccountLeverageFactory = Callable[
+    [BacktestConfig],
+    Decimal | Awaitable[Decimal],
+]
+
+
 StrategyConfigFactory = Callable[
     [BacktestConfig],
     Iterable[StrategyConfig] | Awaitable[Iterable[StrategyConfig]],
@@ -100,6 +106,8 @@ class BacktestComposition:
     The composition layer resolves:
 
         BacktestConfig
+              |
+              +------> account leverage
               |
               v
        account symbol specs
@@ -161,12 +169,19 @@ class BacktestComposition:
     that dependency is responsible for communicating with persistence
     and the MT5 bridge.
 
+    Account leverage is injected through ``account_leverage_factory``.
+    The application-level dependency behind that factory is responsible
+    for resolving the authenticated TradingAccount and reading its
+    broker-derived leverage.
+
     Runtime lifecycle ownership belongs to BacktestOrchestrator.
     """
 
     market_data_loader: BacktestMarketDataLoader
 
     risk_config_factory: RiskConfigFactory
+
+    account_leverage_factory: AccountLeverageFactory
 
     strategy_config_factory: StrategyConfigFactory
 
@@ -186,20 +201,21 @@ class BacktestComposition:
         Build a fully isolated account-level multi-strategy backtest.
 
         The supplied BacktestConfig defines the account and historical
-        period. Account symbols are resolved first because strategies
-        require a non-empty symbol universe during StrategyConfig
-        validation.
+        period. Account leverage and account symbols are resolved before
+        strategy configuration because both are account-level runtime
+        dependencies.
 
         The dependency order is therefore:
 
-            1. Resolve account symbols.
-            2. Inject symbols/metadata into an intermediate config.
-            3. Resolve enabled strategies against that config.
-            4. Prepare strategy configurations.
-            5. Resolve the union of strategy timeframes.
-            6. Construct the final BacktestConfig.
-            7. Prepare/load historical market data.
-            8. Construct the isolated runtime graph.
+            1. Resolve account leverage.
+            2. Resolve account symbols.
+            3. Inject leverage/symbols/metadata into an intermediate config.
+            4. Resolve enabled strategies against that config.
+            5. Preserve each strategy's own StrategyRun symbol universe.
+            6. Resolve the union of strategy timeframes.
+            7. Construct the final BacktestConfig.
+            8. Prepare/load historical market data.
+            9. Construct the isolated runtime graph.
 
         This method only constructs the runtime graph. It does not start
         the StrategyManager or the BacktestEngine.
@@ -222,14 +238,15 @@ class BacktestComposition:
 
         # Determine which fields actually exist on BacktestConfig.
         #
-        # This keeps the composition layer compatible with the current
-        # configuration model while allowing account-specific symbol
-        # metadata to be propagated once the configuration model exposes
-        # the corresponding field.
-        config_field_names = {
-            field_info.name
-            for field_info in fields(config)
-        }
+        # The current engine exposes ``leverage`` explicitly. Keeping the
+        # field check makes the composition boundary fail clearly if the
+        # domain configuration is accidentally out of sync.
+        config_field_names = {field_info.name for field_info in fields(config)}
+
+        if "leverage" not in config_field_names:
+            raise BacktestCompositionError(
+                "BacktestConfig does not expose the required " "'leverage' field.",
+            )
 
         existing_contract_sizes = getattr(
             config,
@@ -244,7 +261,49 @@ class BacktestComposition:
         )
 
         # ==============================================================
-        # 1. Resolve account trading universe and symbol metadata
+        # 1. Resolve account leverage
+        # ==============================================================
+
+        #
+        # Leverage is an account property and must come from the
+        # authenticated TradingAccount rather than from public client
+        # input.
+        #
+        # The application-level factory is responsible for:
+        #
+        #     account_id + authenticated user
+        #                  |
+        #                  v
+        #          TradingAccount.leverage
+        #
+        # This value becomes part of the internal BacktestConfig.
+        #
+
+        try:
+            resolved_leverage = await self._resolve(
+                self.account_leverage_factory,
+                config,
+            )
+
+            resolved_leverage = self._normalize_leverage(
+                resolved_leverage,
+            )
+
+        except Exception as exc:
+            logger.exception(
+                "Backtest composition failed while resolving account "
+                "leverage. account_id=%s",
+                config.account_id,
+            )
+
+            raise BacktestCompositionError(
+                "Failed to resolve account leverage "
+                f"for account '{config.account_id}': "
+                f"{type(exc).__name__}: {exc}",
+            ) from exc
+
+        # ==============================================================
+        # 2. Resolve account trading universe and symbol metadata
         # ==============================================================
 
         #
@@ -258,7 +317,8 @@ class BacktestComposition:
         # account's enabled AccountSymbol records.
         #
         # Therefore the selected-symbol dependency is the first
-        # account-specific dependency in the composition graph.
+        # account-specific dependency in the composition graph after
+        # leverage has been resolved.
         #
 
         try:
@@ -274,9 +334,7 @@ class BacktestComposition:
             ) = self._normalize_symbol_specifications(
                 selected_symbols,
                 existing_contract_sizes=existing_contract_sizes,
-                existing_symbol_specifications=(
-                    existing_symbol_specifications
-                ),
+                existing_symbol_specifications=(existing_symbol_specifications),
             )
 
         except Exception as exc:
@@ -299,53 +357,53 @@ class BacktestComposition:
             )
 
         # ==============================================================
-        # 2. Build an intermediate symbol-aware configuration
+        # 3. Build an intermediate symbol/leverage-aware configuration
         # ==============================================================
 
         #
         # StrategyConfigFactory receives this configuration.
         #
-        # This is the critical fix for the current failure:
+        # Strategy configuration now sees:
         #
-        #     StrategyConfig(...)
-        #     StrategyConfigurationError:
-        #     must define at least one symbol
+        #     config.account_id
+        #     config.leverage
+        #     config.symbols
+        #     config.contract_sizes
+        #     config.symbol_specifications
         #
-        # The factory now sees:
-        #
-        #     config.symbols == resolved_symbols
-        #
-        # instead of the original empty request-level symbol list.
+        # The public request remains account-centric. These values are
+        # resolved internally by the composition layer.
         #
 
         try:
             strategy_config_input = self._build_symbol_resolved_config(
                 config=config,
+                resolved_leverage=resolved_leverage,
                 resolved_symbols=resolved_symbols,
                 resolved_contract_sizes=resolved_contract_sizes,
-                resolved_symbol_specifications=(
-                    resolved_symbol_specifications
-                ),
+                resolved_symbol_specifications=(resolved_symbol_specifications),
                 config_field_names=config_field_names,
             )
 
         except Exception as exc:
             logger.exception(
                 "Backtest composition failed while constructing the "
-                "symbol-resolved strategy configuration input. "
-                "account_id=%s symbols=%s",
+                "symbol/leverage-resolved strategy configuration input. "
+                "account_id=%s symbols=%s leverage=%s",
                 config.account_id,
                 resolved_symbols,
+                resolved_leverage,
             )
 
             raise BacktestCompositionError(
-                "Failed to construct the symbol-resolved backtest "
-                f"configuration for account '{config.account_id}': "
+                "Failed to construct the symbol/leverage-resolved "
+                f"backtest configuration for account "
+                f"'{config.account_id}': "
                 f"{type(exc).__name__}: {exc}",
             ) from exc
 
         # ==============================================================
-        # 3. Resolve enabled strategies
+        # 4. Resolve enabled strategies
         # ==============================================================
 
         try:
@@ -362,9 +420,10 @@ class BacktestComposition:
         except Exception as exc:
             logger.exception(
                 "Backtest composition failed while resolving strategy "
-                "configurations. account_id=%s symbols=%s",
+                "configurations. account_id=%s symbols=%s leverage=%s",
                 config.account_id,
                 resolved_symbols,
+                resolved_leverage,
             )
 
             raise BacktestCompositionError(
@@ -380,37 +439,61 @@ class BacktestComposition:
             )
 
         # ==============================================================
-        # 4. Apply account symbol universe to every strategy
-        #
-        # Strategy-specific timeframe/parameter/metadata configuration
-        # remains intact.
+        # 5. Preserve strategy-local symbol universes
         # ==============================================================
 
-        try:
-            resolved_strategy_configs = tuple(
-                self._prepare_strategy_config(
-                    strategy_config=strategy_config,
-                    account_config=strategy_config_input,
-                    symbols=resolved_symbols,
+        #
+        # IMPORTANT:
+        #
+        # ``resolved_symbols`` is the ACCOUNT/BACKTEST MARKET-DATA
+        # universe.
+        #
+        # It is NOT a strategy universe.
+        #
+        # Each StrategyConfig already contains the symbol universe
+        # belonging to its individual StrategyRun.
+        #
+        # Example:
+        #
+        #     BacktestConfig.symbols
+        #         = [BTCUSD, US100, US30, XAUAUD, XAUUSD]
+        #
+        #     bollinger_reversion.symbols
+        #         = [US30]
+        #
+        # Historical market data is loaded for the complete account
+        # universe, but StrategyManager receives each strategy's own
+        # symbol configuration unchanged.
+        #
+        # _normalize_strategy_configs() already:
+        #
+        #     - forces BACKTEST mode
+        #     - enables the runtime strategy
+        #     - assigns account_id
+        #     - preserves symbols
+        #     - preserves timeframes
+        #     - preserves parameters
+        #     - preserves metadata
+        #
+        # Therefore there is deliberately NO second StrategyConfig
+        # transformation here.
+        #
+
+        logger.debug(
+            "Resolved strategy universes for backtest. " "account_id=%s strategies=%s",
+            config.account_id,
+            tuple(
+                (
+                    strategy_config.strategy_name,
+                    tuple(strategy_config.symbols),
+                    tuple(strategy_config.timeframes),
                 )
                 for strategy_config in resolved_strategy_configs
-            )
-
-        except Exception as exc:
-            logger.exception(
-                "Backtest composition failed while preparing strategy "
-                "configurations. account_id=%s",
-                config.account_id,
-            )
-
-            raise BacktestCompositionError(
-                "Failed to prepare strategy configurations "
-                f"for account '{config.account_id}': "
-                f"{type(exc).__name__}: {exc}",
-            ) from exc
+            ),
+        )
 
         # ==============================================================
-        # 5. Resolve union of strategy timeframes
+        # 6. Resolve union of strategy timeframes
         # ==============================================================
 
         resolved_timeframes = self._collect_timeframes(
@@ -423,26 +506,26 @@ class BacktestComposition:
             )
 
         # ==============================================================
-        # 6. Build final resolved account-level BacktestConfig
+        # 7. Build final resolved account-level BacktestConfig
         # ==============================================================
 
         try:
             resolved_config = self._build_config(
                 config=strategy_config_input,
+                resolved_leverage=resolved_leverage,
                 resolved_symbols=resolved_symbols,
                 resolved_timeframes=resolved_timeframes,
                 resolved_contract_sizes=resolved_contract_sizes,
-                resolved_symbol_specifications=(
-                    resolved_symbol_specifications
-                ),
+                resolved_symbol_specifications=(resolved_symbol_specifications),
                 config_field_names=config_field_names,
             )
 
         except Exception as exc:
             logger.exception(
                 "Backtest composition failed while constructing the "
-                "resolved BacktestConfig. account_id=%s",
+                "resolved BacktestConfig. account_id=%s leverage=%s",
                 config.account_id,
+                resolved_leverage,
             )
 
             raise BacktestCompositionError(
@@ -452,7 +535,7 @@ class BacktestComposition:
             ) from exc
 
         # ==============================================================
-        # 7. Ensure historical market data is available
+        # 8. Ensure historical market data is available
         # ==============================================================
 
         await self._prepare_historical_data(
@@ -462,7 +545,7 @@ class BacktestComposition:
         )
 
         # ==============================================================
-        # 8. Load persisted historical market data
+        # 9. Load persisted historical market data
         # ==============================================================
 
         try:
@@ -484,10 +567,12 @@ class BacktestComposition:
         except Exception as exc:
             logger.exception(
                 "Backtest composition failed while loading historical "
-                "market data. account_id=%s symbols=%s timeframes=%s",
+                "market data. account_id=%s symbols=%s timeframes=%s "
+                "leverage=%s",
                 config.account_id,
                 resolved_symbols,
                 resolved_timeframes,
+                resolved_leverage,
             )
 
             raise BacktestCompositionError(
@@ -497,7 +582,7 @@ class BacktestComposition:
             ) from exc
 
         # ==============================================================
-        # 9. Create isolated StrategyManager
+        # 10. Create isolated StrategyManager
         #
         # StrategyManager is constructed here but NOT started here.
         #
@@ -507,7 +592,7 @@ class BacktestComposition:
         strategy_manager = StrategyManager()
 
         # ==============================================================
-        # 10. Create simulation-aware market-data view
+        # 11. Create simulation-aware market-data view
         # ==============================================================
 
         market_data_view = BacktestMarketDataView(
@@ -519,22 +604,23 @@ class BacktestComposition:
 
         try:
             # ==========================================================
-            # 11. Bootstrap the strategy registry
+            # 12. Bootstrap the strategy registry
             # ==========================================================
 
             bootstrap_result = await strategy_bootstrap.start()
 
             logger.info(
                 "Backtest strategy registry bootstrapped. "
-                "account_id=%s imported_modules=%d "
+                "account_id=%s leverage=%s imported_modules=%d "
                 "registered_strategies=%s",
                 config.account_id,
+                resolved_leverage,
                 len(bootstrap_result.imported_modules),
                 bootstrap_result.registered_strategies,
             )
 
             # ==========================================================
-            # 12. Create one runtime instance per active strategy
+            # 13. Create one runtime instance per active strategy
             # ==============================================================
 
             for strategy_config in resolved_strategy_configs:
@@ -548,8 +634,19 @@ class BacktestComposition:
                     instance.strategy_id,
                 )
 
+                logger.info(
+                    "Backtest strategy instance created. "
+                    "strategy_id=%s strategy_name=%s symbols=%s "
+                    "timeframes=%s account_id=%s",
+                    instance.strategy_id,
+                    instance.strategy_name,
+                    instance.symbols,
+                    instance.timeframes,
+                    config.account_id,
+                )
+
             # ==========================================================
-            # 13. Resolve RiskConfig
+            # 14. Resolve RiskConfig
             # ==============================================================
 
             risk_config = await self._resolve(
@@ -570,13 +667,13 @@ class BacktestComposition:
             )
 
             # ==========================================================
-            # 14. Create isolated real RiskEngine
+            # 15. Create isolated real RiskEngine
             # ==============================================================
 
             risk_engine = RiskEngine()
 
             # ==========================================================
-            # 15. Create account-level BacktestEngine
+            # 16. Create account-level BacktestEngine
             # ==============================================================
 
             engine = BacktestEngine(
@@ -585,7 +682,7 @@ class BacktestComposition:
             )
 
             # ==========================================================
-            # 16. Create multi-strategy orchestrator
+            # 17. Create multi-strategy orchestrator
             # ==============================================================
 
             orchestrator = BacktestOrchestrator(
@@ -599,7 +696,7 @@ class BacktestComposition:
             )
 
             # ==========================================================
-            # 17. Attach shared historical market-data view
+            # 18. Attach shared historical market-data view
             # ==============================================================
 
             orchestrator.set_market_data_view(
@@ -608,9 +705,10 @@ class BacktestComposition:
 
             logger.info(
                 "Backtest composition completed successfully. "
-                "account_id=%s strategies=%d strategy_names=%s "
-                "symbols=%d timeframes=%s",
+                "account_id=%s leverage=%s strategies=%d "
+                "strategy_names=%s symbols=%d timeframes=%s",
                 config.account_id,
+                resolved_leverage,
                 len(created_strategy_ids),
                 tuple(
                     strategy_config.strategy_name
@@ -625,8 +723,10 @@ class BacktestComposition:
         except Exception as exc:
             logger.exception(
                 "Backtest composition failed while constructing the "
-                "simulation runtime. account_id=%s strategies=%s",
+                "simulation runtime. account_id=%s leverage=%s "
+                "strategies=%s",
                 config.account_id,
+                resolved_leverage,
                 created_strategy_ids,
             )
 
@@ -676,6 +776,7 @@ class BacktestComposition:
     def _build_symbol_resolved_config(
         *,
         config: BacktestConfig,
+        resolved_leverage: Decimal,
         resolved_symbols: tuple[str, ...],
         resolved_contract_sizes: dict[str, Decimal],
         resolved_symbol_specifications: dict[
@@ -686,10 +787,11 @@ class BacktestComposition:
     ) -> BacktestConfig:
         """
         Build an intermediate BacktestConfig containing the resolved
-        account symbol universe.
+        account leverage and symbol universe.
 
         This configuration is passed to StrategyConfigFactory so that
-        strategy configurations are created with actual account symbols.
+        strategy configurations are created with the actual account
+        context.
 
         Timeframes are intentionally left unchanged here. The final
         account-level timeframe union is calculated after all strategies
@@ -697,6 +799,7 @@ class BacktestComposition:
         """
 
         values: dict[str, Any] = {
+            "leverage": resolved_leverage,
             "symbols": resolved_symbols,
         }
 
@@ -704,9 +807,7 @@ class BacktestComposition:
             values["contract_sizes"] = resolved_contract_sizes
 
         if "symbol_specifications" in config_field_names:
-            values["symbol_specifications"] = (
-                resolved_symbol_specifications
-            )
+            values["symbol_specifications"] = resolved_symbol_specifications
 
         return replace(
             config,
@@ -717,6 +818,7 @@ class BacktestComposition:
     def _build_config(
         *,
         config: BacktestConfig,
+        resolved_leverage: Decimal,
         resolved_symbols: tuple[str, ...],
         resolved_timeframes: tuple[str, ...],
         resolved_contract_sizes: dict[str, Decimal],
@@ -738,8 +840,8 @@ class BacktestComposition:
             resolved simulation configuration.
 
         The resulting configuration contains the complete account-level
-        trading universe and the union of every timeframe required by
-        the active strategies.
+        trading universe, resolved account leverage, and the union of
+        every timeframe required by the active strategies.
 
         BacktestConfig enforces:
 
@@ -759,12 +861,11 @@ class BacktestComposition:
             "end": config.end,
             "symbols": resolved_symbols,
             "timeframes": resolved_timeframes,
+            "leverage": resolved_leverage,
         }
 
         if "contract_sizes" in config_field_names:
-            resolved_config_values["contract_sizes"] = (
-                resolved_contract_sizes
-            )
+            resolved_config_values["contract_sizes"] = resolved_contract_sizes
 
         if "symbol_specifications" in config_field_names:
             resolved_config_values["symbol_specifications"] = (
@@ -795,6 +896,7 @@ class BacktestComposition:
 
             - account_id
             - user_id
+            - leverage
             - start
             - end
             - symbols
@@ -815,10 +917,11 @@ class BacktestComposition:
             logger.debug(
                 "No historical-data backfill dependency configured. "
                 "Using persisted historical data only. "
-                "account_id=%s symbols=%s timeframes=%s",
+                "account_id=%s symbols=%s timeframes=%s leverage=%s",
                 config.account_id,
                 resolved_symbols,
                 resolved_timeframes,
+                config.leverage,
             )
             return
 
@@ -838,12 +941,13 @@ class BacktestComposition:
             logger.exception(
                 "Historical data preparation failed. "
                 "account_id=%s symbols=%s timeframes=%s "
-                "start=%s end=%s",
+                "start=%s end=%s leverage=%s",
                 config.account_id,
                 resolved_symbols,
                 resolved_timeframes,
                 config.start,
                 config.end,
+                config.leverage,
             )
 
             raise BacktestCompositionError(
@@ -855,12 +959,13 @@ class BacktestComposition:
         logger.info(
             "Historical data preparation completed. "
             "account_id=%s symbols=%d timeframes=%d "
-            "start=%s end=%s result=%s",
+            "start=%s end=%s leverage=%s result=%s",
             config.account_id,
             len(resolved_symbols),
             len(resolved_timeframes),
             config.start,
             config.end,
+            config.leverage,
             self._summarize_backfill_result(result),
         )
 
@@ -908,10 +1013,12 @@ class BacktestComposition:
         Every resulting configuration is forced into BACKTEST mode and
         assigned to the simulated account.
 
+        Each strategy's own symbols and timeframes are preserved exactly
+        as supplied by the strategy configuration factory.
+
         StrategyConfig is reconstructed explicitly rather than using
-        Pydantic's model_copy() API. This keeps the composition layer
-        independent of that copy helper while preserving the complete
-        strategy configuration.
+        Pydantic's model_copy() API because the runtime StrategyConfig
+        contract does not rely on that helper.
         """
 
         if values is None:
@@ -934,24 +1041,45 @@ class BacktestComposition:
 
             if not strategy_id:
                 raise BacktestCompositionError(
-                    "Strategy configuration contains an empty "
-                    "strategy_id.",
+                    "Strategy configuration contains an empty " "strategy_id.",
                 )
 
             if strategy_id in strategy_ids:
                 raise BacktestCompositionError(
-                    "Duplicate strategy_id detected in backtest: "
-                    f"{strategy_id!r}.",
+                    "Duplicate strategy_id detected in backtest: " f"{strategy_id!r}.",
                 )
 
-            strategy_ids.add(strategy_id)
+            strategy_ids.add(
+                strategy_id,
+            )
 
             strategy_name = value.strategy_name.strip()
 
             if not strategy_name:
                 raise BacktestCompositionError(
-                    f"Strategy {strategy_id!r} contains an empty "
-                    "strategy_name.",
+                    f"Strategy {strategy_id!r} contains an empty " "strategy_name.",
+                )
+
+            symbols = [
+                symbol.strip()
+                for symbol in value.symbols
+                if isinstance(symbol, str) and symbol.strip()
+            ]
+
+            if not symbols:
+                raise BacktestCompositionError(
+                    f"Strategy {strategy_id!r} must define at least " "one symbol.",
+                )
+
+            timeframes = [
+                timeframe.strip().upper()
+                for timeframe in value.timeframes
+                if isinstance(timeframe, str) and timeframe.strip()
+            ]
+
+            if not timeframes:
+                raise BacktestCompositionError(
+                    f"Strategy {strategy_id!r} must define at least " "one timeframe.",
                 )
 
             normalized = StrategyConfig(
@@ -960,8 +1088,8 @@ class BacktestComposition:
                 mode=StrategyMode.BACKTEST,
                 enabled=True,
                 account_id=account_config.account_id,
-                symbols=list(value.symbols),
-                timeframes=list(value.timeframes),
+                symbols=symbols,
+                timeframes=timeframes,
                 parameters=dict(value.parameters),
                 metadata=dict(value.metadata),
             )
@@ -970,40 +1098,61 @@ class BacktestComposition:
                 normalized,
             )
 
-        return tuple(configs)
+        return tuple(
+            configs,
+        )
+
+    # ==================================================================
+    # ACCOUNT LEVERAGE
+    # ==================================================================
 
     @staticmethod
-    def _prepare_strategy_config(
-        *,
-        strategy_config: StrategyConfig,
-        account_config: BacktestConfig,
-        symbols: tuple[str, ...],
-    ) -> StrategyConfig:
+    def _normalize_leverage(
+        value: Decimal,
+    ) -> Decimal:
         """
-        Prepare one strategy for the account-level backtest.
+        Validate and normalize the account leverage used by simulation.
 
-        Every active strategy receives the full account trading universe.
+        Leverage is an account-level value and must be strictly positive.
 
-        Preserved from the persisted strategy configuration:
+        Examples:
 
-            - strategy_id
-            - strategy_name
-            - timeframes
-            - parameters
-            - metadata
+            100   -> Decimal("100")
+            50    -> Decimal("50")
+            30    -> Decimal("30")
+
+        The resulting value is later consumed by the orchestration layer
+        to derive the margin rate:
+
+            margin_rate = 1 / leverage
         """
 
-        return StrategyConfig(
-            strategy_id=strategy_config.strategy_id,
-            strategy_name=strategy_config.strategy_name,
-            mode=StrategyMode.BACKTEST,
-            enabled=True,
-            account_id=account_config.account_id,
-            symbols=list(symbols),
-            timeframes=list(strategy_config.timeframes),
-            parameters=dict(strategy_config.parameters),
-            metadata=dict(strategy_config.metadata),
-        )
+        if value is None:
+            raise BacktestCompositionError(
+                "Account leverage is required for backtesting.",
+            )
+
+        try:
+            leverage = Decimal(
+                str(value),
+            )
+
+        except Exception as exc:
+            raise BacktestCompositionError(
+                f"Invalid account leverage value: {value!r}.",
+            ) from exc
+
+        if not leverage.is_finite():
+            raise BacktestCompositionError(
+                "Account leverage must be finite.",
+            )
+
+        if leverage <= Decimal("0"):
+            raise BacktestCompositionError(
+                "Account leverage must be greater than zero.",
+            )
+
+        return leverage
 
     # ==================================================================
     # SYMBOL RESOLUTION
@@ -1071,10 +1220,8 @@ class BacktestComposition:
             existing_contract_sizes,
         )
 
-        symbol_specifications = (
-            cls._normalize_symbol_specifications_mapping(
-                existing_symbol_specifications,
-            )
+        symbol_specifications = cls._normalize_symbol_specifications_mapping(
+            existing_symbol_specifications,
         )
 
         if values is None:
@@ -1094,18 +1241,16 @@ class BacktestComposition:
             ):
                 raw_symbol = value.symbol
 
-                normalized_specification = (
-                    cls._build_normalized_symbol_specification(
-                        symbol=raw_symbol,
-                        broker_symbol=value.broker_symbol,
-                        digits=value.digits,
-                        point=value.point,
-                        tick_size=value.tick_size,
-                        contract_size=value.contract_size,
-                        volume_min=value.min_volume,
-                        volume_max=value.max_volume,
-                        volume_step=value.volume_step,
-                    )
+                normalized_specification = cls._build_normalized_symbol_specification(
+                    symbol=raw_symbol,
+                    broker_symbol=value.broker_symbol,
+                    digits=value.digits,
+                    point=value.point,
+                    tick_size=value.tick_size,
+                    contract_size=value.contract_size,
+                    volume_min=value.min_volume,
+                    volume_max=value.max_volume,
+                    volume_step=value.volume_step,
                 )
 
             elif isinstance(
@@ -1141,15 +1286,14 @@ class BacktestComposition:
                 )
 
             if symbol in seen:
-                existing_specification = (
-                    symbol_specifications.get(symbol)
+                existing_specification = symbol_specifications.get(
+                    symbol,
                 )
 
                 if normalized_specification is not None:
                     if (
                         existing_specification is not None
-                        and existing_specification
-                        != normalized_specification
+                        and existing_specification != normalized_specification
                     ):
                         raise BacktestCompositionError(
                             "Conflicting symbol specifications for "
@@ -1158,17 +1302,10 @@ class BacktestComposition:
                             f"{normalized_specification!r}.",
                         )
 
-                    symbol_specifications[symbol] = (
-                        normalized_specification
-                    )
+                    symbol_specifications[symbol] = normalized_specification
 
-                    if (
-                        normalized_specification.contract_size
-                        is not None
-                    ):
-                        contract_sizes[symbol] = (
-                            normalized_specification.contract_size
-                        )
+                    if normalized_specification.contract_size is not None:
+                        contract_sizes[symbol] = normalized_specification.contract_size
 
                 continue
 
@@ -1176,17 +1313,10 @@ class BacktestComposition:
             symbols.append(symbol)
 
             if normalized_specification is not None:
-                symbol_specifications[symbol] = (
-                    normalized_specification
-                )
+                symbol_specifications[symbol] = normalized_specification
 
-                if (
-                    normalized_specification.contract_size
-                    is not None
-                ):
-                    contract_sizes[symbol] = (
-                        normalized_specification.contract_size
-                    )
+                if normalized_specification.contract_size is not None:
+                    contract_sizes[symbol] = normalized_specification.contract_size
 
         return (
             tuple(symbols),
@@ -1251,18 +1381,16 @@ class BacktestComposition:
             if not symbol:
                 continue
 
-            normalized_specification = (
-                cls._build_normalized_symbol_specification(
-                    symbol=symbol,
-                    broker_symbol=specification.broker_symbol,
-                    digits=specification.digits,
-                    point=specification.point,
-                    tick_size=specification.tick_size,
-                    contract_size=specification.contract_size,
-                    volume_min=specification.min_volume,
-                    volume_max=specification.max_volume,
-                    volume_step=specification.volume_step,
-                )
+            normalized_specification = cls._build_normalized_symbol_specification(
+                symbol=symbol,
+                broker_symbol=specification.broker_symbol,
+                digits=specification.digits,
+                point=specification.point,
+                tick_size=specification.tick_size,
+                contract_size=specification.contract_size,
+                volume_min=specification.min_volume,
+                volume_max=specification.max_volume,
+                volume_step=specification.volume_step,
             )
 
             if normalized_specification is None:
@@ -1319,8 +1447,7 @@ class BacktestComposition:
                 str,
             ):
                 raise BacktestCompositionError(
-                    f"broker_symbol for symbol {symbol!r} "
-                    "must be a string.",
+                    f"broker_symbol for symbol {symbol!r} " "must be a string.",
                 )
 
             normalized_broker_symbol = broker_symbol.strip()
@@ -1339,8 +1466,7 @@ class BacktestComposition:
 
             except (TypeError, ValueError) as exc:
                 raise BacktestCompositionError(
-                    f"Invalid digits for symbol {symbol!r}: "
-                    f"{digits!r}.",
+                    f"Invalid digits for symbol {symbol!r}: " f"{digits!r}.",
                 ) from exc
 
             if normalized_digits < 0:
@@ -1525,18 +1651,17 @@ class BacktestComposition:
 
         except Exception as exc:
             raise BacktestCompositionError(
-                f"Invalid contract_size for symbol {symbol!r}: "
-                f"{value!r}.",
+                f"Invalid contract_size for symbol {symbol!r}: " f"{value!r}.",
             ) from exc
 
         if not contract_size.is_finite():
             raise BacktestCompositionError(
-                f"contract_size for symbol {symbol!r} must be finite.",
+                f"contract_size for symbol {symbol!r} " "must be finite.",
             )
 
         if contract_size <= 0:
             raise BacktestCompositionError(
-                f"contract_size for symbol {symbol!r} must be positive.",
+                f"contract_size for symbol {symbol!r} " "must be positive.",
             )
 
         return contract_size
@@ -1559,18 +1684,17 @@ class BacktestComposition:
 
         except Exception as exc:
             raise BacktestCompositionError(
-                f"Invalid {field_name} for symbol {symbol!r}: "
-                f"{value!r}.",
+                f"Invalid {field_name} for symbol {symbol!r}: " f"{value!r}.",
             ) from exc
 
         if not normalized.is_finite():
             raise BacktestCompositionError(
-                f"{field_name} for symbol {symbol!r} must be finite.",
+                f"{field_name} for symbol {symbol!r} " "must be finite.",
             )
 
         if normalized <= 0:
             raise BacktestCompositionError(
-                f"{field_name} for symbol {symbol!r} must be positive.",
+                f"{field_name} for symbol {symbol!r} " "must be positive.",
             )
 
         return normalized
@@ -1682,6 +1806,7 @@ class BacktestComposition:
 
 
 __all__ = [
+    "AccountLeverageFactory",
     "BacktestComposition",
     "BacktestCompositionError",
     "BacktestMarketDataLoader",

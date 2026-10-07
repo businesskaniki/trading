@@ -45,6 +45,11 @@ class BacktestPortfolio:
 
     The execution layer mutates this portfolio when a simulated
     order is filled.
+
+    Margin is explicitly tracked at the portfolio level, but the
+    portfolio does not determine leverage or broker-specific margin
+    requirements. The execution layer is responsible for calculating
+    required margin and passing it here when a position is opened.
     """
 
     account_id: UUID
@@ -64,6 +69,26 @@ class BacktestPortfolio:
 
     current_time: datetime | None = None
 
+    # ------------------------------------------------------------------
+    # Mark-to-market state
+    # ------------------------------------------------------------------
+
+    _unrealized_pnl: Decimal = field(
+        default=Decimal("0"),
+        repr=False,
+    )
+
+    # ------------------------------------------------------------------
+    # Margin state
+    # ------------------------------------------------------------------
+
+    # Margin is tracked per position so closing one position releases
+    # exactly the amount reserved for that position.
+    _reserved_margin_by_position: dict[UUID, Decimal] = field(
+        default_factory=dict,
+        repr=False,
+    )
+
     def __post_init__(self) -> None:
         self.initial_balance = Decimal(str(self.initial_balance))
 
@@ -81,9 +106,10 @@ class BacktestPortfolio:
         self.realized_pnl = Decimal(str(self.realized_pnl))
         self.commission_paid = Decimal(str(self.commission_paid))
         self.swap_paid = Decimal(str(self.swap_paid))
+        self._unrealized_pnl = Decimal(str(self._unrealized_pnl))
 
         if self.peak_equity is None:
-            self.peak_equity = self.balance
+            self.peak_equity = self.balance + self._unrealized_pnl
         else:
             self.peak_equity = Decimal(str(self.peak_equity))
 
@@ -91,6 +117,15 @@ class BacktestPortfolio:
 
         if self.current_time is not None:
             self.current_time = self._normalize_datetime(self.current_time)
+
+        normalized_margin: dict[UUID, Decimal] = {}
+
+        for position_id, margin in self._reserved_margin_by_position.items():
+            normalized_margin[position_id] = self._validate_margin_amount(
+                margin,
+            )
+
+        self._reserved_margin_by_position = normalized_margin
 
     # ------------------------------------------------------------------
     # ACCOUNT STATE
@@ -103,40 +138,43 @@ class BacktestPortfolio:
 
         Equity is:
 
-            balance + unrealized P&L
+            balance + latest marked unrealized P&L
 
-        The portfolio cannot calculate unrealized P&L without current
-        market prices, so callers that need a marked-to-market equity
-        value should use ``mark_to_market()`` or ``snapshot()``.
-
-        If no prices are available, the property returns balance.
+        Before the portfolio has been marked to market, unrealized P&L is
+        zero and equity therefore equals balance.
         """
 
-        return self.balance
+        return self.balance + self._unrealized_pnl
 
     @property
     def free_margin(self) -> Decimal:
         """
         Current simulated free margin.
 
-        Margin reservation is deliberately kept outside this portfolio
-        until symbol-specific margin requirements are introduced.
+        Free margin is:
 
-        For the current backtest model, free margin is therefore the
-        account equity represented by ``balance``.
+            equity - used margin
+
+        The value may become negative if a simulation permits equity to
+        fall below reserved margin. Margin/risk rules are responsible for
+        preventing additional exposure in that situation.
         """
 
-        return self.balance
+        return self.equity - self.margin
 
     @property
     def margin(self) -> Decimal:
         """
-        Current simulated margin usage.
+        Current simulated used margin.
 
-        Margin accounting is currently delegated to the risk layer.
+        Margin is the sum of margin reservations associated with all
+        currently open positions.
         """
 
-        return Decimal("0")
+        return sum(
+            self._reserved_margin_by_position.values(),
+            Decimal("0"),
+        )
 
     @property
     def margin_level(self) -> Decimal | None:
@@ -144,6 +182,10 @@ class BacktestPortfolio:
         Current simulated margin level.
 
         Returns ``None`` when no margin is reserved.
+
+        Margin level is:
+
+            equity / used_margin × 100
         """
 
         margin = self.margin
@@ -151,7 +193,7 @@ class BacktestPortfolio:
         if margin <= Decimal("0"):
             return None
 
-        return (self.balance / margin) * Decimal("100")
+        return (self.equity / margin) * Decimal("100")
 
     @property
     def open_positions(self) -> list[BacktestPosition]:
@@ -214,7 +256,9 @@ class BacktestPortfolio:
             for symbol, price in prices.items()
         }
 
-        normalized_contract_sizes = self._normalize_contract_sizes(contract_sizes)
+        normalized_contract_sizes = self._normalize_contract_sizes(
+            contract_sizes,
+        )
 
         total = Decimal("0")
 
@@ -249,7 +293,8 @@ class BacktestPortfolio:
         """
         Mark the shared account to current market prices.
 
-        Returns the resulting account equity.
+        Returns the resulting account equity and stores the latest
+        unrealized P&L used by the account-state properties.
         """
 
         if timestamp is not None:
@@ -259,6 +304,8 @@ class BacktestPortfolio:
             prices=prices,
             contract_sizes=contract_sizes,
         )
+
+        self._unrealized_pnl = unrealized
 
         equity = self.balance + unrealized
 
@@ -277,8 +324,8 @@ class BacktestPortfolio:
         """
         Realized account P&L relative to the initial balance.
 
-        Unrealized P&L is deliberately excluded because it is not yet
-        reflected in account balance.
+        Unrealized P&L is excluded because it has not yet been realized
+        into account balance.
         """
 
         return self.balance - self.initial_balance
@@ -318,19 +365,92 @@ class BacktestPortfolio:
     @property
     def drawdown(self) -> Decimal:
         """
-        Drawdown using the current realized account balance.
-
-        For a marked-to-market drawdown use ``snapshot()`` or
-        ``mark_to_market()`` with current prices.
+        Drawdown using current account equity.
         """
 
-        return self.drawdown_from_equity(self.balance)
+        return self.drawdown_from_equity(self.equity)
 
     @property
     def drawdown_percent(self) -> Decimal:
-        """Percentage drawdown using current account balance."""
+        """Percentage drawdown using current account equity."""
 
-        return self.drawdown_percent_from_equity(self.balance)
+        return self.drawdown_percent_from_equity(self.equity)
+
+    # ------------------------------------------------------------------
+    # MARGIN MANAGEMENT
+    # ------------------------------------------------------------------
+
+    def reserve_margin(
+        self,
+        position_id: UUID,
+        margin: Decimal,
+    ) -> None:
+        """
+        Reserve margin for an open position.
+
+        The margin amount must be calculated by the execution/risk layer.
+        This portfolio method only records the resulting reservation.
+        """
+
+        position = self.get_position(position_id)
+
+        if position.status != BacktestPositionStatus.OPEN:
+            raise BacktestPortfolioError(
+                "Margin can only be reserved for an open position."
+            )
+
+        if position_id in self._reserved_margin_by_position:
+            raise BacktestPortfolioError(
+                f"Margin is already reserved for position '{position_id}'."
+            )
+
+        normalized_margin = self._validate_margin_amount(margin)
+
+        if normalized_margin <= Decimal("0"):
+            raise BacktestPortfolioError("Reserved margin must be greater than zero.")
+
+        projected_margin = self.margin + normalized_margin
+        projected_free_margin = self.equity - projected_margin
+
+        if projected_free_margin < Decimal("0"):
+            raise BacktestInsufficientFundsError(
+                "Insufficient free margin to reserve "
+                f"{normalized_margin} for position '{position_id}'. "
+                f"Current equity: {self.equity}, "
+                f"used margin: {self.margin}, "
+                f"required margin: {normalized_margin}."
+            )
+
+        self._reserved_margin_by_position[position_id] = normalized_margin
+
+    def release_margin(
+        self,
+        position_id: UUID,
+    ) -> Decimal:
+        """
+        Release margin reserved for a position.
+
+        Returns the released margin.
+
+        It is valid to release zero margin for a position that was
+        opened before margin tracking was introduced.
+        """
+
+        return self._reserved_margin_by_position.pop(
+            position_id,
+            Decimal("0"),
+        )
+
+    def reserved_margin_for_position(
+        self,
+        position_id: UUID,
+    ) -> Decimal:
+        """Return margin currently reserved for one position."""
+
+        return self._reserved_margin_by_position.get(
+            position_id,
+            Decimal("0"),
+        )
 
     # ------------------------------------------------------------------
     # POSITION MANAGEMENT
@@ -339,9 +459,14 @@ class BacktestPortfolio:
     def add_position(
         self,
         position: BacktestPosition,
+        reserved_margin: Decimal = Decimal("0"),
     ) -> None:
         """
         Register a newly opened position.
+
+        ``reserved_margin`` is optional for backward compatibility with
+        existing callers. New execution paths should provide the actual
+        margin required by the simulated broker/account.
 
         Positions from any strategy and any supported symbol may be
         stored in this shared account portfolio.
@@ -361,6 +486,24 @@ class BacktestPortfolio:
             raise BacktestPortfolioError(
                 "Only open positions can be added to the portfolio."
             )
+
+        normalized_margin = self._validate_margin_amount(
+            reserved_margin,
+        )
+
+        if normalized_margin > Decimal("0"):
+            projected_margin = self.margin + normalized_margin
+            projected_free_margin = self.equity - projected_margin
+
+            if projected_free_margin < Decimal("0"):
+                raise BacktestInsufficientFundsError(
+                    "Insufficient free margin to open position. "
+                    f"Current equity: {self.equity}, "
+                    f"current margin: {self.margin}, "
+                    f"required margin: {normalized_margin}."
+                )
+
+            self._reserved_margin_by_position[position.position_id] = normalized_margin
 
         self.positions[position.position_id] = position
 
@@ -393,11 +536,10 @@ class BacktestPortfolio:
         ``BacktestPosition.close()`` calculates gross realized P&L and
         stores commission/swap on the position.
 
-        The portfolio then applies the position's resulting
+        The portfolio applies the position's resulting
         ``net_realized_pnl`` exactly once.
 
-        This is important because transaction costs must not be
-        subtracted twice.
+        After the position closes, any margin reserved for it is released.
         """
 
         position = self.get_position(position_id)
@@ -416,8 +558,6 @@ class BacktestPortfolio:
             swap=Decimal(str(swap)),
         )
 
-        # ``BacktestPosition.close()`` stores the net realized P&L
-        # separately from the gross P&L.
         net_pnl = position.net_realized_pnl
 
         # Defensive fallback for compatibility with position
@@ -431,10 +571,24 @@ class BacktestPortfolio:
         self.commission_paid += Decimal(str(commission))
         self.swap_paid += Decimal(str(swap))
 
+        # Closing a position realizes its P&L. Any previously cached
+        # unrealized P&L belonging to the position is no longer valid.
+        self._unrealized_pnl = self._unrealized_pnl - (gross_pnl)
+
+        if self._unrealized_pnl < Decimal("0"):
+            # The subtraction above is only a defensive compatibility
+            # measure because the normal backtest flow marks the portfolio
+            # before closure. Recalculate to zero rather than allowing a
+            # stale negative cache to survive.
+            self._unrealized_pnl = Decimal("0")
+
+        # The position's margin is released only after the close succeeds.
+        self.release_margin(position_id)
+
         if close_timestamp is not None:
             self.current_time = self._normalize_datetime(close_timestamp)
 
-        self._update_peak_equity(self.balance)
+        self._update_peak_equity(self.equity)
 
         return position
 
@@ -451,12 +605,11 @@ class BacktestPortfolio:
         Return a serializable account snapshot.
 
         When prices are supplied, equity and unrealized P&L are
-        calculated across the entire multi-strategy portfolio.
+        recalculated across the entire multi-strategy portfolio.
 
-        When prices are omitted, equity falls back to balance.
+        When prices are omitted, the most recently marked unrealized P&L
+        is retained.
         """
-
-        unrealized = Decimal("0")
 
         if prices is not None:
             unrealized = self.total_unrealized_pnl(
@@ -464,11 +617,18 @@ class BacktestPortfolio:
                 contract_sizes=contract_sizes,
             )
 
+            self._unrealized_pnl = unrealized
+        else:
+            unrealized = self._unrealized_pnl
+
         equity = self.balance + unrealized
 
         self._update_peak_equity(equity)
 
         drawdown = self.drawdown_from_equity(equity)
+
+        margin = self.margin
+        free_margin = equity - margin
 
         return {
             "account_id": str(self.account_id),
@@ -480,9 +640,11 @@ class BacktestPortfolio:
             "total_pnl": self.balance - self.initial_balance,
             "commission_paid": self.commission_paid,
             "swap_paid": self.swap_paid,
-            "margin": self.margin,
-            "free_margin": equity,
-            "margin_level": self.margin_level,
+            "margin": margin,
+            "free_margin": free_margin,
+            "margin_level": (
+                (equity / margin) * Decimal("100") if margin > Decimal("0") else None
+            ),
             "open_positions": self.open_position_count,
             "closed_positions": self.closed_position_count,
             "peak_equity": self.peak_equity,
@@ -534,6 +696,22 @@ class BacktestPortfolio:
     # INTERNAL
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _validate_margin_amount(
+        margin: Decimal,
+    ) -> Decimal:
+        """Normalize and validate a margin amount."""
+
+        normalized_margin = Decimal(str(margin))
+
+        if normalized_margin < Decimal("0"):
+            raise ValueError("Margin cannot be negative.")
+
+        if not normalized_margin.is_finite():
+            raise ValueError("Margin must be finite.")
+
+        return normalized_margin
+
     def _update_peak_equity(
         self,
         equity: Decimal,
@@ -567,6 +745,9 @@ class BacktestPortfolio:
 
             if size <= Decimal("0"):
                 raise ValueError(f"Contract size for '{symbol}' must be positive.")
+
+            if not size.is_finite():
+                raise ValueError(f"Contract size for '{symbol}' must be finite.")
 
             normalized[cls._normalize_symbol(symbol)] = size
 

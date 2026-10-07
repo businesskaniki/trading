@@ -5,7 +5,6 @@ from uuid import UUID
 from app.core.constants import AccountStatus
 from app.core.security import decrypt_secret, encrypt_secret
 from app.database.models.trading_account import TradingAccount
-from app.repositories.strategy_run_repository import StrategyRunRepository
 from app.repositories.trading_account_repository import (
     TradingAccountRepository,
 )
@@ -108,14 +107,10 @@ class TradingAccountService:
             credentials_encrypted=encrypted_credentials,
         )
 
-        self.repository.add(
-            account,
-        )
+        self.repository.add(account)
 
         await self.repository.commit()
-        await self.repository.refresh(
-            account,
-        )
+        await self.repository.refresh(account)
 
         # ------------------------------------------------------
         # Automatic strategy provisioning
@@ -154,6 +149,12 @@ class TradingAccountService:
     ) -> list[TradingAccount]:
         """
         Synchronize persisted account status with the live bridge session.
+
+        When reconciliation changes an account status, the database is
+        committed and the accounts are queried again before returning.
+        This ensures server-managed timestamp fields such as
+        ``updated_at`` are fully loaded before ORM objects are serialized
+        by Pydantic.
         """
 
         accounts = await self.repository.list_by_user(
@@ -165,6 +166,8 @@ class TradingAccountService:
         bridge_login = bridge_status.get("login") if bridge_status else None
 
         bridge_server = bridge_status.get("server") if bridge_status else None
+
+        changed = False
 
         for account in accounts:
             if account.status == AccountStatus.ARCHIVED:
@@ -194,11 +197,21 @@ class TradingAccountService:
             if account.status != next_status:
                 account.status = next_status
 
-                self.repository.update(
-                    account,
-                )
+                self.repository.update(account)
 
-        await self.repository.commit()
+                changed = True
+
+        # Only commit when reconciliation actually modified
+        # one or more account records.
+        if changed:
+            await self.repository.commit()
+
+            # Re-query the accounts after the commit so all ORM
+            # attributes, including server-managed timestamps such
+            # as updated_at, are loaded before Pydantic serialization.
+            return await self.repository.list_by_user(
+                user_id=user_id,
+            )
 
         return accounts
 
@@ -239,14 +252,10 @@ class TradingAccountService:
                 data.password,
             )
 
-        self.repository.update(
-            account,
-        )
+        self.repository.update(account)
 
         await self.repository.commit()
-        await self.repository.refresh(
-            account,
-        )
+        await self.repository.refresh(account)
 
         return account
 
@@ -275,7 +284,6 @@ class TradingAccountService:
             return decrypt_secret(
                 account.credentials_encrypted,
             )
-
         except Exception as exc:
             raise ValueError("Unable to decrypt trading account credentials.") from exc
 
@@ -309,14 +317,10 @@ class TradingAccountService:
                 value,
             )
 
-        self.repository.update(
-            account,
-        )
+        self.repository.update(account)
 
         await self.repository.commit()
-        await self.repository.refresh(
-            account,
-        )
+        await self.repository.refresh(account)
 
         return account
 
@@ -337,14 +341,10 @@ class TradingAccountService:
 
         account.active = active
 
-        self.repository.update(
-            account,
-        )
+        self.repository.update(account)
 
         await self.repository.commit()
-        await self.repository.refresh(
-            account,
-        )
+        await self.repository.refresh(account)
 
         return account
 
@@ -362,9 +362,7 @@ class TradingAccountService:
             user_id=user_id,
         )
 
-        await self.repository.delete(
-            account,
-        )
+        await self.repository.delete(account)
 
         await self.repository.commit()
 
@@ -387,7 +385,7 @@ class TradingAccountService:
         active_accounts = [
             account
             for account in accounts
-            if account.active and account.status == AccountStatus.CONNECTED
+            if (account.active and account.status == AccountStatus.CONNECTED)
         ]
 
         if not active_accounts:

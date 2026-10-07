@@ -31,7 +31,10 @@ class _IndicatorState:
 
     rsi: RSI
     atr: ATR
+
     previous_rsi: float | None = None
+    previous_atr: float | None = None
+
     last_signal_timestamp: datetime | None = None
 
 
@@ -46,12 +49,17 @@ class RSIReversalStrategy(BaseStrategy):
     Short:
         RSI crosses back below the overbought level.
 
-    Stop-loss and take-profit are calculated using ATR.
+    Risk management:
+        Stop-loss and take-profit are ATR based.
+
+        The ATR from the previous completed candle is used when
+        constructing the trade so that the signal candle does not
+        determine its own risk distance.
     """
 
     definition = StrategyDefinition(
         name="rsi_reversal",
-        version="1.0.0",
+        version="2.0.0",
         description=(
             "RSI mean-reversion strategy with "
             "ATR-based stop-loss and take-profit."
@@ -70,8 +78,14 @@ class RSIReversalStrategy(BaseStrategy):
         "atr_period": 14,
         "oversold": 30.0,
         "overbought": 70.0,
-        "stop_loss_atr": 1.5,
-        "take_profit_atr": 3.0,
+
+        # Mean-reversion trades should not normally require
+        # a very wide trend-style stop.
+        "stop_loss_atr": 1.0,
+
+        # 1.5 ATR target against a 1.0 ATR stop gives 1.5R.
+        "take_profit_atr": 1.5,
+
         "confidence": 0.70,
     }
 
@@ -93,21 +107,27 @@ class RSIReversalStrategy(BaseStrategy):
         self._rsi_period = int(
             parameters["rsi_period"]
         )
+
         self._atr_period = int(
             parameters["atr_period"]
         )
+
         self._oversold = float(
             parameters["oversold"]
         )
+
         self._overbought = float(
             parameters["overbought"]
         )
+
         self._stop_loss_atr = float(
             parameters["stop_loss_atr"]
         )
+
         self._take_profit_atr = float(
             parameters["take_profit_atr"]
         )
+
         self._confidence = float(
             parameters["confidence"]
         )
@@ -181,6 +201,11 @@ class RSIReversalStrategy(BaseStrategy):
                     ),
                 )
 
+                candles = sorted(
+                    candles,
+                    key=lambda candle: candle.datetime,
+                )
+
                 for candle in candles:
                     self._update_indicators(
                         state,
@@ -221,6 +246,9 @@ class RSIReversalStrategy(BaseStrategy):
             timeframe,
         )
 
+        # Preserve the ATR from the previous completed candle.
+        previous_atr = state.previous_atr
+
         current_rsi, current_atr = self._update_indicators(
             state,
             candle.high,
@@ -232,10 +260,13 @@ class RSIReversalStrategy(BaseStrategy):
 
         state.previous_rsi = current_rsi
 
+        if previous_atr is None or previous_atr <= 0:
+            return None
+
         if previous_rsi is None:
             return None
 
-        if current_atr <= 0:
+        if current_rsi < 0.0 or current_rsi > 100.0:
             return None
 
         timestamp = candle.datetime
@@ -246,7 +277,10 @@ class RSIReversalStrategy(BaseStrategy):
         direction: SignalDirection | None = None
         reason: str | None = None
 
-        # Oversold -> recovery above oversold = LONG.
+        # --------------------------------------------------------------
+        # Long mean-reversion setup
+        # --------------------------------------------------------------
+
         if (
             previous_rsi <= self._oversold
             and current_rsi > self._oversold
@@ -257,7 +291,10 @@ class RSIReversalStrategy(BaseStrategy):
                 f"({self._oversold:.2f})"
             )
 
-        # Overbought -> decline below overbought = SHORT.
+        # --------------------------------------------------------------
+        # Short mean-reversion setup
+        # --------------------------------------------------------------
+
         elif (
             previous_rsi >= self._overbought
             and current_rsi < self._overbought
@@ -276,7 +313,7 @@ class RSIReversalStrategy(BaseStrategy):
         )
 
         atr = Decimal(
-            str(current_atr)
+            str(previous_atr)
         )
 
         stop_distance = (
@@ -293,10 +330,17 @@ class RSIReversalStrategy(BaseStrategy):
             )
         )
 
+        if (
+            stop_distance <= 0
+            or target_distance <= 0
+        ):
+            return None
+
         if direction is SignalDirection.LONG:
             stop_loss = (
                 entry_price - stop_distance
             )
+
             take_profit = (
                 entry_price + target_distance
             )
@@ -305,9 +349,25 @@ class RSIReversalStrategy(BaseStrategy):
             stop_loss = (
                 entry_price + stop_distance
             )
+
             take_profit = (
                 entry_price - target_distance
             )
+
+        reward_distance = abs(
+            take_profit - entry_price
+        )
+
+        risk_distance = abs(
+            entry_price - stop_loss
+        )
+
+        if risk_distance <= 0:
+            return None
+
+        reward_risk = (
+            reward_distance / risk_distance
+        )
 
         state.last_signal_timestamp = timestamp
 
@@ -330,10 +390,12 @@ class RSIReversalStrategy(BaseStrategy):
                 "rsi": current_rsi,
                 "previous_rsi": previous_rsi,
                 "atr": current_atr,
+                "trade_atr": previous_atr,
                 "oversold": self._oversold,
                 "overbought": self._overbought,
                 "stop_loss_atr": self._stop_loss_atr,
                 "take_profit_atr": self._take_profit_atr,
+                "reward_risk": float(reward_risk),
             },
         )
 
@@ -349,9 +411,7 @@ class RSIReversalStrategy(BaseStrategy):
             timeframe,
         )
 
-        state = self._states.get(
-            key
-        )
+        state = self._states.get(key)
 
         if state is None:
             state = _IndicatorState(
@@ -385,6 +445,11 @@ class RSIReversalStrategy(BaseStrategy):
             low=float(low),
             close=float(close),
         )
+
+        if atr_value is not None:
+            state.previous_atr = float(
+                atr_value
+            )
 
         return (
             rsi_value,
