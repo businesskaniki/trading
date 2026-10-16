@@ -2,21 +2,13 @@
 
 from __future__ import annotations
 
-
 import logging
-
 from collections.abc import Callable
-
 from dataclasses import dataclass
-
 from datetime import datetime, timedelta, timezone
-
 from decimal import Decimal
-
 from typing import Any
-
 from uuid import UUID
-
 
 from sqlalchemy import (
     Select,
@@ -25,26 +17,24 @@ from sqlalchemy import (
     or_,
     select,
 )
-
 from sqlalchemy.ext.asyncio import AsyncSession
-
 from sqlalchemy.orm import joinedload
 
-
 from app.database.models.historical_candle import HistoricalCandle
-
+from app.database.models.symbol import Symbol
+from app.market_data.session_calendar import (
+    is_us_stocks_asset_class,
+    us_equity_session_overlaps,
+)
 
 from .engine import BacktestConfig
-
 from .market import BacktestCandle, BacktestMarketData
 
 logger = logging.getLogger(__name__)
 
 
 # ======================================================================
-
 # ERRORS
-
 # ======================================================================
 
 
@@ -53,9 +43,7 @@ class HistoricalMarketDataLoadError(RuntimeError):
 
 
 # ======================================================================
-
 # TYPES
-
 # ======================================================================
 
 
@@ -63,58 +51,36 @@ SessionFactory = Callable[[], AsyncSession]
 
 
 # ======================================================================
-
 # COVERAGE
-
 # ======================================================================
 
 
 @dataclass(frozen=True, slots=True)
 class HistoricalCoverage:
     """
-
     Coverage information for one symbol/timeframe dataset.
 
-
-
     ``first_timestamp`` and ``last_timestamp`` represent the earliest
-
     and latest persisted timestamps available for that dataset.
 
-
-
     ``range_first_timestamp`` and ``range_last_timestamp`` represent
-
     the first and last candles actually loaded inside the requested
-
     backtest range.
 
-
-
     ``internal_gaps`` contains unexplained gaps inside the requested
-
     range that exceed the configured market-closure tolerance.
-
     """
 
     symbol: str
-
     timeframe: str
-
     candles: int
-
     first_timestamp: datetime | None
-
     last_timestamp: datetime | None
-
     range_first_timestamp: datetime | None
-
     range_last_timestamp: datetime | None
-
     requested_start: datetime
-
     requested_end: datetime
-
+    asset_class: str | None = None
     internal_gaps: tuple[
         tuple[datetime, datetime],
         ...,
@@ -129,19 +95,12 @@ class HistoricalCoverage:
     @property
     def expected_first_candle(self) -> datetime:
         """
-
         Return the first timeframe boundary expected for the requested
-
         range.
 
-
-
         The requested start may fall between candle boundaries, so the
-
         first expected candle is the first boundary at or after the
-
         requested start.
-
         """
 
         minutes = self._timeframe_minutes()
@@ -160,7 +119,6 @@ class HistoricalCoverage:
             and self.requested_start.second == 0
             and self.requested_start.microsecond == 0
         ):
-
             return timestamp
 
         return timestamp + timedelta(
@@ -170,15 +128,10 @@ class HistoricalCoverage:
     @property
     def expected_last_candle(self) -> datetime:
         """
-
         Return the last timeframe boundary expected before the
-
         requested end.
 
-
-
         The requested end is exclusive.
-
         """
 
         minutes = self._timeframe_minutes()
@@ -197,7 +150,6 @@ class HistoricalCoverage:
             and self.requested_end.second == 0
             and self.requested_end.microsecond == 0
         ):
-
             return timestamp - timedelta(
                 minutes=minutes,
             )
@@ -208,76 +160,38 @@ class HistoricalCoverage:
 
     @property
     def spans_requested_range(self) -> bool:
-        """
-
-        Return whether the candles actually loaded for the requested
-
-        backtest range provide complete coverage.
-
-
-
-        Validation consists of:
-
-
-
-            1. beginning coverage;
-
-            2. terminal coverage;
-
-            3. internal continuity.
-
-
-
-        Whole-dataset ``first_timestamp`` / ``last_timestamp`` values
-
-        are deliberately NOT used to determine requested-range
-
-        coverage. Those values may belong to history far outside the
-
-        requested backtest period.
-
-        """
+        """Return whether loaded candles provide complete range coverage."""
 
         if self.range_first_timestamp is None or self.range_last_timestamp is None:
-
             return False
 
-        # The actual first candle loaded for this request must reach
-
-        # the first expected timeframe boundary.
-
+        # The first candle can start later than the requested boundary
+        # only when the missing interval matches a recognized closure.
         if self.range_first_timestamp > self.expected_first_candle:
-
-            if not self._beginning_weekend_closure_is_valid():
-
+            if not (
+                self._beginning_weekend_closure_is_valid()
+                or self._beginning_new_years_day_closure_is_valid()
+            ):
                 return False
 
-        # The actual last candle loaded for this request must reach the
-
-        # final expected timeframe boundary.
-
+        # Terminal coverage remains strict except for the existing
+        # recognized weekend-closure exception.
         if self.range_last_timestamp >= self.expected_last_candle:
-
             terminal_coverage = True
-
         else:
-
             terminal_coverage = self._terminal_weekend_closure_is_valid()
 
         if not terminal_coverage:
-
             return False
 
+        # This does not relax internal-gap validation.
         return not self.internal_gaps
 
     @property
     def range_has_boundary_data(self) -> bool:
         """
-
         Return whether at least one persisted candle exists inside the
-
         requested range.
-
         """
 
         return (
@@ -287,64 +201,43 @@ class HistoricalCoverage:
 
     def _timeframe_minutes(self) -> int:
         """
-
         Resolve the timeframe used by coverage calculations.
-
-
 
         Supported identifiers include:
 
-
-
             M1, M5, M15, M30
-
             H1, H4
-
             D1
 
-
-
         Unknown formats conservatively fall back to M15.
-
         """
 
         normalized = self.timeframe.strip().upper()
 
         if normalized.startswith("M"):
-
             try:
-
                 minutes = int(normalized[1:])
-
             except ValueError:
-
                 return 15
 
             return minutes if minutes > 0 else 15
 
         if normalized.startswith("H"):
-
             try:
-
                 hours = int(normalized[1:])
-
             except ValueError:
-
                 return 15
 
             return hours * 60 if hours > 0 else 15
 
         if normalized == "D1":
-
             return 24 * 60
 
         return 15
 
     def _beginning_weekend_closure_is_valid(self) -> bool:
         """
-
         Determine whether missing beginning candles are explained by
-
         a normal weekend market closure.
 
         The recognized pattern is:
@@ -352,27 +245,22 @@ class HistoricalCoverage:
             - requested range begins on Saturday or Sunday;
             - first actual candle resumes on Monday;
             - Monday resume occurs within six hours of Monday 00:00 UTC.
-
         """
 
         first_timestamp = self.range_first_timestamp
 
         if first_timestamp is None:
-
             return False
 
         if first_timestamp.weekday() != 0:
-
             return False
 
         if self.requested_start.weekday() not in {5, 6}:
-
             return False
 
         gap = first_timestamp - self.requested_start
 
         if gap < timedelta(0):
-
             return False
 
         monday_open = datetime.combine(
@@ -382,123 +270,128 @@ class HistoricalCoverage:
         )
 
         if first_timestamp - monday_open > timedelta(hours=6):
-
             return False
 
         return True
 
-    def _terminal_weekend_closure_is_valid(self) -> bool:
+    def _beginning_new_years_day_closure_is_valid(self) -> bool:
+        """
+        Recognize a narrowly defined New Year's Day market closure.
+
+        This exception applies only when:
+            - the expected first candle falls on January 1;
+            - the requested range starts on that same date;
+            - the first available candle is on January 2;
+            - the first available candle appears within six hours
+              of January 2 beginning; and
+            - the instrument is identified as non-crypto.
+
+        It does not excuse missing candles later in the requested range.
         """
 
-        Determine whether missing terminal candles are explained by a
+        first_timestamp = self.range_first_timestamp
 
+        if first_timestamp is None:
+            return False
+
+        normalized_asset_class = str(self.asset_class or "").strip().upper()
+
+        # Crypto instruments trade continuously; do not excuse gaps
+        # in their data based on a financial-market holiday.
+        if (
+            not normalized_asset_class
+            or "CRYPTO" in normalized_asset_class
+            or "DIGITAL" in normalized_asset_class
+        ):
+            return False
+
+        expected_date = self.expected_first_candle.date()
+
+        if (expected_date.month, expected_date.day) != (1, 1):
+            return False
+
+        if self.requested_start.date() != expected_date:
+            return False
+
+        if first_timestamp.date() != expected_date + timedelta(days=1):
+            return False
+
+        next_day_start = datetime.combine(
+            first_timestamp.date(),
+            datetime.min.time(),
+            tzinfo=first_timestamp.tzinfo,
+        )
+
+        return timedelta(0) <= first_timestamp - next_day_start <= timedelta(hours=6)
+
+    def _terminal_weekend_closure_is_valid(self) -> bool:
+        """
+        Determine whether missing terminal candles are explained by a
         normal Friday/weekend market closure.
 
-
-
         The terminal exception is intentionally limited to the actual
-
         last candle loaded inside the requested range.
-
-
 
         It is valid only when:
 
-
-
             - the final loaded candle is on Friday;
-
             - the requested end is Saturday, Sunday, or Monday;
-
             - the gap is no greater than 72 hours.
-
         """
 
         last_timestamp = self.range_last_timestamp
 
         if last_timestamp is None:
-
             return False
 
         if last_timestamp.weekday() != 4:
-
             return False
 
         requested_end_weekday = self.requested_end.weekday()
 
-        if requested_end_weekday not in {
-            0,
-            5,
-            6,
-        }:
-
+        if requested_end_weekday not in {0, 5, 6}:
             return False
 
         gap = self.requested_end - last_timestamp
 
         if gap < timedelta(0):
-
             return False
 
         return gap <= timedelta(hours=72)
 
 
 # ======================================================================
-
 # LOADER
-
 # ======================================================================
 
 
 class HistoricalMarketDataLoader:
     """
-
     Load persisted historical candles into the AQE backtesting store.
-
-
 
     Responsibilities:
 
         - validate the resolved backtest universe
-
         - load PostgreSQL historical candles
-
         - normalize database values
-
         - detect missing symbol/timeframe datasets
-
         - verify beginning and terminal coverage
-
         - detect large unexplained internal gaps
-
         - remove duplicate candles from the simulation feed
-
         - convert SQLAlchemy rows into BacktestCandle objects
-
-
 
     This class does NOT:
 
         - generate synthetic candles
-
         - fabricate missing market data
-
         - communicate with MT5
-
         - communicate with Redis
-
         - execute orders
-
         - calculate risk
-
         - generate strategy signals
 
-
-
     Broker historical backfill must populate HistoricalCandle before
-
     this loader is invoked.
-
     """
 
     # Normal weekday continuity is validated strictly.
@@ -529,17 +422,13 @@ class HistoricalMarketDataLoader:
         require_full_range: bool = True,
         max_internal_gap: timedelta | None = None,
     ) -> None:
-
         if not callable(session_factory):
-
             raise TypeError(
                 "session_factory must be callable.",
             )
 
         if max_internal_gap is not None:
-
             if max_internal_gap <= timedelta(0):
-
                 raise ValueError(
                     "max_internal_gap must be greater than zero.",
                 )
@@ -557,9 +446,7 @@ class HistoricalMarketDataLoader:
         )
 
     # ==================================================================
-
     # PUBLIC LOAD
-
     # ==================================================================
 
     async def load(
@@ -567,43 +454,24 @@ class HistoricalMarketDataLoader:
         config: BacktestConfig,
     ) -> BacktestMarketData:
         """
-
         Load the complete historical dataset required by a backtest.
-
-
 
         The resolved BacktestConfig supplies:
 
-
-
             symbols
-
             timeframes
-
             start
-
             end
 
-
-
         The loader returns only candles belonging to that universe and
-
         requested time range.
 
-
-
         When ``require_full_range`` is enabled, every requested
-
         symbol/timeframe pair must:
 
-
-
             - have beginning coverage;
-
             - have terminal coverage;
-
             - contain no unexplained large internal gap.
-
         """
 
         self._validate_config(
@@ -611,13 +479,11 @@ class HistoricalMarketDataLoader:
         )
 
         try:
-
             candles, coverage = await self._load_candles(
                 config,
             )
 
             if not candles:
-
                 raise HistoricalMarketDataLoadError(
                     self._format_no_data_error(
                         config,
@@ -650,7 +516,6 @@ class HistoricalMarketDataLoader:
             )
 
             for item in coverage:
-
                 logger.debug(
                     "Historical coverage: "
                     "account_id=%s symbol=%s timeframe=%s "
@@ -674,11 +539,9 @@ class HistoricalMarketDataLoader:
             return market_data
 
         except HistoricalMarketDataLoadError:
-
             raise
 
         except Exception as exc:
-
             logger.exception(
                 "Unexpected error while loading historical market data: "
                 "account_id=%s symbols=%s timeframes=%s start=%s end=%s",
@@ -694,9 +557,7 @@ class HistoricalMarketDataLoader:
             ) from exc
 
     # ==================================================================
-
     # DATABASE LOAD
-
     # ==================================================================
 
     async def _load_candles(
@@ -707,11 +568,8 @@ class HistoricalMarketDataLoader:
         list[HistoricalCoverage],
     ]:
         """
-
         Load requested-range candles and calculate coverage for every
-
         requested symbol/timeframe pair.
-
         """
 
         symbols = self._normalize_values(
@@ -734,17 +592,12 @@ class HistoricalMarketDataLoader:
         }
 
         # --------------------------------------------------------------
-
         # First query:
-
         #
-
         # Load only candles actually required by the simulation.
-
         # --------------------------------------------------------------
 
         async with self._session_factory() as session:
-
             statement: Select[Any] = (
                 select(HistoricalCandle)
                 .options(
@@ -776,12 +629,28 @@ class HistoricalMarketDataLoader:
 
             rows = result.scalars().unique().all()
 
+            symbol_metadata_result = await session.execute(
+                select(
+                    Symbol.name,
+                    Symbol.asset_class,
+                ).where(
+                    func.upper(Symbol.name).in_(symbols),
+                )
+            )
+
+            symbol_asset_classes: dict[str, str] = {}
+
+            for symbol_name, asset_class in symbol_metadata_result.all():
+                value = getattr(asset_class, "value", asset_class)
+
+                symbol_asset_classes[str(symbol_name).strip().upper()] = (
+                    str(value or "").strip().upper()
+                )
+
         candles: list[BacktestCandle] = []
 
         # --------------------------------------------------------------
-
         # Range coverage state.
-
         # --------------------------------------------------------------
 
         coverage_state: dict[
@@ -794,14 +663,13 @@ class HistoricalMarketDataLoader:
                 "range_last": None,
                 "symbol_id": None,
                 "timestamps": [],
+                "asset_class": symbol_asset_classes.get(pair[0]),
             }
             for pair in requested_pairs
         }
 
         # --------------------------------------------------------------
-
         # Deduplication.
-
         # --------------------------------------------------------------
 
         seen_candles: set[tuple[str, str, datetime]] = set()
@@ -815,25 +683,16 @@ class HistoricalMarketDataLoader:
         )
 
         for row in rows:
-
             symbol = self._extract_symbol(
                 row,
             )
 
             if symbol not in requested_symbols:
-
                 continue
 
-            timeframe = (
-                str(
-                    row.timeframe,
-                )
-                .strip()
-                .upper()
-            )
+            timeframe = str(row.timeframe).strip().upper()
 
             if timeframe not in requested_timeframes:
-
                 continue
 
             timestamp = self._ensure_datetime(
@@ -850,7 +709,6 @@ class HistoricalMarketDataLoader:
             )
 
             if state is None:
-
                 continue
 
             state["candles"] += 1
@@ -858,11 +716,9 @@ class HistoricalMarketDataLoader:
             state["symbol_id"] = row.symbol_id
 
             if state["range_first"] is None or timestamp < state["range_first"]:
-
                 state["range_first"] = timestamp
 
             if state["range_last"] is None or timestamp > state["range_last"]:
-
                 state["range_last"] = timestamp
 
             state["timestamps"].append(
@@ -876,7 +732,6 @@ class HistoricalMarketDataLoader:
             )
 
             if dedupe_key in seen_candles:
-
                 logger.warning(
                     "Duplicate historical candle ignored: "
                     "symbol=%s timeframe=%s timestamp=%s",
@@ -901,21 +756,13 @@ class HistoricalMarketDataLoader:
             )
 
         # --------------------------------------------------------------
-
         # Second query:
-
         #
-
         # Inspect the complete persisted history for each exact
-
         # symbol_id/timeframe pair.
-
         #
-
         # This provides diagnostic boundaries without loading all
-
         # historical candles into memory.
-
         # --------------------------------------------------------------
 
         boundary_lookup: dict[
@@ -932,17 +779,14 @@ class HistoricalMarketDataLoader:
         ] = {}
 
         for pair, state in coverage_state.items():
-
             symbol_id = state["symbol_id"]
 
             if symbol_id is None:
-
                 continue
 
             pair_to_symbol_id[pair] = symbol_id
 
         if pair_to_symbol_id:
-
             boundary_conditions = [
                 and_(
                     HistoricalCandle.symbol_id == symbol_id,
@@ -955,7 +799,6 @@ class HistoricalMarketDataLoader:
             ]
 
             async with self._session_factory() as session:
-
                 boundary_statement = (
                     select(
                         HistoricalCandle.symbol_id,
@@ -989,14 +832,7 @@ class HistoricalMarketDataLoader:
                 boundary_rows = boundary_result.all()
 
             for row in boundary_rows:
-
-                normalized_timeframe = (
-                    str(
-                        row.timeframe,
-                    )
-                    .strip()
-                    .upper()
-                )
+                normalized_timeframe = str(row.timeframe).strip().upper()
 
                 boundary_lookup[
                     (
@@ -1021,9 +857,7 @@ class HistoricalMarketDataLoader:
                 )
 
         # --------------------------------------------------------------
-
         # Build final coverage records.
-
         # --------------------------------------------------------------
 
         coverage: list[HistoricalCoverage] = []
@@ -1034,15 +868,12 @@ class HistoricalMarketDataLoader:
         ), state in sorted(
             coverage_state.items(),
         ):
-
             symbol_id = state["symbol_id"]
 
             first_timestamp: datetime | None = None
-
             last_timestamp: datetime | None = None
 
             if symbol_id is not None:
-
                 (
                     first_timestamp,
                     last_timestamp,
@@ -1069,31 +900,27 @@ class HistoricalMarketDataLoader:
                 requested_start=start,
                 requested_end=end,
                 timeframe=timeframe,
+                asset_class=state["asset_class"],
             )
 
             coverage.append(
                 HistoricalCoverage(
                     symbol=symbol,
                     timeframe=timeframe,
-                    candles=int(
-                        state["candles"],
-                    ),
+                    candles=int(state["candles"]),
                     first_timestamp=first_timestamp,
                     last_timestamp=last_timestamp,
                     range_first_timestamp=state["range_first"],
                     range_last_timestamp=state["range_last"],
                     requested_start=start,
                     requested_end=end,
-                    internal_gaps=tuple(
-                        internal_gaps,
-                    ),
+                    asset_class=state["asset_class"],
+                    internal_gaps=tuple(internal_gaps),
                 )
             )
 
         # --------------------------------------------------------------
-
         # Chronological order.
-
         # --------------------------------------------------------------
 
         candles.sort(
@@ -1107,9 +934,7 @@ class HistoricalMarketDataLoader:
         return candles, coverage
 
     # ==================================================================
-
     # INTERNAL GAP DETECTION
-
     # ==================================================================
 
     def _detect_internal_gaps(
@@ -1120,6 +945,7 @@ class HistoricalMarketDataLoader:
         requested_start: datetime,
         requested_end: datetime,
         timeframe: str,
+        asset_class: str | None = None,
     ) -> list[tuple[datetime, datetime]]:
         """
         Detect unexplained internal gaps in the requested range.
@@ -1187,6 +1013,42 @@ class HistoricalMarketDataLoader:
             )
 
             if missing_start >= missing_end:
+                previous = current
+                continue
+
+            if is_us_stocks_asset_class(asset_class):
+                if not us_equity_session_overlaps(
+                    missing_start,
+                    missing_end,
+                ):
+                    logger.info(
+                        "US-equity market-closure gap tolerated: "
+                        "symbol=%s timeframe=%s "
+                        "gap_start=%s gap_end=%s duration=%s",
+                        symbol,
+                        timeframe,
+                        gap_start,
+                        gap_end,
+                        gap,
+                    )
+
+                    previous = current
+                    continue
+
+                gaps.append((gap_start, gap_end))
+
+                logger.warning(
+                    "Historical internal gap overlaps a US-equity "
+                    "trading session: "
+                    "symbol=%s timeframe=%s "
+                    "gap_start=%s gap_end=%s duration=%s",
+                    symbol,
+                    timeframe,
+                    gap_start,
+                    gap_end,
+                    gap,
+                )
+
                 previous = current
                 continue
 
@@ -1297,94 +1159,64 @@ class HistoricalMarketDataLoader:
     def _timeframe_minutes(
         timeframe: str,
     ) -> int:
-        """
+        """Resolve a timeframe identifier into minutes."""
 
-        Resolve a timeframe identifier into minutes.
-
-        """
-
-        normalized = (
-            str(
-                timeframe,
-            )
-            .strip()
-            .upper()
-        )
+        normalized = str(timeframe).strip().upper()
 
         if normalized.startswith("M"):
-
             try:
-
-                minutes = int(
-                    normalized[1:],
-                )
-
+                minutes = int(normalized[1:])
             except ValueError:
-
                 return 15
 
             return minutes if minutes > 0 else 15
 
         if normalized.startswith("H"):
-
             try:
-
-                hours = int(
-                    normalized[1:],
-                )
-
+                hours = int(normalized[1:])
             except ValueError:
-
                 return 15
 
             return hours * 60 if hours > 0 else 15
 
         if normalized == "D1":
-
             return 24 * 60
 
         return 15
 
     # ==================================================================
-
     # CONFIG VALIDATION
-
     # ==================================================================
 
-    @staticmethod
     @staticmethod
     def _requested_range_is_weekend_or_monday_preopen(
         start: datetime,
         end: datetime,
+        asset_class: str | None = None,
     ) -> bool:
         """
-
         Return whether the requested interval contains only normal
-
         weekend closure time or Monday pre-open time.
 
         This is intentionally conservative and does not recognize
-
         exchange-specific holidays or arbitrary weekday outages.
-
         """
 
         if start >= end:
-
             return False
+
+        if is_us_stocks_asset_class(asset_class):
+            return not us_equity_session_overlaps(start, end)
 
         current = start.date()
 
         final = (end - timedelta(microseconds=1)).date()
 
         while current <= final:
-
             weekday = current.weekday()
 
             if weekday < 5:
-
                 if weekday != 0:
-
                     return False
 
                 monday_open = datetime.combine(
@@ -1409,13 +1241,11 @@ class HistoricalMarketDataLoader:
                 )
 
                 if segment_start >= segment_end:
-
                     return False
 
             current += timedelta(days=1)
 
         if final.weekday() == 0:
-
             monday_open = datetime.combine(
                 final,
                 datetime.min.time(),
@@ -1427,7 +1257,6 @@ class HistoricalMarketDataLoader:
             )
 
             if end > monday_grace_end:
-
                 return False
 
         return True
@@ -1437,18 +1266,14 @@ class HistoricalMarketDataLoader:
         config: BacktestConfig,
     ) -> None:
         """
-
         Validate that the loader receives a resolved account-level
-
         BacktestConfig.
-
         """
 
         if not isinstance(
             config,
             BacktestConfig,
         ):
-
             raise TypeError(
                 "config must be an instance of BacktestConfig.",
             )
@@ -1462,33 +1287,27 @@ class HistoricalMarketDataLoader:
         )
 
         if not symbols:
-
             raise HistoricalMarketDataLoadError(
                 "Backtest requires at least one resolved symbol."
             )
 
         if not timeframes:
-
             raise HistoricalMarketDataLoadError(
                 "Backtest requires at least one resolved timeframe."
             )
 
         if config.start is None or config.end is None:
-
             raise HistoricalMarketDataLoadError(
                 "Backtest requires a resolved historical start/end range."
             )
 
         if config.start >= config.end:
-
             raise HistoricalMarketDataLoadError(
                 "Backtest start must be before backtest end."
             )
 
     # ==================================================================
-
     # COVERAGE VALIDATION
-
     # ==================================================================
 
     def _validate_coverage(
@@ -1498,23 +1317,15 @@ class HistoricalMarketDataLoader:
         coverage: list[HistoricalCoverage],
     ) -> None:
         """
-
         Validate that every requested symbol/timeframe pair has:
 
-
-
             - data inside the requested range;
-
             - beginning coverage;
-
             - terminal coverage;
-
             - no unexplained large internal gap.
-
         """
 
         if not coverage:
-
             raise HistoricalMarketDataLoadError(
                 self._format_no_data_error(
                     config,
@@ -1522,28 +1333,22 @@ class HistoricalMarketDataLoader:
             )
 
         missing_pairs: list[str] = []
-
         incomplete_pairs: list[str] = []
-
         gapped_pairs: list[str] = []
 
         for item in coverage:
-
             pair = f"{item.symbol}/{item.timeframe}"
 
             # ----------------------------------------------------------
-
             # No candle inside the requested simulation range.
-
             # ----------------------------------------------------------
 
             if not item.has_data:
-
                 if self._requested_range_is_weekend_or_monday_preopen(
                     item.requested_start,
                     item.requested_end,
+                    item.asset_class,
                 ):
-
                     logger.info(
                         "Historical coverage contains no candles because "
                         "the requested interval is a known market-closure "
@@ -1563,13 +1368,10 @@ class HistoricalMarketDataLoader:
                 continue
 
             # ----------------------------------------------------------
-
             # Requested-range coverage.
-
             # ----------------------------------------------------------
 
             if self._require_full_range and not item.spans_requested_range:
-
                 first = (
                     item.first_timestamp.isoformat()
                     if item.first_timestamp is not None
@@ -1606,88 +1408,61 @@ class HistoricalMarketDataLoader:
                 )
 
             # ----------------------------------------------------------
-
             # Explicit internal gaps.
-
             # ----------------------------------------------------------
 
             if item.internal_gaps:
-
                 gapped_pairs.append(
-                    f"{pair} " f"({self._format_gaps(item.internal_gaps)})"
+                    f"{pair} ({self._format_gaps(item.internal_gaps)})"
                 )
 
         # --------------------------------------------------------------
-
         # Missing datasets.
-
         # --------------------------------------------------------------
 
         if missing_pairs:
-
             message = (
                 "Historical data is missing for requested "
-                "symbol/timeframe pairs: "
-                + ", ".join(
-                    missing_pairs,
-                )
+                "symbol/timeframe pairs: " + ", ".join(missing_pairs)
             )
 
             if incomplete_pairs:
-
                 message += ". Incomplete historical coverage: " + ", ".join(
                     incomplete_pairs,
                 )
 
             if gapped_pairs:
-
                 message += ". Internal historical gaps: " + ", ".join(
                     gapped_pairs,
                 )
 
             raise HistoricalMarketDataLoadError(
-                message + ". Run historical backfill before starting " "the backtest."
+                message + ". Run historical backfill before starting the backtest."
             )
 
         # --------------------------------------------------------------
-
         # Incomplete or gapped datasets.
-
         # --------------------------------------------------------------
 
         if incomplete_pairs or gapped_pairs:
-
             parts: list[str] = []
 
             if incomplete_pairs:
-
                 parts.append(
-                    "Incomplete historical coverage: "
-                    + ", ".join(
-                        incomplete_pairs,
-                    )
+                    "Incomplete historical coverage: " + ", ".join(incomplete_pairs)
                 )
 
             if gapped_pairs:
-
-                parts.append(
-                    "Internal historical gaps: "
-                    + ", ".join(
-                        gapped_pairs,
-                    )
-                )
+                parts.append("Internal historical gaps: " + ", ".join(gapped_pairs))
 
             raise HistoricalMarketDataLoadError(
                 "Historical market data is incomplete. "
                 + ". ".join(parts)
-                + ". Run historical backfill before starting "
-                "the backtest."
+                + ". Run historical backfill before starting the backtest."
             )
 
     # ==================================================================
-
     # SYMBOL RESOLUTION
-
     # ==================================================================
 
     @staticmethod
@@ -1695,17 +1470,13 @@ class HistoricalMarketDataLoader:
         row: HistoricalCandle,
     ) -> str:
         """
-
         Resolve the canonical symbol name from the HistoricalCandle
-
         relationship.
-
         """
 
         symbol = row.symbol
 
         if symbol is None:
-
             raise HistoricalMarketDataLoadError(
                 "Historical candle has no associated Symbol: "
                 f"candle_id={getattr(row, 'id', None)} "
@@ -1719,7 +1490,6 @@ class HistoricalMarketDataLoader:
         )
 
         if symbol_name is None:
-
             symbol_name = getattr(
                 symbol,
                 "name",
@@ -1727,34 +1497,23 @@ class HistoricalMarketDataLoader:
             )
 
         if symbol_name is None:
-
             raise HistoricalMarketDataLoadError(
                 "Unable to resolve symbol name from HistoricalCandle "
                 "symbol relationship: "
                 f"symbol_id={row.symbol_id}"
             )
 
-        normalized = (
-            str(
-                symbol_name,
-            )
-            .strip()
-            .upper()
-        )
+        normalized = str(symbol_name).strip().upper()
 
         if not normalized:
-
             raise HistoricalMarketDataLoadError(
-                "Historical candle has an empty symbol name: "
-                f"symbol_id={row.symbol_id}"
+                f"Historical candle has an empty symbol name: symbol_id={row.symbol_id}"
             )
 
         return normalized
 
     # ==================================================================
-
     # CANDLE CONVERSION
-
     # ==================================================================
 
     @classmethod
@@ -1766,11 +1525,7 @@ class HistoricalMarketDataLoader:
         timeframe: str | None = None,
         timestamp: datetime | None = None,
     ) -> BacktestCandle:
-        """
-
-        Convert a SQLAlchemy HistoricalCandle into BacktestCandle.
-
-        """
+        """Convert a SQLAlchemy HistoricalCandle into BacktestCandle."""
 
         normalized_symbol = (
             symbol
@@ -1783,13 +1538,7 @@ class HistoricalMarketDataLoader:
         normalized_timeframe = (
             timeframe
             if timeframe is not None
-            else (
-                str(
-                    row.timeframe,
-                )
-                .strip()
-                .upper()
-            )
+            else str(row.timeframe).strip().upper()
         )
 
         normalized_timestamp = (
@@ -1829,9 +1578,7 @@ class HistoricalMarketDataLoader:
         )
 
     # ==================================================================
-
     # NORMALIZATION
-
     # ==================================================================
 
     @staticmethod
@@ -1839,15 +1586,11 @@ class HistoricalMarketDataLoader:
         values: Any,
     ) -> tuple[str, ...]:
         """
-
         Normalize values to uppercase strings, remove blanks, and
-
         deduplicate while preserving order.
-
         """
 
         if values is None:
-
             return ()
 
         normalized: list[str] = []
@@ -1855,21 +1598,12 @@ class HistoricalMarketDataLoader:
         seen: set[str] = set()
 
         for value in values:
-
             if value is None:
-
                 continue
 
-            item = (
-                str(
-                    value,
-                )
-                .strip()
-                .upper()
-            )
+            item = str(value).strip().upper()
 
             if not item or item in seen:
-
                 continue
 
             seen.add(
@@ -1885,32 +1619,24 @@ class HistoricalMarketDataLoader:
         )
 
     # ==================================================================
-
     # DATETIME
-
     # ==================================================================
 
     @staticmethod
     def _ensure_datetime(
         value: datetime,
     ) -> datetime:
-        """
-
-        Normalize database timestamps to timezone-aware UTC datetimes.
-
-        """
+        """Normalize database timestamps to timezone-aware UTC datetimes."""
 
         if not isinstance(
             value,
             datetime,
         ):
-
             raise HistoricalMarketDataLoadError(
                 "Historical candle timestamp must be a datetime."
             )
 
         if value.tzinfo is None:
-
             return value.replace(
                 tzinfo=timezone.utc,
             )
@@ -1920,42 +1646,32 @@ class HistoricalMarketDataLoader:
         )
 
     # ==================================================================
-
     # DECIMAL
-
     # ==================================================================
 
     @staticmethod
     def _decimal(
         value: Any,
     ) -> Decimal:
-        """
-
-        Convert SQLAlchemy numeric values into Decimal safely.
-
-        """
+        """Convert SQLAlchemy numeric values into Decimal safely."""
 
         if value is None:
-
             return Decimal("0")
 
         if isinstance(
             value,
             Decimal,
         ):
-
             return value
 
         try:
-
             return Decimal(
                 str(value),
             )
 
         except Exception as exc:
-
             raise HistoricalMarketDataLoadError(
-                "Unable to convert historical candle value to Decimal: " f"{value!r}"
+                f"Unable to convert historical candle value to Decimal: {value!r}"
             ) from exc
 
     @classmethod
@@ -1963,14 +1679,9 @@ class HistoricalMarketDataLoader:
         cls,
         value: Any,
     ) -> Decimal | None:
-        """
-
-        Convert an optional numeric database value to Decimal.
-
-        """
+        """Convert an optional numeric database value to Decimal."""
 
         if value is None:
-
             return None
 
         return cls._decimal(
@@ -1978,9 +1689,7 @@ class HistoricalMarketDataLoader:
         )
 
     # ==================================================================
-
     # GAP FORMATTING
-
     # ==================================================================
 
     @staticmethod
@@ -1990,24 +1699,16 @@ class HistoricalMarketDataLoader:
             ...,
         ],
     ) -> str:
-        """
-
-        Format internal gap diagnostics for error messages.
-
-        """
+        """Format internal gap diagnostics for error messages."""
 
         formatted: list[str] = []
 
         for start, end in gaps[:5]:
-
             duration = end - start
 
-            formatted.append(
-                f"{start.isoformat()}.." f"{end.isoformat()} " f"({duration})"
-            )
+            formatted.append(f"{start.isoformat()}..{end.isoformat()} ({duration})")
 
         if len(gaps) > 5:
-
             formatted.append(
                 f"... and {len(gaps) - 5} more",
             )
@@ -2017,20 +1718,14 @@ class HistoricalMarketDataLoader:
         )
 
     # ==================================================================
-
     # ERROR FORMATTING
-
     # ==================================================================
 
     @staticmethod
     def _format_no_data_error(
         config: BacktestConfig,
     ) -> str:
-        """
-
-        Build a useful no-data diagnostic.
-
-        """
+        """Build a useful no-data diagnostic."""
 
         return (
             "No historical market data found for backtest: "

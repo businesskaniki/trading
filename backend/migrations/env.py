@@ -19,6 +19,7 @@ from app.database.models.performance import Performance
 from app.database.models.risk_snapshot import RiskSnapshot
 from app.database.models.market_candle import MarketCandle
 from app.database.models.historical_candle import HistoricalCandle
+from app.database.models.backtest_job import BacktestJob
 
 config = context.config
 

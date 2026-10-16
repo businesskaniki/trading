@@ -9,9 +9,10 @@ import {
 
 import { fetchAccounts } from "../../../redux/dashboard/accounts/accountsThunks";
 
-import {
-  fetchAccountSymbols,
-} from "../../../redux/dashboard/symbols/symbolsThunks";
+import { fetchAccountSymbols } from "../../../redux/dashboard/symbols/symbolsThunks";
+
+import { usePositionWebSocket } from "../../../hooks/usePositionWebSocket";
+import { getAccessToken } from "../../../api/axios";
 
 import "../../../css/positions.css";
 
@@ -19,15 +20,13 @@ const Positions = () => {
   const dispatch = useDispatch();
 
   const {
-    positions,
+    positions: reduxPositions = [],
     loading,
     syncing,
     error,
   } = useSelector((state) => state.positions);
 
-  const accounts = useSelector(
-    (state) => state.accounts?.accounts || [],
-  );
+  const accounts = useSelector((state) => state.accounts?.accounts || []);
 
   const symbolsByAccount = useSelector(
     (state) => state.symbols?.symbolsByAccount || {},
@@ -36,23 +35,50 @@ const Positions = () => {
   const [query, setQuery] = useState("");
 
   /*
-   * Accounts represented by the current positions.
+   * Live broker positions.
    *
-   * Positions belong to specific trading accounts, so their
-   * account-specific symbol mappings must be loaded.
+   * The hook owns the WebSocket lifecycle and receives
+   * authenticated positions.snapshot messages.
    */
-  const positionAccountIds = useMemo(() => {
-    return [
-      ...new Set(
-        positions
-          .map((position) => position.account_id)
-          .filter(Boolean),
-      ),
-    ];
-  }, [positions]);
+  const {
+    positions: livePositions,
+    status: liveStatus,
+    error: liveError,
+    lastUpdatedAt,
+  } = usePositionWebSocket({
+    getAccessToken,
+    initialPositions: reduxPositions,
+  });
 
   /*
-   * Load positions and accounts.
+   * Prefer live snapshots after the first snapshot arrives.
+   * Before that, display the REST-loaded Redux positions.
+   */
+  const positions = livePositions;
+
+  /*
+   * Build a stable key so symbol mappings are not fetched
+   * repeatedly on every render or every live price update.
+   */
+  const positionAccountKey = useMemo(
+    () =>
+      [
+        ...new Set(
+          positions.map((position) => position.account_id).filter(Boolean),
+        ),
+      ]
+        .sort()
+        .join("|"),
+    [positions],
+  );
+
+  const positionAccountIds = useMemo(
+    () => (positionAccountKey ? positionAccountKey.split("|") : []),
+    [positionAccountKey],
+  );
+
+  /*
+   * Initial REST loading.
    */
   useEffect(() => {
     dispatch(fetchPositions());
@@ -60,14 +86,9 @@ const Positions = () => {
   }, [dispatch]);
 
   /*
-   * Load AccountSymbol records instead of the old global
-   * fetchSymbols() endpoint.
+   * Load account-specific symbol mappings.
    */
   useEffect(() => {
-    if (!positionAccountIds.length) {
-      return;
-    }
-
     positionAccountIds.forEach((accountId) => {
       dispatch(fetchAccountSymbols(accountId));
     });
@@ -77,9 +98,7 @@ const Positions = () => {
    * Resolve account name.
    */
   const accountName = (id) => {
-    const account = accounts.find(
-      (item) => item.id === id,
-    );
+    const account = accounts.find((item) => String(item.id) === String(id));
 
     return (
       account?.account_name ||
@@ -89,79 +108,110 @@ const Positions = () => {
   };
 
   /*
-   * Resolve canonical symbol name from AccountSymbol.
+   * Resolve the broker symbol for a position.
    */
+  const getAccountSymbol = (position) => {
+    const accountSymbols = symbolsByAccount[String(position.account_id)] || [];
+
+    return accountSymbols.find(
+      (item) =>
+        String(item.symbol_id) === String(position.symbol_id) ||
+        String(item.symbol?.id) === String(position.symbol_id),
+    );
+  };
+
   /*
    * Filter visible positions.
    */
-  const visiblePositions = useMemo(
-    () => {
-      const getAccountSymbol = (position) =>
-        (symbolsByAccount[String(position.account_id)] || []).find(
-          (item) =>
-            item.symbol_id === position.symbol_id ||
-            item.symbol?.id === position.symbol_id,
-        );
+  const visiblePositions = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
 
-      return positions.filter((position) => {
-        const accountSymbol = getAccountSymbol(position);
-        const symbol =
-          accountSymbol?.symbol_name ||
-          accountSymbol?.name ||
-          accountSymbol?.symbol?.name ||
-          accountSymbol?.broker_symbol ||
-          String(position.symbol_id || "-").slice(0, 8);
-        const brokerSymbol = accountSymbol?.broker_symbol || "";
+    return positions.filter((position) => {
+      const accountSymbols =
+        symbolsByAccount[String(position.account_id)] || [];
 
-        const text = `
-          ${position.strategy || ""}
-          ${symbol}
-          ${brokerSymbol}
-          ${position.ticket || ""}
-          ${position.direction || ""}
-          ${position.comment || ""}
-        `.toLowerCase();
+      const accountSymbol = accountSymbols.find(
+        (item) =>
+          String(item.symbol_id) === String(position.symbol_id) ||
+          String(item.symbol?.id) === String(position.symbol_id),
+      );
 
-        return !query || text.includes(query.toLowerCase());
-      });
-    },
-    [positions, query, symbolsByAccount],
-  );
+      const symbol =
+        accountSymbol?.symbol_name ||
+        accountSymbol?.name ||
+        accountSymbol?.symbol?.name ||
+        accountSymbol?.broker_symbol ||
+        String(position.symbol_id || "-").slice(0, 8);
+
+      const brokerSymbol = accountSymbol?.broker_symbol || "";
+
+      const searchableText = [
+        position.strategy,
+        symbol,
+        brokerSymbol,
+        position.ticket,
+        position.direction,
+        position.comment,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return !normalizedQuery || searchableText.includes(normalizedQuery);
+    });
+  }, [positions, query, symbolsByAccount]);
 
   /*
-   * Refresh broker positions and their associated
-   * account-specific symbol mappings.
+   * Manually synchronize broker state.
    */
   const handleSync = async () => {
-    await dispatch(syncPositions());
+    try {
+      await dispatch(syncPositions()).unwrap();
 
-    /*
-     * Refresh the account-specific symbol universe after
-     * broker synchronization.
-     */
-    positionAccountIds.forEach((accountId) => {
-      dispatch(fetchAccountSymbols(accountId));
-    });
+      const latestPositions = await dispatch(fetchPositions()).unwrap();
+
+      const accountIds = [
+        ...new Set(
+          (Array.isArray(latestPositions) ? latestPositions : [])
+            .map((position) => position.account_id)
+            .filter(Boolean),
+        ),
+      ];
+
+      accountIds.forEach((accountId) => {
+        dispatch(fetchAccountSymbols(accountId));
+      });
+    } catch {
+      /*
+       * Redux thunk errors are reflected by the existing
+       * positions slice.
+       */
+    }
   };
+
+  const connectionLabel =
+    {
+      connected: "CONNECTED",
+      connecting: "CONNECTING",
+      reconnecting: "RECONNECTING",
+      disconnected: "DISCONNECTED",
+    }[liveStatus] || "DISCONNECTED";
 
   return (
     <main className="positions-page">
-      {/* =====================================================
-          HEADER
-      ====================================================== */}
-
+      {/* HEADER */}
       <header className="positions-header">
         <div>
           <span className="positions-eyebrow">
-            LIVE BROKER STATE
+            LIVE BROKER STATE · {connectionLabel}
+            {lastUpdatedAt
+              ? ` · ${new Date(lastUpdatedAt).toLocaleTimeString()}`
+              : ""}
           </span>
 
           <h1>Positions</h1>
 
-          <p>
-            Monitor positions created and updated by the
-            execution system.
-          </p>
+          <p>Monitor positions created and updated by the execution system.</p>
         </div>
 
         <button
@@ -170,61 +220,43 @@ const Positions = () => {
           onClick={handleSync}
           disabled={syncing}
         >
-          <FaSyncAlt
-            className={
-              syncing
-                ? "positions-spin"
-                : ""
-            }
-          />
+          <FaSyncAlt className={syncing ? "positions-spin" : ""} />
 
-          {syncing
-            ? "Syncing..."
-            : "Sync broker"}
+          {syncing ? "Syncing..." : "Sync broker"}
         </button>
       </header>
 
-      {/* =====================================================
-          ERROR
-      ====================================================== */}
-
-      {error && (
+      {/* ERROR */}
+      {(liveError || error) && (
         <div className="positions-error">
-          {typeof error === "string"
-            ? error
-            : "Unable to synchronize broker positions."}
+          {liveError ||
+            (typeof error === "string"
+              ? error
+              : "Unable to load or synchronize broker positions.")}
         </div>
       )}
 
-      {/* =====================================================
-          TOOLBAR
-      ====================================================== */}
-
+      {/* TOOLBAR */}
       <section className="positions-toolbar">
         <div className="positions-search">
           <FaSearch />
 
           <input
+            type="search"
             value={query}
-            onChange={(event) =>
-              setQuery(event.target.value)
-            }
+            onChange={(event) => setQuery(event.target.value)}
             placeholder="Search strategy, symbol or ticket..."
+            aria-label="Search positions"
           />
         </div>
 
         <span>
           {visiblePositions.length} open position
-          {visiblePositions.length === 1
-            ? ""
-            : "s"}
+          {visiblePositions.length === 1 ? "" : "s"}
         </span>
       </section>
 
-      {/* =====================================================
-          POSITIONS TABLE
-      ====================================================== */}
-
+      {/* POSITIONS TABLE */}
       <section className="positions-table-wrap">
         <table className="positions-table">
           <thead>
@@ -240,143 +272,93 @@ const Positions = () => {
           </thead>
 
           <tbody>
-            {/* Loading */}
-            {loading && (
+            {loading && positions.length === 0 && (
               <tr>
-                <td
-                  colSpan="7"
-                  className="positions-empty"
-                >
+                <td colSpan={7} className="positions-empty">
                   <FaSyncAlt className="positions-spin" />
-
-                  <strong>
-                    Loading positions...
-                  </strong>
+                  <strong>Loading positions...</strong>
                 </td>
               </tr>
             )}
 
-            {/* Empty */}
-            {!loading &&
-              visiblePositions.length === 0 && (
-                <tr>
-                  <td
-                    colSpan="7"
-                    className="positions-empty"
-                  >
-                    <FaExchangeAlt />
+            {!loading && visiblePositions.length === 0 && (
+              <tr>
+                <td colSpan={7} className="positions-empty">
+                  <FaExchangeAlt />
 
-                    <strong>
-                      No broker positions
-                    </strong>
+                  <strong>No broker positions</strong>
+
+                  <span>
+                    Positions will appear here after an order is filled or a
+                    broker position is synchronized.
+                  </span>
+                </td>
+              </tr>
+            )}
+
+            {visiblePositions.map((position) => {
+              const accountSymbol = getAccountSymbol(position);
+
+              const symbol =
+                accountSymbol?.symbol_name ||
+                accountSymbol?.name ||
+                accountSymbol?.symbol?.name ||
+                accountSymbol?.broker_symbol ||
+                String(position.symbol_id || "-").slice(0, 8);
+
+              const brokerSymbol = accountSymbol?.broker_symbol || "";
+
+              const floatingProfit = Number(position.floating_profit ?? 0);
+
+              return (
+                <tr key={position.id || position.ticket}>
+                  {/* POSITION */}
+                  <td>
+                    <strong>#{position.ticket || "—"}</strong>
 
                     <span>
-                      Positions will appear here
-                      after an order is filled.
+                      {position.direction || "—"}
+                      {" · "}
+                      {position.strategy || "Manual"}
                     </span>
                   </td>
+
+                  {/* INSTRUMENT */}
+                  <td>
+                    <strong>{symbol}</strong>
+
+                    <span>
+                      {brokerSymbol || position.comment || "Broker position"}
+                    </span>
+                  </td>
+
+                  {/* ACCOUNT */}
+                  <td>{accountName(position.account_id)}</td>
+
+                  {/* VOLUME */}
+                  <td>{position.current_volume ?? position.volume ?? "—"}</td>
+
+                  {/* ENTRY / CURRENT */}
+                  <td>
+                    {position.entry_price ?? "—"}
+                    {" / "}
+                    {position.current_price ?? "—"}
+                  </td>
+
+                  {/* FLOATING P/L */}
+                  <td className={floatingProfit >= 0 ? "positive" : "negative"}>
+                    {position.floating_profit ?? "0"}
+                  </td>
+
+                  {/* STOPS */}
+                  <td>
+                    SL {position.stop_loss ?? "-"}
+                    <br />
+                    TP {position.take_profit ?? "-"}
+                  </td>
                 </tr>
-              )}
-
-            {/* Positions */}
-            {!loading &&
-              visiblePositions.map((position) => {
-                const accountSymbol =
-                  (symbolsByAccount[String(position.account_id)] || []).find(
-                    (item) =>
-                      item.symbol_id === position.symbol_id ||
-                      item.symbol?.id === position.symbol_id,
-                  );
-                const symbol =
-                  accountSymbol?.symbol_name ||
-                  accountSymbol?.name ||
-                  accountSymbol?.symbol?.name ||
-                  accountSymbol?.broker_symbol ||
-                  String(position.symbol_id || "-").slice(0, 8);
-                const brokerSymbol = accountSymbol?.broker_symbol || "";
-
-                const floatingProfit = Number(
-                  position.floating_profit ?? 0,
-                );
-
-                return (
-                  <tr key={position.id}>
-                    {/* POSITION */}
-                    <td>
-                      <strong>
-                        #{position.ticket || "—"}
-                      </strong>
-
-                      <span>
-                        {position.direction ||
-                          "—"}{" "}
-                        ·{" "}
-                        {position.strategy ||
-                          "Manual"}
-                      </span>
-                    </td>
-
-                    {/* INSTRUMENT */}
-                    <td>
-                      <strong>
-                        {symbol}
-                      </strong>
-
-                      <span>
-                        {brokerSymbol ||
-                          position.comment ||
-                          "Broker position"}
-                      </span>
-                    </td>
-
-                    {/* ACCOUNT */}
-                    <td>
-                      {accountName(
-                        position.account_id,
-                      )}
-                    </td>
-
-                    {/* VOLUME */}
-                    <td>
-                      {position.current_volume ??
-                        position.volume ??
-                        "—"}
-                    </td>
-
-                    {/* ENTRY / CURRENT */}
-                    <td>
-                      {position.entry_price ??
-                        "—"}{" "}
-                      /{" "}
-                      {position.current_price ??
-                        "—"}
-                    </td>
-
-                    {/* P/L */}
-                    <td
-                      className={
-                        floatingProfit >= 0
-                          ? "positive"
-                          : "negative"
-                      }
-                    >
-                      {position.floating_profit ??
-                        "0"}
-                    </td>
-
-                    {/* STOPS */}
-                    <td>
-                      SL{" "}
-                      {position.stop_loss ||
-                        "-"}
-                      <br />
-                      TP{" "}
-                      {position.take_profit ||
-                        "-"}
-                    </td>
-                  </tr>
-                );
-              })}
+              );
+            })}
           </tbody>
         </table>
       </section>

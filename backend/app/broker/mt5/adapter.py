@@ -1,6 +1,6 @@
 from __future__ import annotations
-
 from datetime import datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.broker.base import BrokerAdapter
@@ -18,163 +18,182 @@ from app.schemas.execution import (
     OrderSide,
     OrderType,
 )
-
 from .client import MT5Client
 
 
 class MT5OrderMapper:
     """
-    Convert AQE ExecutionOrder objects into MT5 Bridge requests.
-
-    AQE uses broker-neutral order semantics.
-
-    The MT5 Bridge expects MT5-native order type integers:
-
-        0  MARKET BUY
-        1  MARKET SELL
-        2  BUY LIMIT
-        3  SELL LIMIT
-        4  BUY STOP
-        5  SELL STOP
+    Converts broker-agnostic AQE ExecutionOrder objects
+    into MT5 Bridge order payloads.
     """
 
     MARKET_BUY = 0
     MARKET_SELL = 1
-
     BUY_LIMIT = 2
     SELL_LIMIT = 3
     BUY_STOP = 4
     SELL_STOP = 5
 
-    @classmethod
+    @staticmethod
     def to_mt5(
-        cls,
         order: ExecutionOrder,
     ) -> dict[str, Any]:
-        """
-        Convert an ExecutionOrder into an MT5 Bridge request.
-        """
-
         if order.volume <= 0:
-            raise BrokerOrderError(
-                "Order volume must be greater than zero.",
-            )
-
+            raise BrokerOrderError("Order volume must be greater than zero.")
         symbol = str(order.symbol).strip()
-
         if not symbol:
-            raise BrokerOrderError(
-                "Order symbol cannot be empty.",
-            )
-
-        comment = str(order.comment).strip()[:31] if order.comment else "AQE"
-
+            raise BrokerOrderError("Order symbol cannot be empty.")
         payload: dict[str, Any] = {
             "symbol": symbol,
             "volume": float(order.volume),
             "deviation": order.deviation,
             "magic": order.magic_number,
-            "comment": comment,
+            "comment": (str(order.comment).strip()[:31] if order.comment else "AQE"),
         }
-
-        # --------------------------------------------------------------
+        # ------------------------------------------------------
         # MARKET
-        # --------------------------------------------------------------
-
-        if order.order_type is OrderType.MARKET:
-            if order.side is OrderSide.BUY:
-                payload["order_type"] = cls.MARKET_BUY
-            elif order.side is OrderSide.SELL:
-                payload["order_type"] = cls.MARKET_SELL
+        # ------------------------------------------------------
+        if order.order_type == OrderType.MARKET:
+            if order.side == OrderSide.BUY:
+                payload["order_type"] = MT5OrderMapper.MARKET_BUY
+            elif order.side == OrderSide.SELL:
+                payload["order_type"] = MT5OrderMapper.MARKET_SELL
             else:
-                raise BrokerOrderError(
-                    f"Unsupported market order side: {order.side!r}",
-                )
-
-        # --------------------------------------------------------------
+                raise BrokerOrderError(f"Unsupported market order side: {order.side}")
+        # ------------------------------------------------------
         # LIMIT
-        # --------------------------------------------------------------
-
-        elif order.order_type is OrderType.LIMIT:
+        # ------------------------------------------------------
+        elif order.order_type == OrderType.LIMIT:
             if order.price is None:
-                raise BrokerOrderError(
-                    "LIMIT order requires a price.",
-                )
-
-            if order.side is OrderSide.BUY:
-                payload["order_type"] = cls.BUY_LIMIT
-            elif order.side is OrderSide.SELL:
-                payload["order_type"] = cls.SELL_LIMIT
+                raise BrokerOrderError("LIMIT order requires a price.")
+            if order.side == OrderSide.BUY:
+                payload["order_type"] = MT5OrderMapper.BUY_LIMIT
+            elif order.side == OrderSide.SELL:
+                payload["order_type"] = MT5OrderMapper.SELL_LIMIT
             else:
-                raise BrokerOrderError(
-                    f"Unsupported limit order side: {order.side!r}",
-                )
-
+                raise BrokerOrderError(f"Unsupported limit order side: {order.side}")
             payload["price"] = float(order.price)
-
-        # --------------------------------------------------------------
+        # ------------------------------------------------------
         # STOP
-        # --------------------------------------------------------------
-
-        elif order.order_type is OrderType.STOP:
+        # ------------------------------------------------------
+        elif order.order_type == OrderType.STOP:
             if order.price is None:
-                raise BrokerOrderError(
-                    "STOP order requires a price.",
-                )
-
-            if order.side is OrderSide.BUY:
-                payload["order_type"] = cls.BUY_STOP
-            elif order.side is OrderSide.SELL:
-                payload["order_type"] = cls.SELL_STOP
+                raise BrokerOrderError("STOP order requires a price.")
+            if order.side == OrderSide.BUY:
+                payload["order_type"] = MT5OrderMapper.BUY_STOP
+            elif order.side == OrderSide.SELL:
+                payload["order_type"] = MT5OrderMapper.SELL_STOP
             else:
-                raise BrokerOrderError(
-                    f"Unsupported stop order side: {order.side!r}",
-                )
-
+                raise BrokerOrderError(f"Unsupported stop order side: {order.side}")
             payload["price"] = float(order.price)
-
         else:
-            raise BrokerOrderError(
-                f"Unsupported order type: {order.order_type!r}",
-            )
-
-        # --------------------------------------------------------------
-        # PROTECTION
-        # --------------------------------------------------------------
-
+            raise BrokerOrderError(f"Unsupported order type: {order.order_type}")
+        # ------------------------------------------------------
+        # STOP LOSS
+        # ------------------------------------------------------
         if order.stop_loss is not None:
             payload["sl"] = float(order.stop_loss)
-
+        # ------------------------------------------------------
+        # TAKE PROFIT
+        # ------------------------------------------------------
         if order.take_profit is not None:
             payload["tp"] = float(order.take_profit)
-
         return payload
 
 
 class MT5Adapter(BrokerAdapter):
     """
     AQE MetaTrader 5 broker adapter.
-
     Responsibilities:
-        - communicate with the MT5 Bridge;
-        - translate AQE ExecutionOrder into MT5 Bridge requests;
-        - normalize successful bridge responses into ExecutionResult;
-        - expose MT5 operations through BrokerAdapter.
-
-    This adapter does NOT:
-        - create database records;
-        - generate trading signals;
-        - calculate risk;
-        - manage strategy lifecycle;
-        - persist AQE orders;
-        - interpret MT5 retcodes.
-
-    MT5 retcode interpretation belongs to the MT5 Bridge's
-    OrderService. If the bridge accepts an order request, the adapter
-    receives a successful HTTP response and normalizes that response.
+        - Communicate with the MT5 Bridge.
+        - Translate AQE orders into MT5 payloads.
+        - Normalize broker responses.
+        - Normalize broker-specific historical order states.
+        - Expose broker operations through the AQE
+          broker interface.
+    It does NOT:
+        - Create database records.
+        - Run strategies.
+        - Perform risk calculations.
+        - Generate trading signals.
+        - Manage user authentication.
+    Those responsibilities belong to higher layers.
     """
 
     BROKER_NAME = "MT5"
+
+    # ==========================================================
+    # MT5 ORDER HISTORY STATES
+
+    # ==========================================================
+    #
+    # These values correspond to the MetaTrader 5
+    # ENUM_ORDER_STATE values returned by the bridge.
+    #
+    # They are intentionally isolated here.
+    #
+    # The rest of AQE must NOT depend on MT5 numeric values.
+
+    # ==========================================================
+    ORDER_STATE_STARTED = 0
+    ORDER_STATE_PLACED = 1
+    ORDER_STATE_CANCELED = 2
+    ORDER_STATE_PARTIAL = 3
+    ORDER_STATE_FILLED = 4
+    ORDER_STATE_REJECTED = 5
+    ORDER_STATE_EXPIRED = 6
+    ORDER_STATE_REQUEST_ADD = 7
+    ORDER_STATE_REQUEST_MODIFY = 8
+    ORDER_STATE_REQUEST_CANCEL = 9
+    # MT5 trade-server return codes relevant to order execution.
+    TRADE_RETCODE_REQUOTE = 10004
+    TRADE_RETCODE_REJECT = 10006
+    TRADE_RETCODE_CANCEL = 10007
+    TRADE_RETCODE_PLACED = 10008
+    TRADE_RETCODE_DONE = 10009
+    TRADE_RETCODE_DONE_PARTIAL = 10010
+    TRADE_RETCODE_ERROR = 10011
+    TRADE_RETCODE_TIMEOUT = 10012
+    TRADE_RETCODE_CONNECTION = 10031
+    # Explicit responses indicating the requested trade did not complete.
+    # Unknown and transport-related outcomes remain UNKNOWN for reconciliation.
+    TRADE_RETCODES_REJECTED = frozenset(
+        {
+            10004,
+            10006,
+            10007,
+            10013,
+            10014,
+            10015,
+            10016,
+            10017,
+            10018,
+            10019,
+            10020,
+            10021,
+            10022,
+            10024,
+            10026,
+            10027,
+            10028,
+            10029,
+            10030,
+            10032,
+            10033,
+            10034,
+            10035,
+            10036,
+            10038,
+            10039,
+            10040,
+            10041,
+            10042,
+            10043,
+            10044,
+            10045,
+            10046,
+        }
+    )
 
     def __init__(
         self,
@@ -187,141 +206,14 @@ class MT5Adapter(BrokerAdapter):
             bridge_token=settings.MT5_BRIDGE_TOKEN,
             timeout=timeout,
         )
-
         self.bridge_url = bridge_url.rstrip("/")
         self.timeout = timeout
         self.account_id = account_id
 
-    # ==================================================================
-    # INTERNAL HELPERS
-    # ==================================================================
-
-    @staticmethod
-    def _coerce_execution_order(
-        order: ExecutionOrder | dict[str, Any],
-    ) -> ExecutionOrder:
-        """
-        Normalize a broker-layer order into ExecutionOrder.
-
-        ExecutionEngine normally supplies an ExecutionOrder directly.
-
-        Dictionary support is retained for compatibility with older
-        broker-manager/adaptor callers.
-        """
-
-        if isinstance(order, ExecutionOrder):
-            return order
-
-        if not isinstance(order, dict):
-            raise BrokerOrderError(
-                "Order must be an ExecutionOrder or dictionary.",
-            )
-
-        try:
-            return ExecutionOrder.model_validate(order)
-        except Exception as exc:
-            raise BrokerOrderError(
-                f"Invalid execution order: {exc}",
-            ) from exc
-
-    @classmethod
-    def _normalize_execution_result(
-        cls,
-        data: dict[str, Any],
-        *,
-        order: ExecutionOrder,
-        default_message: str,
-    ) -> ExecutionResult:
-        """
-        Normalize a successful MT5 Bridge response.
-
-        The bridge has already validated the MT5 retcode before
-        returning the response.
-
-        Therefore this method does not independently interpret the
-        MT5 `state`/retcode.
-
-        The raw response remains available through `raw_response`,
-        including:
-
-            state
-            order_id
-            deal_id
-            position_id
-            volume
-            price_open
-            comment
-
-        Partial execution is represented by the broker-confirmed
-        `volume`. ExecutionEngine compares that value with the
-        originally requested ExecutionOrder.volume.
-        """
-
-        if not isinstance(data, dict):
-            raise BrokerOrderError(
-                "MT5 Bridge returned an invalid order response.",
-            )
-
-        symbol = data.get("symbol")
-
-        if symbol is None:
-            symbol = order.symbol
-
-        symbol = str(symbol).strip()
-
-        if not symbol:
-            raise BrokerOrderError(
-                "MT5 Bridge returned an order response without a symbol.",
-            )
-
-        volume = data.get("volume")
-
-        if volume is None:
-            volume = float(order.volume)
-
-        try:
-            normalized_volume = float(volume)
-        except (TypeError, ValueError) as exc:
-            raise BrokerOrderError(
-                "MT5 Bridge returned an invalid executed volume.",
-            ) from exc
-
-        if normalized_volume <= 0:
-            raise BrokerOrderError(
-                "MT5 Bridge returned a non-positive executed volume.",
-            )
-
-        price = data.get("price_open")
-
-        if price is None:
-            price = data.get("price")
-
-        if price is None and order.order_type is OrderType.MARKET:
-            raise BrokerOrderError(
-                "MT5 Bridge returned no execution price for a market order.",
-            )
-
-        message = data.get("comment")
-
-        if message is None or not str(message).strip():
-            message = default_message
-
-        return ExecutionResult(
-            status=ExecutionStatus.SUCCESS,
-            broker=cls.BROKER_NAME,
-            broker_order_id=data.get("order_id"),
-            broker_deal_id=data.get("deal_id"),
-            broker_position_id=data.get("position_id"),
-            symbol=symbol,
-            volume=normalized_volume,
-            price=price,
-            message=str(message),
-            raw_response=data,
-        )
-
-    # ==================================================================
+    # ==========================================================
     # CONNECTION
-    # ==================================================================
+
+    # ==========================================================
 
     async def connect(
         self,
@@ -329,129 +221,133 @@ class MT5Adapter(BrokerAdapter):
     ):
         """
         Connect the MT5 Bridge to the requested MT5 account.
-
-        Credentials are supplied at runtime.
-
-        They are never loaded from MT5 Bridge environment variables.
         """
-
         try:
             return await self.client.post(
                 "/connection/connect",
-                credentials or {},
+                credentials,
             )
         except RuntimeError as exc:
-            raise BrokerConnectionError(
-                f"Failed to connect to MT5: {exc}",
-            ) from exc
+            raise BrokerConnectionError(f"Failed to connect to MT5: {exc}") from exc
 
     async def disconnect(self):
         """
-        Disconnect the MT5 Bridge from the current account.
+        Disconnect the MT5 Bridge from the current MT5 account.
         """
-
         try:
-            return await self.client.post(
-                "/connection/disconnect",
-            )
+            return await self.client.post("/connection/disconnect")
         except RuntimeError as exc:
             raise BrokerConnectionError(
-                f"Failed to disconnect from MT5: {exc}",
+                f"Failed to disconnect from MT5: {exc}"
             ) from exc
 
     async def connection_status(self):
         """
-        Return the current MT5 Bridge connection status.
+        Return current MT5 bridge connection status.
         """
-
         try:
-            return await self.client.get(
-                "/connection/status",
-            )
+            return await self.client.get("/connection/status")
         except RuntimeError as exc:
             raise BrokerConnectionError(
-                f"Failed to retrieve MT5 connection status: {exc}",
+                f"Failed to retrieve MT5 connection status: {exc}"
             ) from exc
 
-    # ==================================================================
+    # ==========================================================
     # ACCOUNT
-    # ==================================================================
+
+    # ==========================================================
 
     async def get_account(self):
         """
         Retrieve account information from MT5.
         """
-
         try:
             return await self.client.get("/account")
         except RuntimeError as exc:
-            raise BrokerDataError(
-                f"Failed to retrieve MT5 account: {exc}",
-            ) from exc
+            raise BrokerDataError(f"Failed to retrieve MT5 account: {exc}") from exc
 
-    # ==================================================================
+    # ==========================================================
     # SYMBOLS
-    # ==================================================================
+
+    # ==========================================================
 
     async def get_symbols(self):
         """
-        Retrieve available MT5 symbols.
+        Retrieve available symbols from MT5.
         """
-
         try:
             return await self.client.get("/symbols")
         except RuntimeError as exc:
-            raise BrokerDataError(
-                f"Failed to retrieve MT5 symbols: {exc}",
-            ) from exc
+            raise BrokerDataError(f"Failed to retrieve MT5 symbols: {exc}") from exc
 
     async def get_symbol(
         self,
         symbol: str,
     ):
         """
-        Retrieve metadata for a single MT5 symbol.
+        Retrieve metadata for a single symbol.
         """
-
-        symbol = str(symbol).strip()
-
         if not symbol:
-            raise BrokerDataError(
-                "Symbol cannot be empty.",
-            )
-
+            raise BrokerDataError("Symbol cannot be empty.")
         try:
-            return await self.client.get(
-                f"/symbols/{symbol}",
-            )
+            return await self.client.get(f"/symbols/{symbol}")
         except RuntimeError as exc:
             raise BrokerDataError(
-                f"Failed to retrieve MT5 symbol {symbol}: {exc}",
+                f"Failed to retrieve MT5 symbol {symbol}: {exc}"
             ) from exc
 
     async def get_tick(
         self,
         symbol: str,
-    ):
+    ) -> dict[str, Any]:
         """
-        Retrieve the latest broker tick.
+        Retrieve the latest valid broker tick.
+        The MT5 Bridge exposes live ticks through:
+            /market-data/tick/{symbol}
         """
-
         symbol = str(symbol).strip()
-
         if not symbol:
-            raise BrokerDataError(
-                "Symbol cannot be empty.",
-            )
-
+            raise BrokerDataError("Symbol cannot be empty.")
         try:
-            return await self.client.get(
-                f"/symbols/{symbol}/tick",
-            )
+            tick = await self.client.get(f"/market-data/tick/{symbol}")
         except RuntimeError as exc:
             raise BrokerDataError(
-                f"Failed to retrieve tick for {symbol}: {exc}",
+                f"Failed to retrieve tick for {symbol}: {exc}"
             ) from exc
+        if not isinstance(tick, dict):
+            raise BrokerDataError(
+                f"Invalid tick response for {symbol}: "
+                f"expected object, got {type(tick).__name__}."
+            )
+        bid_raw = tick.get("bid")
+        ask_raw = tick.get("ask")
+        if bid_raw is None or ask_raw is None:
+            raise BrokerDataError(f"Tick for {symbol} is missing bid or ask: {tick!r}")
+        try:
+            bid = Decimal(str(bid_raw))
+            ask = Decimal(str(ask_raw))
+        except (
+            TypeError,
+            ValueError,
+            InvalidOperation,
+        ) as exc:
+            raise BrokerDataError(
+                f"Invalid tick values returned for {symbol}: "
+                f"bid={bid_raw!r} ask={ask_raw!r}"
+            ) from exc
+        if not bid.is_finite() or not ask.is_finite() or bid <= 0 or ask <= 0:
+            raise BrokerDataError(
+                f"Invalid tick values returned for {symbol}: " f"bid={bid} ask={ask}"
+            )
+        if ask < bid:
+            raise BrokerDataError(
+                f"Invalid tick for {symbol}: " f"ask={ask} < bid={bid}"
+            )
+        return {
+            **tick,
+            "bid": bid,
+            "ask": ask,
+        }
 
     async def get_candles(
         self,
@@ -462,19 +358,8 @@ class MT5Adapter(BrokerAdapter):
         """
         Retrieve recent OHLC candles for a symbol.
         """
-
-        symbol = str(symbol).strip()
-
         if not symbol:
-            raise BrokerDataError(
-                "Symbol cannot be empty.",
-            )
-
-        if count <= 0:
-            raise BrokerDataError(
-                "Candle count must be greater than zero.",
-            )
-
+            raise BrokerDataError("Symbol cannot be empty.")
         try:
             return await self.client.get(
                 f"/symbols/{symbol}/candles",
@@ -485,201 +370,353 @@ class MT5Adapter(BrokerAdapter):
             )
         except RuntimeError as exc:
             raise BrokerDataError(
-                f"Failed to retrieve candles for {symbol}: {exc}",
+                f"Failed to retrieve candles for {symbol}: {exc}"
             ) from exc
 
-    # ==================================================================
+    @staticmethod
+    def _optional_int(value: Any) -> int | None:
+        """Parse an integer without silently truncating invalid values."""
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            number = Decimal(str(value))
+        except (ValueError, TypeError, InvalidOperation):
+            return None
+        if not number.is_finite():
+            return None
+        if number != number.to_integral_value():
+            return None
+        return int(number)
+
+    @classmethod
+    def _broker_identifier(
+        cls,
+        response: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> int | None:
+        """Extract a valid positive identifier from broker response aliases."""
+        for key in keys:
+            parsed = cls._optional_int(response.get(key))
+            if parsed is not None and parsed > 0:
+                return parsed
+        return None
+
+    @staticmethod
+    def _positive_decimal(value: Any) -> Decimal | None:
+        """Parse a positive finite broker-confirmed price or volume."""
+        if value is None or isinstance(value, bool):
+            return None
+        try:
+            parsed = Decimal(str(value))
+        except (ValueError, TypeError, InvalidOperation):
+            return None
+        if not parsed.is_finite() or parsed <= 0:
+            return None
+        return parsed
+
+    @staticmethod
+    def _first_value(
+        response: dict[str, Any],
+        keys: tuple[str, ...],
+    ) -> Any:
+        """Return the first non-null value for a sequence of response keys."""
+        for key in keys:
+            value = response.get(key)
+            if value is not None:
+                return value
+        return None
+
+    @classmethod
+    def _confirmed_fill_status(
+        cls,
+        *,
+        requested_volume: Decimal,
+        executed_volume: Decimal | None,
+        execution_price: Decimal | None,
+        broker_deal_id: int | None,
+        require_partial: bool = False,
+    ) -> ExecutionStatus:
+        """Classify a fill only when actual deal evidence is valid."""
+        # An order ticket proves that an order exists, not that a deal filled.
+        if broker_deal_id is None:
+            return ExecutionStatus.UNKNOWN
+        if executed_volume is None or execution_price is None:
+            return ExecutionStatus.UNKNOWN
+        if executed_volume > requested_volume:
+            return ExecutionStatus.UNKNOWN
+        if executed_volume == requested_volume:
+            if require_partial:
+                return ExecutionStatus.UNKNOWN
+            return ExecutionStatus.SUCCESS
+        if executed_volume < requested_volume:
+            return ExecutionStatus.PARTIALLY_FILLED
+        return ExecutionStatus.UNKNOWN
+
+    @classmethod
+    def _normalize_trade_response(
+        cls,
+        response: dict[str, Any],
+        order: ExecutionOrder,
+        *,
+        pending_order: bool,
+    ) -> ExecutionResult:
+        """Normalize an MT5 bridge response without inventing fill evidence."""
+        broker_order_id = cls._broker_identifier(
+            response,
+            ("order_id", "order", "ticket"),
+        )
+        broker_deal_id = cls._broker_identifier(
+            response,
+            ("deal_id", "deal"),
+        )
+        broker_position_id = cls._broker_identifier(
+            response,
+            ("position_id", "position"),
+        )
+        raw_volume = cls._first_value(
+            response,
+            ("executed_volume", "volume_executed", "actual_volume", "volume"),
+        )
+        raw_price = cls._first_value(
+            response,
+            ("execution_price", "price", "price_open", "deal_price"),
+        )
+        executed_volume = cls._positive_decimal(raw_volume)
+        execution_price = cls._positive_decimal(raw_price)
+        # The bridge exposes the MqlTradeResult return code as `state`.
+        # Keep `retcode` as a compatibility alias for other bridge versions.
+        retcode = cls._optional_int(cls._first_value(response, ("state", "retcode")))
+        request_id = cls._optional_int(response.get("request_id"))
+        retcode_external = cls._optional_int(response.get("retcode_external"))
+        raw_status = response.get("status")
+        if raw_status is None and isinstance(response.get("state"), str):
+            raw_status = response.get("state")
+        status_text = str(raw_status).strip().upper() if raw_status is not None else ""
+        # A NOT_SUBMITTED response is accepted only when the bridge explicitly
+        # reports that the broker boundary was not crossed.
+        if (
+            status_text == "NOT_SUBMITTED"
+            or response.get("submitted") is False
+            or response.get("submission_attempted") is False
+        ):
+            status = ExecutionStatus.NOT_SUBMITTED
+        elif retcode == cls.TRADE_RETCODE_PLACED:
+            status = (
+                ExecutionStatus.PLACED
+                if broker_order_id is not None
+                else ExecutionStatus.UNKNOWN
+            )
+        elif retcode == cls.TRADE_RETCODE_DONE:
+            if pending_order:
+                # Successful placement of a pending order is not itself a fill.
+                status = (
+                    ExecutionStatus.PLACED
+                    if broker_order_id is not None
+                    else ExecutionStatus.UNKNOWN
+                )
+            else:
+                status = cls._confirmed_fill_status(
+                    requested_volume=order.volume,
+                    executed_volume=executed_volume,
+                    execution_price=execution_price,
+                    broker_deal_id=broker_deal_id,
+                )
+        elif retcode == cls.TRADE_RETCODE_DONE_PARTIAL:
+            status = cls._confirmed_fill_status(
+                requested_volume=order.volume,
+                executed_volume=executed_volume,
+                execution_price=execution_price,
+                broker_deal_id=broker_deal_id,
+                require_partial=True,
+            )
+        elif retcode in cls.TRADE_RETCODES_REJECTED:
+            status = ExecutionStatus.REJECTED
+        elif retcode is not None:
+            # Do not interpret an unknown or transient return code as success.
+            status = ExecutionStatus.UNKNOWN
+        elif status_text in {"SUCCESS", "FILLED", "DONE", "EXECUTED"}:
+            if pending_order:
+                status = (
+                    ExecutionStatus.PLACED
+                    if broker_order_id is not None
+                    else ExecutionStatus.UNKNOWN
+                )
+            else:
+                status = cls._confirmed_fill_status(
+                    requested_volume=order.volume,
+                    executed_volume=executed_volume,
+                    execution_price=execution_price,
+                    broker_deal_id=broker_deal_id,
+                )
+        elif status_text in {"PARTIAL", "PARTIALLY_FILLED", "DONE_PARTIAL"}:
+            status = cls._confirmed_fill_status(
+                requested_volume=order.volume,
+                executed_volume=executed_volume,
+                execution_price=execution_price,
+                broker_deal_id=broker_deal_id,
+                require_partial=True,
+            )
+        elif status_text in {"PLACED", "PENDING", "ACCEPTED"}:
+            status = (
+                ExecutionStatus.PLACED
+                if broker_order_id is not None
+                else ExecutionStatus.UNKNOWN
+            )
+        elif status_text in {"REJECTED", "REJECT", "CANCELLED", "CANCELED"}:
+            status = ExecutionStatus.REJECTED
+        else:
+            # Includes absent status, FAILED, ERROR, and UNKNOWN.
+            status = ExecutionStatus.UNKNOWN
+        message = (
+            response.get("message")
+            or response.get("comment")
+            or response.get("retcode_description")
+        )
+        if message is None:
+            if retcode is not None:
+                message = f"MT5 returned trade retcode {retcode}."
+            else:
+                message = "MT5 response did not establish a definitive outcome."
+        if (
+            status in {ExecutionStatus.UNKNOWN, ExecutionStatus.REJECTED}
+            and retcode is not None
+        ):
+            if str(retcode) not in str(message):
+                message = f"{message} (MT5 retcode={retcode})"
+        is_confirmed_fill = status in {
+            ExecutionStatus.SUCCESS,
+            ExecutionStatus.PARTIALLY_FILLED,
+        }
+        return ExecutionResult(
+            status=status,
+            broker=cls.BROKER_NAME,
+            broker_order_id=broker_order_id,
+            broker_deal_id=broker_deal_id,
+            broker_position_id=broker_position_id,
+            symbol=str(response.get("symbol") or order.symbol).strip(),
+            requested_volume=order.volume,
+            volume=executed_volume if is_confirmed_fill else None,
+            price=execution_price if is_confirmed_fill else None,
+            retcode=retcode,
+            request_id=request_id,
+            retcode_external=retcode_external,
+            message=str(message),
+            raw_response=response,
+        )
+
+    # ==========================================================
     # ORDERS
-    # ==================================================================
+
+    # ==========================================================
 
     async def place_order(
         self,
-        order: ExecutionOrder | dict[str, Any],
+        order: ExecutionOrder,
     ) -> ExecutionResult:
-        """
-        Place an AQE order through the MT5 Bridge.
-        """
-
-        execution_order = self._coerce_execution_order(order)
-
-        if execution_order.order_type is OrderType.MARKET:
-            return await self.execute_order(execution_order)
-
-        if execution_order.order_type in {
+        if order.order_type == OrderType.MARKET:
+            return await self.execute_order(order)
+        if order.order_type in (
             OrderType.LIMIT,
             OrderType.STOP,
-        }:
-            return await self.create_pending_order(execution_order)
-
-        raise BrokerOrderError(
-            f"Unsupported order type: {execution_order.order_type!r}",
-        )
+        ):
+            return await self.create_pending_order(order)
+        raise BrokerOrderError(f"Unsupported order type: {order.order_type}")
 
     async def execute_order(
         self,
-        order: ExecutionOrder | dict[str, Any],
+        order: ExecutionOrder,
     ) -> ExecutionResult:
-        """
-        Execute a MARKET order.
-        """
-
-        execution_order = self._coerce_execution_order(order)
-
-        if execution_order.order_type is not OrderType.MARKET:
-            raise BrokerOrderError(
-                "execute_order() only supports MARKET orders.",
-            )
-
+        """Submit a market order and normalize the bridge response."""
+        if order.order_type != OrderType.MARKET:
+            raise BrokerOrderError("execute_order() only supports MARKET orders.")
         try:
-            payload = MT5OrderMapper.to_mt5(execution_order)
-
-            # ----------------------------------------------------------
-            # Resolve market price
-            # ----------------------------------------------------------
-
-            if execution_order.price is None:
-                tick = await self.get_tick(
-                    execution_order.symbol,
-                )
-
-                if not isinstance(tick, dict):
-                    raise BrokerDataError(
-                        f"Invalid tick response for " f"{execution_order.symbol!r}.",
-                    )
-
-                if execution_order.side is OrderSide.BUY:
-                    market_price = tick.get("ask")
-                elif execution_order.side is OrderSide.SELL:
-                    market_price = tick.get("bid")
+            payload = MT5OrderMapper.to_mt5(order)
+            # Use a current executable market price as the request price.
+            # This is NOT treated as the eventual execution price.
+            if order.price is None:
+                tick = await self.get_tick(order.symbol)
+                if order.side == OrderSide.BUY:
+                    market_price = tick["ask"]
+                elif order.side == OrderSide.SELL:
+                    market_price = tick["bid"]
                 else:
-                    raise BrokerOrderError(
-                        f"Unsupported order side: " f"{execution_order.side!r}",
-                    )
-
-                if market_price is None:
-                    raise BrokerDataError(
-                        f"Tick for {execution_order.symbol} "
-                        "does not contain the required market price.",
-                    )
-
-                try:
-                    market_price = float(market_price)
-                except (TypeError, ValueError) as exc:
-                    raise BrokerDataError(
-                        f"Invalid market price returned for "
-                        f"{execution_order.symbol}.",
-                    ) from exc
-
-                if market_price <= 0:
-                    raise BrokerDataError(
-                        f"Invalid market price returned for "
-                        f"{execution_order.symbol}: {market_price}",
-                    )
-
-                payload["price"] = market_price
-
+                    raise BrokerOrderError(f"Unsupported order side: {order.side}")
+                payload["price"] = float(market_price)
             else:
-                payload["price"] = float(execution_order.price)
-
-            # ----------------------------------------------------------
-            # Submit to bridge
-            # ----------------------------------------------------------
-
-            data = await self.client.post(
-                "/orders",
-                payload,
-            )
-
-            return self._normalize_execution_result(
+                if order.price <= 0:
+                    raise BrokerOrderError(
+                        "Market order price must be greater than zero."
+                    )
+                payload["price"] = float(order.price)
+            data = await self.client.post("/orders", payload)
+            if not isinstance(data, dict):
+                raise BrokerOrderError(
+                    "MT5 Bridge returned an invalid market-order response."
+                )
+            return self._normalize_trade_response(
                 data,
-                order=execution_order,
-                default_message="Order executed successfully.",
+                order,
+                pending_order=False,
             )
-
-        except (
-            BrokerOrderError,
-            BrokerDataError,
-        ):
+        except (BrokerOrderError, BrokerDataError):
             raise
-
         except RuntimeError as exc:
-            raise BrokerOrderError(
-                f"MT5 order execution failed: {exc}",
-            ) from exc
+            raise BrokerOrderError(f"MT5 order execution failed: {exc}") from exc
 
     async def create_pending_order(
         self,
-        order: ExecutionOrder | dict[str, Any],
+        order: ExecutionOrder,
     ) -> ExecutionResult:
-        """
-        Create a LIMIT or STOP pending order.
-        """
-
-        execution_order = self._coerce_execution_order(order)
-
-        if execution_order.order_type not in {
-            OrderType.LIMIT,
-            OrderType.STOP,
-        }:
-            raise BrokerOrderError(
-                "Pending order must be LIMIT or STOP.",
-            )
-
-        if execution_order.price is None:
-            raise BrokerOrderError(
-                "Pending order requires a price.",
-            )
-
+        """Create a pending order and normalize its broker response."""
+        if order.order_type not in (OrderType.LIMIT, OrderType.STOP):
+            raise BrokerOrderError("Pending order must be LIMIT or STOP.")
+        if order.price is None:
+            raise BrokerOrderError("Pending order requires a price.")
         try:
-            payload = MT5OrderMapper.to_mt5(
-                execution_order,
-            )
-
+            payload = MT5OrderMapper.to_mt5(order)
             data = await self.client.post(
                 "/orders/pending",
                 payload,
             )
-
-            return self._normalize_execution_result(
+            if not isinstance(data, dict):
+                raise BrokerOrderError(
+                    "MT5 Bridge returned an invalid pending-order response."
+                )
+            return self._normalize_trade_response(
                 data,
-                order=execution_order,
-                default_message="Pending order created successfully.",
+                order,
+                pending_order=True,
             )
-
         except BrokerOrderError:
             raise
-
         except RuntimeError as exc:
             raise BrokerOrderError(
-                f"Failed to create pending MT5 order: {exc}",
+                f"Failed to create pending MT5 order: {exc}"
             ) from exc
 
     async def get_orders(self):
         """
         Retrieve currently active/pending broker orders.
         """
-
         try:
             return await self.client.get("/orders")
         except RuntimeError as exc:
-            raise BrokerDataError(
-                f"Failed to retrieve MT5 orders: {exc}",
-            ) from exc
+            raise BrokerDataError(f"Failed to retrieve MT5 orders: {exc}") from exc
 
-    # ==================================================================
+    # ==========================================================
     # POSITIONS
-    # ==================================================================
+
+    # ==========================================================
 
     async def get_positions(self):
         """
         Retrieve all open MT5 positions.
         """
-
         try:
             return await self.client.get("/positions")
         except RuntimeError as exc:
             raise BrokerPositionError(
-                f"Failed to retrieve MT5 positions: {exc}",
+                f"Failed to retrieve MT5 positions: {exc}"
             ) from exc
 
     async def get_position(
@@ -689,39 +726,31 @@ class MT5Adapter(BrokerAdapter):
         """
         Retrieve a single MT5 position.
         """
-
         try:
-            return await self.client.get(
-                f"/positions/{position_id}",
-            )
+            return await self.client.get(f"/positions/{position_id}")
         except RuntimeError as exc:
             raise BrokerPositionError(
-                f"Failed to retrieve MT5 position {position_id}: {exc}",
+                f"Failed to retrieve MT5 position {position_id}: {exc}"
             ) from exc
 
     async def modify_position(
         self,
         position_id: int,
-        sl: float | None = None,
-        tp: float | None = None,
+        stop_loss: float | None = None,
+        take_profit: float | None = None,
     ):
         """
-        Modify SL/TP on an existing MT5 position.
+        Modify SL/TP on an existing position.
         """
-
-        if sl is None and tp is None:
+        if stop_loss is None and take_profit is None:
             raise BrokerPositionError(
-                "At least one of sl or tp must be provided.",
+                "At least one of stop_loss or " "take_profit must be provided."
             )
-
         payload: dict[str, float] = {}
-
-        if sl is not None:
-            payload["sl"] = float(sl)
-
-        if tp is not None:
-            payload["tp"] = float(tp)
-
+        if stop_loss is not None:
+            payload["sl"] = float(stop_loss)
+        if take_profit is not None:
+            payload["tp"] = float(take_profit)
         try:
             return await self.client.patch(
                 f"/positions/{position_id}",
@@ -729,7 +758,7 @@ class MT5Adapter(BrokerAdapter):
             )
         except RuntimeError as exc:
             raise BrokerPositionError(
-                f"Failed to modify MT5 position " f"{position_id}: {exc}",
+                f"Failed to modify MT5 position {position_id}: {exc}"
             ) from exc
 
     async def close_position(
@@ -739,19 +768,17 @@ class MT5Adapter(BrokerAdapter):
         """
         Close an existing MT5 position.
         """
-
         try:
-            return await self.client.post(
-                f"/positions/{position_id}/close",
-            )
+            return await self.client.post(f"/positions/{position_id}/close")
         except RuntimeError as exc:
             raise BrokerPositionError(
-                f"Failed to close MT5 position " f"{position_id}: {exc}",
+                f"Failed to close MT5 position {position_id}: {exc}"
             ) from exc
 
-    # ==================================================================
+    # ==========================================================
     # HISTORY
-    # ==================================================================
+
+    # ==========================================================
 
     async def get_order_history(
         self,
@@ -760,19 +787,22 @@ class MT5Adapter(BrokerAdapter):
     ):
         """
         Retrieve historical MT5 orders.
+        Broker-specific MT5 state values are normalized here
+        so consumers never have to understand MT5 numeric enums.
         """
-
         try:
-            return await self.client.get(
+            params = {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            }
+            response = await self.client.get(
                 "/history/orders",
-                params={
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                },
+                params=params,
             )
+            return self._normalize_order_history(response)
         except RuntimeError as exc:
             raise BrokerDataError(
-                f"Failed to retrieve MT5 order history: {exc}",
+                f"Failed to retrieve MT5 order history: {exc}"
             ) from exc
 
     async def get_deal_history(
@@ -783,18 +813,18 @@ class MT5Adapter(BrokerAdapter):
         """
         Retrieve historical MT5 deals.
         """
-
         try:
+            params = {
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            }
             return await self.client.get(
                 "/history/deals",
-                params={
-                    "start": start.isoformat(),
-                    "end": end.isoformat(),
-                },
+                params=params,
             )
         except RuntimeError as exc:
             raise BrokerDataError(
-                f"Failed to retrieve MT5 deal history: {exc}",
+                f"Failed to retrieve MT5 deal history: {exc}"
             ) from exc
 
     async def get_deals_by_position(
@@ -802,14 +832,137 @@ class MT5Adapter(BrokerAdapter):
         position_id: int,
     ):
         """
-        Retrieve deals associated with an MT5 position.
+        Retrieve deals associated with a position.
         """
-
         try:
-            return await self.client.get(
-                f"/history/deals/position/{position_id}",
-            )
+            return await self.client.get(f"/history/deals/position/{position_id}")
         except RuntimeError as exc:
             raise BrokerDataError(
-                f"Failed to retrieve deals for " f"position {position_id}: {exc}",
+                f"Failed to retrieve deals for position {position_id}: {exc}"
             ) from exc
+
+    # ==========================================================
+    # HISTORY NORMALIZATION
+
+    # ==========================================================
+
+    @classmethod
+    def _normalize_order_history(
+        cls,
+        response: Any,
+    ) -> list[dict[str, Any]]:
+        """
+        Normalize MT5 historical order responses.
+        The bridge may return either:
+            - a raw list of orders
+            - {"orders": [...]}
+            - {"data": [...]}
+        Each order receives:
+            state       -> AQE semantic state
+            state_raw   -> original MT5 value
+        The raw broker value is deliberately preserved for
+        diagnostics while the semantic value is used by
+        broker-neutral services.
+        """
+        if response is None:
+            return []
+        if isinstance(response, dict):
+            if isinstance(
+                response.get("orders"),
+                list,
+            ):
+                orders = response["orders"]
+            elif isinstance(
+                response.get("data"),
+                list,
+            ):
+                orders = response["data"]
+            else:
+                return []
+        elif isinstance(response, list):
+            orders = response
+        else:
+            return []
+        normalized: list[dict[str, Any]] = []
+        for item in orders:
+            if not isinstance(item, dict):
+                continue
+            order = dict(item)
+            raw_state = order.get("state")
+            order["state_raw"] = raw_state
+            order["state"] = cls._normalize_order_state(raw_state)
+            normalized.append(order)
+        return normalized
+
+    @classmethod
+    def _normalize_order_state(
+        cls,
+        state: Any,
+    ) -> str:
+        """
+        Convert MT5 numeric/string order states into
+        broker-neutral semantic states.
+        Returned values are intentionally aligned with
+        OrderReconciliationService expectations.
+        """
+        if state is None:
+            return "UNKNOWN"
+        # ------------------------------------------------------
+        # Numeric MT5 state
+        # ------------------------------------------------------
+        numeric_state: int | None = None
+        if isinstance(state, bool):
+            numeric_state = None
+        elif isinstance(state, int):
+            numeric_state = state
+        elif isinstance(state, float):
+            if state.is_integer():
+                numeric_state = int(state)
+        elif isinstance(state, str):
+            value = state.strip()
+            if value.isdigit():
+                numeric_state = int(value)
+            else:
+                normalized = value.upper()
+                string_mapping = {
+                    "STARTED": "PENDING",
+                    "PLACED": "PENDING",
+                    "PARTIAL": "PARTIALLY_FILLED",
+                    "PARTIALLY_FILLED": "PARTIALLY_FILLED",
+                    "FILLED": "FILLED",
+                    "REJECTED": "REJECTED",
+                    "CANCELED": "CANCELLED",
+                    "CANCELLED": "CANCELLED",
+                    "EXPIRED": "EXPIRED",
+                    "REQUEST_ADD": "PENDING",
+                    "REQUEST_MODIFY": "PENDING",
+                    "REQUEST_CANCEL": "PENDING",
+                    "PENDING": "PENDING",
+                    "OPEN": "PENDING",
+                    "ACCEPTED": "PENDING",
+                }
+                return string_mapping.get(
+                    normalized,
+                    "UNKNOWN",
+                )
+        # ------------------------------------------------------
+        # Numeric mapping
+        # ------------------------------------------------------
+        numeric_mapping = {
+            cls.ORDER_STATE_STARTED: "PENDING",
+            cls.ORDER_STATE_PLACED: "PENDING",
+            cls.ORDER_STATE_CANCELED: "CANCELLED",
+            cls.ORDER_STATE_PARTIAL: "PARTIALLY_FILLED",
+            cls.ORDER_STATE_FILLED: "FILLED",
+            cls.ORDER_STATE_REJECTED: "REJECTED",
+            cls.ORDER_STATE_EXPIRED: "EXPIRED",
+            cls.ORDER_STATE_REQUEST_ADD: "PENDING",
+            cls.ORDER_STATE_REQUEST_MODIFY: "PENDING",
+            cls.ORDER_STATE_REQUEST_CANCEL: "PENDING",
+        }
+        if numeric_state is not None:
+            return numeric_mapping.get(
+                numeric_state,
+                "UNKNOWN",
+            )
+        return "UNKNOWN"

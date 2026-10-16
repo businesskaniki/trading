@@ -14,6 +14,10 @@ from app.repositories.historical_candle_repository import (
     HistoricalCandleRepository,
 )
 from app.services.mt5_bridge_service import MT5BridgeService
+from app.market_data.session_calendar import (
+    is_us_stocks_asset_class,
+    us_equity_session_overlaps,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -541,6 +545,7 @@ class HistoricalDataService:
                     if self._is_closure_only_window(
                         current_start,
                         chunk_end,
+                        asset_class=symbol.asset_class,
                     ):
                         chunks_closed_market += 1
 
@@ -789,33 +794,27 @@ class HistoricalDataService:
             "no_market_data",
         }
 
+
     @staticmethod
     def _is_closure_only_window(
         start: datetime,
         end: datetime,
+        asset_class=None,
     ) -> bool:
         """
-        Determine whether a range contains no normal weekday period.
+        Determine whether a requested interval contains no expected
+        trading session for the supported calendar.
 
-        This is intentionally conservative.
+        US stocks use the US-equity exchange calendar so that exchange
+        holidays and pre-market intervals are not mistaken for missing
+        historical data.
 
-        It does NOT attempt to model exchange-specific holidays,
-        intraday breaks, or broker session calendars.
+        Other asset classes retain the existing conservative
+        weekend-only rule.
 
-        It only identifies intervals where every instant belongs to
-        Saturday and/or Sunday.
-
-        Examples:
-
-            Saturday -> Sunday  => True
-            Sunday -> Monday     => True
-            Friday -> Saturday   => False
-            Monday -> Tuesday    => False
-            Friday -> Monday     => False
-
-        This prevents a weekend-only MT5 query from being treated as
-        missing historical data while retaining strict behavior for
-        ranges that contain weekdays.
+        This helper is called only after a successful bridge request
+        returned an empty candle list. Bridge and terminal errors must
+        continue to propagate as failures.
         """
 
         start = HistoricalDataService._normalize_datetime(
@@ -831,8 +830,13 @@ class HistoricalDataService:
         if start is None or end is None or start >= end:
             return False
 
+        if is_us_stocks_asset_class(asset_class):
+            return not us_equity_session_overlaps(start, end)
+
         current_day = start.date()
-        final_day = (end - timedelta(microseconds=1)).date()
+        final_day = (
+            end - timedelta(microseconds=1)
+        ).date()
 
         while current_day <= final_day:
             if current_day.weekday() < 5:

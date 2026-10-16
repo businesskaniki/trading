@@ -1,13 +1,15 @@
-
 from celery import Celery
 
 from app.core.config import settings
-
 
 celery_app = Celery(
     "athena",
     broker=settings.REDIS_URL,
     backend=settings.REDIS_URL,
+    include=[
+        "app.tasks.market_data",
+        "app.tasks.backtests",
+    ],
 )
 
 celery_app.conf.update(
@@ -16,10 +18,4 @@ celery_app.conf.update(
     result_serializer="json",
     timezone="UTC",
     enable_utc=True,
-)
-
-celery_app.autodiscover_tasks(
-    [
-        "app.tasks",
-    ]
 )

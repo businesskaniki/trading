@@ -5,6 +5,7 @@ from .position import Position
 from .performance import Performance
 from .risk_snapshot import RiskSnapshot
 from .strategy_run import StrategyRun
+from .strategy_definition import StrategyDefinition
 from .trading_account import TradingAccount
 from .user import User
 from .email_verification import EmailVerification
@@ -12,3 +13,4 @@ from .password_reset import PasswordReset
 from .account_symbol import AccountSymbol
 from .market_candle import MarketCandle
 from .historical_candle import HistoricalCandle
+from .backtest_job import BacktestJob

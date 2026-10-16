@@ -34,8 +34,6 @@ import {
 import { fetchTradingUniverse } from "../../redux/dashboard/symbols/symbolsThunks";
 import { fetchAccounts } from "../../redux/dashboard/accounts/accountsThunks";
 
-import { openTickStream } from "../../api/tickStream";
-
 import "../../css/dashboard.css";
 
 const Dashboard = () => {
@@ -115,7 +113,7 @@ const Dashboard = () => {
   // LOCAL STATE
   // --------------------------------------------------
 
-  const [liveTicks, setLiveTicks] = useState({});
+  const [visibleError, setVisibleError] = useState(null);
 
   // --------------------------------------------------
   // INITIAL DASHBOARD LOAD
@@ -182,10 +180,6 @@ const Dashboard = () => {
 
     return () => window.clearInterval(refresh);
   }, [dispatch]);
-
-  // --------------------------------------------------
-  // LIVE TICK STREAMS
-  // --------------------------------------------------
 
   // --------------------------------------------------
   // MANUAL REFRESH
@@ -424,20 +418,8 @@ const Dashboard = () => {
           position.symbol_name ||
           position.symbol;
 
-        const tick = symbol ? liveTicks[symbol] : null;
-
         const currentPrice = Number(
-          position.direction === "SELL"
-            ? tick?.ask ||
-                tick?.last ||
-                position.current_price ||
-                position.price_current ||
-                0
-            : tick?.bid ||
-                tick?.last ||
-                position.current_price ||
-                position.price_current ||
-                0,
+          position.current_price || position.price_current || 0,
         );
 
         const entryPrice = Number(
@@ -451,27 +433,21 @@ const Dashboard = () => {
           position.current_volume || position.volume || position.lots || 0,
         );
 
-        const direction =
-          position.direction === "SELL" || position.type === "SELL" ? -1 : 1;
-
-        const liveProfit =
-          tick && currentPrice && entryPrice
-            ? (currentPrice - entryPrice) * volume * direction
-            : Number(
-                position.floating_profit ||
-                  position.unrealized_pnl ||
-                  position.profit ||
-                  0,
-              );
+        const floatingProfit = Number(
+          position.floating_profit ||
+            position.unrealized_pnl ||
+            position.profit ||
+            0,
+        );
 
         return {
           ...position,
           displaySymbol: symbol || "—",
           liveCurrentPrice: currentPrice,
-          liveFloatingProfit: liveProfit,
+          liveFloatingProfit: floatingProfit,
         };
       }),
-    [positions, symbolById, liveTicks],
+    [positions, symbolById],
   );
 
   // --------------------------------------------------
@@ -575,10 +551,34 @@ const Dashboard = () => {
         : "LIVE");
 
   // --------------------------------------------------
-  // ENGINE ERROR
+  // DASHBOARD ERROR
   // --------------------------------------------------
 
   const dashboardError = error || engine.error;
+
+  // --------------------------------------------------
+  // AUTO-DISMISS ERRORS
+  // --------------------------------------------------
+  //
+  // Show the current error (dashboard or engine) and hide
+  // it after 5 seconds. If a new error arrives in the
+  // meantime, the timer restarts from zero.
+  // --------------------------------------------------
+
+  useEffect(() => {
+    if (!dashboardError) {
+      setVisibleError(null);
+      return;
+    }
+
+    setVisibleError(dashboardError);
+
+    const timeoutId = window.setTimeout(() => {
+      setVisibleError(null);
+    }, 5000);
+
+    return () => window.clearTimeout(timeoutId);
+  }, [dashboardError]);
 
   // --------------------------------------------------
   // RENDER
@@ -792,10 +792,10 @@ const Dashboard = () => {
       )}
 
       {/* ERROR */}
-      {dashboardError && (
+      {visibleError && (
         <div className="dashboard-error">
-          {typeof dashboardError === "string"
-            ? dashboardError
+          {typeof visibleError === "string"
+            ? visibleError
             : "Unable to load some dashboard data."}
         </div>
       )}

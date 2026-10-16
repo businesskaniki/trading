@@ -216,3 +216,8 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+
+mt5_bridge/data/mt5_recovery_target.json
+mt5_bridge/data/mt5_recovery_target.json.tmp

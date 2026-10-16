@@ -20,6 +20,7 @@ from app.api.routes import (
     engine,
     backtests,
     strategies,
+    internal_bridge,
 )
 
 api_router = APIRouter()
@@ -43,3 +44,4 @@ api_router.include_router(historical_data.router)
 api_router.include_router(strategies.router)
 api_router.include_router(engine.router)
 api_router.include_router(backtests.router)
+api_router.include_router(internal_bridge.router)

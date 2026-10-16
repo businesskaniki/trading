@@ -82,7 +82,9 @@ const getBacktestStatus = (backtest) => {
 };
 
 const isRunningStatus = (status) => {
-  return ["RUNNING", "STARTING", "IN_PROGRESS"].includes(status);
+  return ["QUEUED", "PREPARING", "RUNNING", "STARTING", "IN_PROGRESS"].includes(
+    String(status || "").toUpperCase(),
+  );
 };
 
 const isCompletedStatus = (status) => {

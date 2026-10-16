@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import logging
@@ -8,12 +9,14 @@ from app.broker.broker_manager import BrokerManager
 from app.broker.factory import get_broker_adapter
 from app.database.session import SessionLocal
 from app.events.bus import event_bus
+from app.market_data.candle_builder import LiveCandleBuilder
 from app.market_data.consumer import MarketDataConsumer
 from app.market_data.historical_synchronizer import (
     HistoricalDataSynchronizer,
 )
 from app.market_data.live import LiveTickHub
 from app.market_data.service import MarketDataService
+from app.market_data.strategy_view import StrategyMarketDataView
 from app.market_data.subscription_manager import (
     MarketDataSubscriptionManager,
 )
@@ -32,6 +35,12 @@ from .engine import ExecutionEngine
 from .live_context_factory import LiveContextFactory
 from .live_context_provider import LiveRiskContextProvider
 from .live_pipeline import LivePipeline
+from .order_reconciliation_service import (
+    OrderReconciliationService,
+)
+from .position_reconciliation_service import (
+    PositionReconciliationService,
+)
 from .runtime_account import (
     RuntimeAccount,
     RuntimeAccountResolver,
@@ -46,20 +55,20 @@ class ExecutionRuntime:
     """
     Complete runtime composition for one AQE trading account.
 
-    This object contains the account-specific infrastructure required
-    to run the live/paper trading pipeline.
-
     Construction performs dependency composition only.
 
     It does NOT:
 
         - connect to MT5;
         - start Redis consumers;
+        - start live candle processing;
         - start strategies;
         - start the signal pipeline;
         - evaluate risk;
         - execute orders;
-        - start market-data polling.
+        - start market-data polling;
+        - start order reconciliation;
+        - start position reconciliation.
 
     Runtime lifecycle is controlled by AQEEngine.
     """
@@ -67,7 +76,6 @@ class ExecutionRuntime:
     account: RuntimeAccount
 
     broker_manager: BrokerManager
-
     bridge_service: MT5BridgeService
 
     market_data_service: MarketDataService
@@ -75,6 +83,8 @@ class ExecutionRuntime:
     market_data_subscription_manager: MarketDataSubscriptionManager
     historical_data_synchronizer: HistoricalDataSynchronizer
     live_tick_hub: LiveTickHub
+    live_candle_builder: LiveCandleBuilder
+    strategy_market_data: StrategyMarketDataView
 
     strategy_manager: StrategyManager
 
@@ -82,6 +92,9 @@ class ExecutionRuntime:
     risk_context_provider: LiveRiskContextProvider
 
     execution_engine: ExecutionEngine
+    order_reconciliation_service: OrderReconciliationService
+    position_reconciliation_service: PositionReconciliationService
+
     signal_pipeline: SignalRiskExecutionPipeline
     live_pipeline: LivePipeline
 
@@ -90,23 +103,13 @@ class ExecutionRuntimeFactory:
     """
     Compose all AQE runtime services for a selected trading account.
 
-    The factory is responsible only for dependency composition.
+    The factory is responsible for dependency composition only.
 
-    It does NOT:
+    AQEEngine owns runtime startup and shutdown.
 
-        - connect to MT5;
-        - start Redis consumers;
-        - start strategies;
-        - evaluate risk;
-        - execute orders;
-        - publish runtime events.
-
-    Those operations belong to the runtime lifecycle managed by
-    AQEEngine.
-
-    Account credentials are resolved during ``create()`` and retained
-    only within the resulting RuntimeAccount used by the runtime
-    connection layer.
+    Account credentials are resolved during create() and retained
+    only within the resulting RuntimeAccount and broker connection
+    layer.
     """
 
     def __init__(
@@ -146,9 +149,8 @@ class ExecutionRuntimeFactory:
         # --------------------------------------------------------------
         # 2. Create the AQE-side MT5 bridge client.
         #
-        # Credentials are intentionally NOT stored in the bridge
-        # service. They are supplied to the broker connection layer
-        # when the runtime is started.
+        # Broker credentials are resolved through the account runtime,
+        # not hard-coded into the bridge service.
         # --------------------------------------------------------------
 
         bridge_service = MT5BridgeService(
@@ -180,13 +182,23 @@ class ExecutionRuntimeFactory:
         # --------------------------------------------------------------
         # 5. Redis market-data consumer.
         #
-        # Construction does not start the consumer.
+        # The active account ID allows the consumer to translate
+        # broker-facing symbols into canonical AQE symbols using
+        # enabled AccountSymbol mappings.
+        #
+        # Construction does not start Redis consumption.
         # --------------------------------------------------------------
 
-        market_data_consumer = MarketDataConsumer()
+        market_data_consumer = MarketDataConsumer(
+            account_id=runtime_account.account_id,
+            session_factory=self.session_factory,
+        )
 
         # --------------------------------------------------------------
-        # 6. Account-specific market-data subscription manager.
+        # 6. Account-symbol subscription manager.
+        #
+        # PostgreSQL AccountSymbol.enabled remains the source of truth
+        # for bridge subscription reconciliation.
         # --------------------------------------------------------------
 
         market_data_subscription_manager = MarketDataSubscriptionManager(
@@ -195,7 +207,7 @@ class ExecutionRuntimeFactory:
         )
 
         # --------------------------------------------------------------
-        # 7. Historical data synchronization.
+        # 7. Historical-data synchronization.
         #
         # Construction does not start synchronization.
         # --------------------------------------------------------------
@@ -204,43 +216,80 @@ class ExecutionRuntimeFactory:
 
         # --------------------------------------------------------------
         # 8. Live tick hub.
+        #
+        # The hub distributes incoming tick events to its local
+        # subscribers. It does not generate candle events.
         # --------------------------------------------------------------
 
         live_tick_hub = LiveTickHub()
 
         # --------------------------------------------------------------
-        # 9. Strategy runtime.
+        # 9. Live candle builder.
         #
-        # Strategies remain independent from broker, risk, and
-        # execution implementation details.
+        # Converts MarketTickEvent instances into completed
+        # MarketCandleEvent instances.
+        #
+        # Construction does not start candle processing.
         # --------------------------------------------------------------
 
-        strategy_manager = StrategyManager()
+        live_candle_builder = LiveCandleBuilder(
+            bus=event_bus,
+        )
 
         # --------------------------------------------------------------
-        # 10. Risk engine.
+        # 10. Strategy market-data view.
+        #
+        # Gives strategies read-only access to:
+        #
+        #   - the latest cached live ticks;
+        #   - persisted historical candles;
+        #   - candles queried by symbol and timeframe.
+        #
+        # Its event subscription is established by start(), which
+        # AQEEngine must call before starting the market-data consumer.
+        # --------------------------------------------------------------
+
+        strategy_market_data = StrategyMarketDataView(
+            session_factory=self.session_factory,
+            bus=event_bus,
+        )
+
+        # --------------------------------------------------------------
+        # 11. Strategy runtime.
+        #
+        # Strategies analyse market data and emit TradingSignal objects.
+        # They do not access broker execution directly.
+        #
+        # Injecting the shared market-data view enables strategies such
+        # as EMATrendStrategy to warm up from historical candles and
+        # query live market state through StrategyContext.
+        # --------------------------------------------------------------
+
+        strategy_manager = StrategyManager(
+            market_data=strategy_market_data,
+        )
+
+        # --------------------------------------------------------------
+        # 12. Risk engine.
         # --------------------------------------------------------------
 
         risk_engine = RiskEngine()
 
         # --------------------------------------------------------------
-        # 11. Live risk-context provider.
+        # 13. Live risk-context provider.
         #
-        # StrategySignalEvent intentionally does not contain account_id.
+        # StrategySignalEvent intentionally remains account-agnostic.
+        # StrategyManager.account_router owns strategy-to-account
+        # resolution.
         #
-        # StrategyManager.account_router is therefore the source of
-        # truth for strategy → account ownership.
-        #
-        # Because this ExecutionRuntime is account-scoped, the resolved
-        # account must match this runtime's account.
+        # This runtime is account-scoped, so a signal assigned to a
+        # different account must be rejected before risk evaluation.
         # --------------------------------------------------------------
 
         async def resolve_account_id(
             signal: TradingSignal,
         ) -> UUID:
-            """
-            Resolve the trading account assigned to a strategy signal.
-            """
+            """Resolve and validate the account assigned to a signal."""
 
             resolved_account_id = strategy_manager.account_router.resolve(
                 signal,
@@ -252,7 +301,7 @@ class ExecutionRuntimeFactory:
                     "trading account. "
                     f"strategy_id={signal.strategy_id!r}, "
                     f"resolved_account_id={resolved_account_id}, "
-                    f"runtime_account_id={runtime_account.account_id}",
+                    f"runtime_account_id={runtime_account.account_id}"
                 )
 
             return resolved_account_id
@@ -266,18 +315,22 @@ class ExecutionRuntimeFactory:
         risk_context_provider = live_context_factory.create()
 
         # --------------------------------------------------------------
-        # 12. Execution engine.
+        # 14. Execution engine.
         #
-        # Approved RiskDecision objects enter here.
+        # Approved RiskDecision objects enter the execution engine:
         #
         #     RiskDecision
-        #          ↓
+        #          |
+        #          v
         #     ExecutionOrder
-        #          ↓
-        #     account-symbol resolution
-        #          ↓
-        #     persistent Order
-        #          ↓
+        #          |
+        #          v
+        #     Account-symbol resolution
+        #          |
+        #          v
+        #     Persistent Order
+        #          |
+        #          v
         #     BrokerManager
         # --------------------------------------------------------------
 
@@ -288,19 +341,52 @@ class ExecutionRuntimeFactory:
         )
 
         # --------------------------------------------------------------
-        # 13. Strategy signal → Risk → Execution pipeline.
+        # 15. Order reconciliation service.
+        #
+        # Recovers orders whose final broker execution outcome may
+        # be unknown. AQEEngine owns its lifecycle.
+        # --------------------------------------------------------------
+
+        order_reconciliation_service = OrderReconciliationService(
+            broker=broker_manager,
+            session_factory=self.session_factory,
+        )
+
+        # --------------------------------------------------------------
+        # 16. Position reconciliation service.
+        #
+        # Keeps AQE's persisted position ledger aligned with the
+        # authoritative broker position state.
+        # --------------------------------------------------------------
+
+        position_reconciliation_service = PositionReconciliationService(
+            broker=broker_manager,
+            account_id=runtime_account.account_id,
+            user_id=runtime_account.user_id,
+            session_factory=self.session_factory,
+        )
+
+        # --------------------------------------------------------------
+        # 17. Strategy signal -> Risk -> Execution pipeline.
         #
         # StrategySignalEvent
-        #        ↓
+        #        |
+        #        v
         # RiskContextProvider
-        #        ↓
+        #        |
+        #        v
         # RiskEngine
-        #        ↓
+        #        |
+        #        v
         # RiskDecision
-        #        ↓
+        #        |
+        #        v
         # ExecutionEngine
-        #        ↓
+        #        |
+        #        v
         # BrokerManager
+        #
+        # This is the single live/paper signal execution path.
         # --------------------------------------------------------------
 
         signal_pipeline = SignalRiskExecutionPipeline(
@@ -311,11 +397,9 @@ class ExecutionRuntimeFactory:
         )
 
         # --------------------------------------------------------------
-        # 14. Live pipeline lifecycle wrapper.
+        # 18. Live pipeline lifecycle wrapper.
         #
-        # LivePipeline deliberately contains only the signal pipeline.
-        # There must be exactly one StrategySignalEvent →
-        # RiskEngine → ExecutionEngine path.
+        # LivePipeline owns the signal pipeline lifecycle.
         # --------------------------------------------------------------
 
         live_pipeline = LivePipeline(
@@ -323,7 +407,10 @@ class ExecutionRuntimeFactory:
         )
 
         # --------------------------------------------------------------
-        # 15. Compose the final runtime.
+        # 19. Compose the complete runtime.
+        #
+        # Components are constructed but remain stopped until
+        # AQEEngine explicitly starts them.
         # --------------------------------------------------------------
 
         runtime = ExecutionRuntime(
@@ -332,19 +419,28 @@ class ExecutionRuntimeFactory:
             bridge_service=bridge_service,
             market_data_service=market_data_service,
             market_data_consumer=market_data_consumer,
-            market_data_subscription_manager=(market_data_subscription_manager),
-            historical_data_synchronizer=(historical_data_synchronizer),
+            market_data_subscription_manager=(
+                market_data_subscription_manager
+            ),
+            historical_data_synchronizer=historical_data_synchronizer,
             live_tick_hub=live_tick_hub,
+            live_candle_builder=live_candle_builder,
+            strategy_market_data=strategy_market_data,
             strategy_manager=strategy_manager,
             risk_engine=risk_engine,
             risk_context_provider=risk_context_provider,
             execution_engine=execution_engine,
+            order_reconciliation_service=order_reconciliation_service,
+            position_reconciliation_service=(
+                position_reconciliation_service
+            ),
             signal_pipeline=signal_pipeline,
             live_pipeline=live_pipeline,
         )
 
         logger.info(
-            "AQE execution runtime composed successfully: " "account_id=%s broker=%s",
+            "AQE execution runtime composed successfully: "
+            "account_id=%s broker=%s",
             runtime_account.account_id,
             runtime_account.broker,
         )
@@ -367,9 +463,7 @@ class ExecutionRuntimeFactory:
         """
 
         async with self.session_factory() as session:
-            repository = TradingAccountRepository(
-                session,
-            )
+            repository = TradingAccountRepository(session)
 
             trading_account_service = TradingAccountService(
                 repository,
@@ -379,9 +473,7 @@ class ExecutionRuntimeFactory:
                 trading_account_service,
             )
 
-            return await resolver.resolve(
-                account_id,
-            )
+            return await resolver.resolve(account_id)
 
 
 async def build_execution_runtime(
@@ -390,15 +482,11 @@ async def build_execution_runtime(
     session_factory=SessionLocal,
 ) -> ExecutionRuntime:
     """
-    Convenience function for composing an AQE execution runtime.
-
-    No runtime component is started by this function.
+    Compose an AQE execution runtime without starting its components.
     """
 
     factory = ExecutionRuntimeFactory(
         session_factory=session_factory,
     )
 
-    return await factory.create(
-        account_id,
-    )
+    return await factory.create(account_id)

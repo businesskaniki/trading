@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -9,17 +11,16 @@ from app.schemas.position import PositionCreate, PositionUpdate
 
 class PositionService:
     """
-    Business logic layer for Positions.
+    Business logic for AQE's persisted representation of broker positions.
 
-    This service manages the AQE representation of broker positions.
-    It does not communicate directly with a broker.
+    The service does not communicate directly with a broker.
     """
 
     def __init__(
         self,
         repository: PositionRepository,
         account_repository: TradingAccountRepository | None = None,
-    ):
+    ) -> None:
         self.repository = repository
         self.account_repository = account_repository
 
@@ -34,37 +35,26 @@ class PositionService:
         commit: bool = True,
     ):
         """
-        Create a new AQE Position.
+        Persist an open position.
 
-        A broker position ticket may only correspond to one
-        persisted AQE Position.
-
-        New positions are created as OPEN by the Position model's
-        default status.
+        order_id is optional because a broker may contain a position
+        opened manually or by an external trading system.
         """
 
         existing = await self.repository.get_by_ticket(data.ticket)
 
-        if existing:
+        if existing is not None:
             raise ValueError("Position with this broker ticket already exists")
 
-        # ------------------------------------------------------
-        # Validate order association
-        # ------------------------------------------------------
+        current_volume = (
+            data.volume if data.current_volume is None else data.current_volume
+        )
 
-        if data.order_id is None:
-            raise ValueError("Position must be associated with an order")
+        if current_volume < 0:
+            raise ValueError("current_volume cannot be negative")
 
-        # ------------------------------------------------------
-        # Validate volume relationship
-        # ------------------------------------------------------
-
-        if data.current_volume > data.volume:
+        if current_volume > data.volume:
             raise ValueError("current_volume cannot be greater than volume")
-
-        # ------------------------------------------------------
-        # Validate account ownership when requested
-        # ------------------------------------------------------
 
         if user_id is not None and self.account_repository is not None:
             account = await self.account_repository.get_by_id_and_user(
@@ -75,13 +65,12 @@ class PositionService:
             if account is None:
                 raise ValueError("Trading account not found")
 
-        # ------------------------------------------------------
-        # Persist
-        # ------------------------------------------------------
+        payload = data.model_dump()
+        payload["current_volume"] = current_volume
 
         return await self.repository.create(
             commit=commit,
-            **data.model_dump(),
+            **payload,
         )
 
     # ==========================================================
@@ -93,11 +82,9 @@ class PositionService:
         position_id: UUID,
         user_id: UUID | None = None,
     ):
-        """Get a Position by AQE UUID."""
-
         position = await self.repository.get_by_id(position_id)
 
-        if not position:
+        if position is None:
             raise ValueError("Position not found")
 
         if user_id is not None and position.account.user_id != user_id:
@@ -109,70 +96,39 @@ class PositionService:
         self,
         user_id: UUID | None = None,
     ):
-        """Retrieve all positions."""
-
         positions = await self.repository.get_all()
 
-        if user_id is not None:
-            return [
-                position
-                for position in positions
-                if position.account.user_id == user_id
-            ]
+        if user_id is None:
+            return positions
 
-        return positions
+        return [
+            position for position in positions if position.account.user_id == user_id
+        ]
 
     async def get_open_positions(self):
-        """Retrieve all currently open positions."""
-
         return await self.repository.get_open_positions()
 
-    async def get_account_positions(
-        self,
-        account_id: UUID,
-    ):
-        """Retrieve positions belonging to an account."""
-
+    async def get_account_positions(self, account_id: UUID):
         return await self.repository.get_by_account(account_id)
 
-    async def get_symbol_positions(
-        self,
-        symbol_id: UUID,
-    ):
-        """Retrieve positions belonging to a symbol."""
-
+    async def get_symbol_positions(self, symbol_id: UUID):
         return await self.repository.get_by_symbol(symbol_id)
 
-    async def get_status_positions(
-        self,
-        position_status: PositionStatus,
-    ):
-        """Retrieve positions by status."""
-
+    async def get_status_positions(self, position_status: PositionStatus):
         return await self.repository.get_by_status(position_status)
 
-    async def get_position_by_ticket(
-        self,
-        ticket: int,
-    ):
-        """Retrieve a position by broker position ticket."""
-
+    async def get_position_by_ticket(self, ticket: int):
         position = await self.repository.get_by_ticket(ticket)
 
-        if not position:
+        if position is None:
             raise ValueError("Position not found")
 
         return position
 
-    async def get_position_by_order(
-        self,
-        order_id: UUID,
-    ):
-        """Retrieve a position by AQE order ID."""
-
+    async def get_position_by_order(self, order_id: UUID):
         position = await self.repository.get_by_order(order_id)
 
-        if not position:
+        if position is None:
             raise ValueError("Position not found")
 
         return position
@@ -188,55 +144,32 @@ class PositionService:
         commit: bool = True,
         user_id: UUID | None = None,
     ):
-        """
-        Update an existing position.
-
-        OPEN positions may be updated or transitioned to CLOSED.
-
-        CLOSED positions are immutable and cannot be modified.
-        """
-
         position = await self.get_position(
             position_id,
             user_id=user_id,
         )
 
-        # ------------------------------------------------------
-        # Closed positions are immutable
-        # ------------------------------------------------------
-
         if position.status == PositionStatus.CLOSED:
             raise ValueError("Closed positions cannot be modified")
 
-        update_data = data.model_dump(
-            exclude_unset=True,
-        )
+        update_data = data.model_dump(exclude_unset=True)
 
-        # ------------------------------------------------------
-        # Validate volume relationship
-        # ------------------------------------------------------
-
-        new_volume = update_data.get(
-            "volume",
-            position.volume,
-        )
-
+        new_volume = update_data.get("volume", position.volume)
         new_current_volume = update_data.get(
             "current_volume",
             position.current_volume,
         )
 
+        if new_current_volume is None:
+            new_current_volume = position.current_volume
+
+        if new_current_volume < 0:
+            raise ValueError("current_volume cannot be negative")
+
         if new_current_volume > new_volume:
             raise ValueError("current_volume cannot be greater than volume")
 
-        # ------------------------------------------------------
-        # Validate status
-        # ------------------------------------------------------
-
-        new_status = update_data.get(
-            "status",
-            position.status,
-        )
+        new_status = update_data.get("status", position.status)
 
         if new_status not in {
             PositionStatus.OPEN,
@@ -244,22 +177,13 @@ class PositionService:
         }:
             raise ValueError(f"Invalid position status: {new_status}")
 
-        # ------------------------------------------------------
-        # Closing transition
-        # ------------------------------------------------------
-
         if new_status == PositionStatus.CLOSED:
-            # A closed position must have no remaining exposure.
             update_data["current_volume"] = 0
 
-            if "closed_at" not in update_data:
+            if update_data.get("closed_at") is None:
                 update_data["closed_at"] = datetime.now(timezone.utc)
 
-        # ------------------------------------------------------
-        # OPEN update
-        # ------------------------------------------------------
-
-        if new_status == PositionStatus.OPEN:
+        elif new_status == PositionStatus.OPEN:
             update_data.pop("closed_at", None)
 
         return await self.repository.update(
@@ -279,48 +203,22 @@ class PositionService:
         commit: bool = True,
         user_id: UUID | None = None,
     ):
-        """
-        Explicitly transition a position's status.
-
-        Supported lifecycle:
-
-            OPEN -> CLOSED
-
-        A CLOSED position cannot be reopened.
-        """
-
         position = await self.get_position(
             position_id,
             user_id=user_id,
         )
 
-        current_status = position.status
-
-        # ------------------------------------------------------
-        # Already closed
-        # ------------------------------------------------------
-
-        if current_status == PositionStatus.CLOSED:
+        if position.status == PositionStatus.CLOSED:
             if new_status == PositionStatus.CLOSED:
                 return position
 
             raise ValueError("Closed positions cannot be reopened")
 
-        # ------------------------------------------------------
-        # OPEN -> OPEN
-        # ------------------------------------------------------
-
         if new_status == PositionStatus.OPEN:
-            if current_status != PositionStatus.OPEN:
-                raise ValueError(
-                    "Position cannot be reopened from its " "current state"
-                )
+            if position.status != PositionStatus.OPEN:
+                raise ValueError("Position cannot be reopened from its current state")
 
             return position
-
-        # ------------------------------------------------------
-        # OPEN -> CLOSED
-        # ------------------------------------------------------
 
         if new_status == PositionStatus.CLOSED:
             position.status = PositionStatus.CLOSED
@@ -344,13 +242,7 @@ class PositionService:
         self,
         position_id: UUID,
         user_id: UUID | None = None,
-    ):
-        """
-        Delete a position.
-
-        Open positions cannot be deleted.
-        """
-
+    ) -> None:
         position = await self.get_position(
             position_id,
             user_id=user_id,

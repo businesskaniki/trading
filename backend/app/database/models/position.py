@@ -60,9 +60,10 @@ class Position(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
+
     order_id: Mapped[UUID] = mapped_column(
         ForeignKey("orders.id"),
-        nullable=False,
+        nullable=True,
     )
 
     account = relationship(

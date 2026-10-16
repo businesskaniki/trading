@@ -15,6 +15,7 @@ class OrderBroker:
         - Call the MT5 Python API.
         - Return raw MT5 results.
         - Expose basic MT5 order/account error information.
+        - Expose symbol information required by the order service.
 
     Responsibilities that do NOT belong here:
         - AQE business rules.
@@ -28,18 +29,19 @@ class OrderBroker:
     """
 
     @staticmethod
-    def send(request: dict[str, Any]) -> Any:
+    def send(
+        request: dict[str, Any],
+    ) -> Any:
         """
         Submit an MT5 trade request.
-
-        The request must already contain the appropriate MT5
-        action, order type, symbol, volume, and other parameters.
         """
 
         return mt5.order_send(request)
 
     @staticmethod
-    def check(request: dict[str, Any]) -> Any:
+    def check(
+        request: dict[str, Any],
+    ) -> Any:
         """
         Validate an MT5 trade request without submitting it.
         """
@@ -55,12 +57,41 @@ class OrderBroker:
         return mt5.orders_get()
 
     @staticmethod
-    def order(ticket: int) -> Any:
+    def order(
+        ticket: int,
+    ) -> Any:
         """
         Retrieve an active/pending MT5 order by broker order ticket.
         """
 
         return mt5.orders_get(ticket=ticket)
+
+    @staticmethod
+    def symbol_info(
+        symbol: str,
+    ) -> Any:
+        """
+        Retrieve MT5 symbol metadata.
+        """
+
+        return mt5.symbol_info(symbol)
+
+    @staticmethod
+    def symbol_select(
+        symbol: str,
+        select: bool = True,
+    ) -> bool:
+        """
+        Enable or disable a symbol in the MT5 terminal's
+        Market Watch.
+        """
+
+        return bool(
+            mt5.symbol_select(
+                symbol,
+                select,
+            )
+        )
 
     @staticmethod
     def last_error() -> Any:
@@ -85,10 +116,15 @@ class OrderBroker:
         """
         Submit a pending-order request to MT5.
 
-        This method only constructs the MT5 request and submits it.
-        Interpretation of the returned retcode is handled by
-        OrderService.
+        Pending orders use ORDER_FILLING_RETURN according to
+        the MT5 execution model.
         """
+
+        order_filling_return = getattr(
+            mt5,
+            "ORDER_FILLING_RETURN",
+            2,
+        )
 
         request: dict[str, Any] = {
             "action": mt5.TRADE_ACTION_PENDING,
@@ -99,6 +135,7 @@ class OrderBroker:
             "deviation": deviation,
             "magic": magic,
             "comment": str(comment)[:31],
+            "type_filling": order_filling_return,
         }
 
         if sl is not None:

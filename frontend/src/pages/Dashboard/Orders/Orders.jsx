@@ -16,7 +16,6 @@ import OrderForm from "./OrderForm";
 import ConfirmModal from "../../../components/common/ConfirmModal";
 
 import { fetchAccounts } from "../../../redux/dashboard/accounts/accountsThunks";
-
 import { fetchAccountSymbols } from "../../../redux/dashboard/symbols/symbolsThunks";
 
 import { clearOrdersError } from "../../../redux/dashboard/orders/ordersSlice";
@@ -48,11 +47,35 @@ const Orders = () => {
   );
 
   /*
-   * Account-specific symbols are loaded based on the accounts
-   * represented in the order registry.
+   * Flatten all account-specific symbol collections for OrderForm.
    *
-   * We keep track of the account IDs that currently exist
-   * in the order list and request their symbol universes.
+   * OrderForm can use the account-specific fields to determine which
+   * symbols belong to the selected account.
+   */
+  const symbols = useMemo(() => {
+    const flattened = [];
+
+    Object.entries(symbolsByAccount).forEach(([accountId, accountSymbols]) => {
+      if (!Array.isArray(accountSymbols)) {
+        return;
+      }
+
+      accountSymbols.forEach((symbol) => {
+        flattened.push({
+          ...symbol,
+          account_id: symbol.account_id || accountId,
+        });
+      });
+    });
+
+    return flattened;
+  }, [symbolsByAccount]);
+
+  /*
+   * Accounts represented by the current order registry.
+   *
+   * Retained for refresh/search behavior and compatibility with
+   * account-specific order loading.
    */
   const orderAccountIds = useMemo(() => {
     return [
@@ -75,20 +98,24 @@ const Orders = () => {
   }, [dispatch]);
 
   /*
-   * Load account-specific symbols for the accounts represented
-   * by the order registry.
+   * Load symbols for every available trading account.
    *
-   * This replaces the old global fetchSymbols().
+   * This is required for the Create Order form because there may be
+   * no existing orders yet, in which case orderAccountIds is empty.
    */
   useEffect(() => {
-    if (!orderAccountIds.length) {
+    if (!accounts.length) {
       return;
     }
 
-    orderAccountIds.forEach((accountId) => {
-      dispatch(fetchAccountSymbols(accountId));
+    accounts.forEach((account) => {
+      if (!account?.id) {
+        return;
+      }
+
+      dispatch(fetchAccountSymbols(account.id));
     });
-  }, [dispatch, orderAccountIds]);
+  }, [dispatch, accounts]);
 
   /*
    * Find an account by ID.
@@ -104,7 +131,7 @@ const Orders = () => {
   };
 
   /*
-   * Find a symbol by canonical symbol ID.
+   * Find a symbol by canonical symbol ID and account.
    */
   const symbolName = (id, accountId) => {
     const accountSymbol = (symbolsByAccount[String(accountId)] || []).find(
@@ -165,10 +192,6 @@ const Orders = () => {
 
   /*
    * Create / update order.
-   *
-   * account_id and symbol_id are only removed when updating
-   * because changing the account or instrument of an existing
-   * order should not be allowed through this form.
    */
   const handleSubmit = async (data) => {
     let result;
@@ -216,6 +239,18 @@ const Orders = () => {
 
   /*
    * Execute an order.
+   *
+   * This is the controlled manual execution test path:
+   *
+   * Orders page
+   *     ↓
+   * POST /orders/{id}/execute
+   *     ↓
+   * broker execution
+   *     ↓
+   * MT5 Bridge
+   *     ↓
+   * mt5.order_send()
    */
   const handleExecute = (order) => {
     setConfirmation({
@@ -258,6 +293,7 @@ const Orders = () => {
     }
 
     await confirmation.action();
+
     setConfirmation(null);
   };
 
@@ -278,17 +314,27 @@ const Orders = () => {
   };
 
   /*
-   * Refresh orders.
+   * Refresh orders and account symbols.
    */
   const refreshOrders = () => {
     dispatch(fetchOrders());
 
+    accounts.forEach((account) => {
+      if (!account?.id) {
+        return;
+      }
+
+      dispatch(fetchAccountSymbols(account.id));
+    });
+
     /*
-     * Also refresh account symbols for all accounts currently
-     * represented in the order registry.
+     * Also refresh account symbols for accounts currently represented
+     * in the order registry, preserving the previous behavior.
      */
     orderAccountIds.forEach((accountId) => {
-      dispatch(fetchAccountSymbols(accountId));
+      if (!accounts.some((account) => account.id === accountId)) {
+        dispatch(fetchAccountSymbols(accountId));
+      }
     });
   };
 

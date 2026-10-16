@@ -33,15 +33,19 @@ const backtestingAPI = {
     if (!end) {
       throw new Error("A backtest end date is required.");
     }
-
-    const response = await api.post("/backtests", {
-      account_id: accountId,
-      initial_balance: initialBalance,
-      start,
-      end,
-      close_positions_at_end: closePositionsAtEnd,
-    });
-
+    const response = await api.post(
+      "/backtests",
+      {
+        account_id: accountId,
+        initial_balance: initialBalance,
+        start,
+        end,
+        close_positions_at_end: closePositionsAtEnd,
+      },
+      {
+        timeout: 300000,
+      },
+    );
     return response.data;
   },
 

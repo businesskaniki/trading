@@ -11,15 +11,25 @@ const errorMessage = (error, fallback) => {
 export const fetchRiskProfile = createAsyncThunk(
   "risk/fetchProfile",
   async (accountId, thunkAPI) => {
-    try { return await riskAPI.getProfile(accountId); }
-    catch (error) { return thunkAPI.rejectWithValue(errorMessage(error, "Unable to load risk profile.")); }
+    try {
+      return await riskAPI.getProfile(accountId);
+    } catch (error) {
+      return thunkAPI.rejectWithValue(
+        errorMessage(error, "Unable to load risk profile."),
+      );
+    }
   },
 );
 
 export const updateRiskProfile = createAsyncThunk(
   "risk/updateProfile",
   async ({ accountId, data }, thunkAPI) => {
-    try { return await riskAPI.updateProfile(accountId, data); }
-    catch (error) { return thunkAPI.rejectWithValue(errorMessage(error, "Unable to save risk profile.")); }
+    try {
+      return await riskAPI.updateProfile(accountId, data);
+    } catch (error) {
+      return thunkAPI.rejectWithValue(
+        errorMessage(error, "Unable to save risk profile."),
+      );
+    }
   },
 );

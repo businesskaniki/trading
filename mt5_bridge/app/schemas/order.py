@@ -1,4 +1,5 @@
 from __future__ import annotations
+from enum import Enum
 
 from typing import Optional
 
@@ -108,46 +109,52 @@ class OrderRequest(BaseModel):
 
         return self
 
-
 class OrderResponse(BaseModel):
     """
-    Normalized MT5 order submission response.
+    Normalized MT5 order submission result.
 
-    MT5 distinguishes between:
-
-        order_id
-            The MT5 order ticket.
-
-        deal_id
-            The executed deal/transaction identifier.
-
-        position_id
-            The resulting position identifier when applicable.
-
-    These identifiers remain separate because they represent
-    different MT5 objects and have different lifecycles.
+    The outcome identifies what the bridge knows about the request.
+    It does not substitute for ongoing broker reconciliation.
     """
 
     model_config = ConfigDict(extra="ignore")
 
-    order_id: Optional[int] = None
-
-    deal_id: Optional[int] = None
-
-    position_id: Optional[int] = None
+    outcome: OrderOutcome
 
     symbol: str
-
-    volume: float
-
-    price_open: float
-
-    sl: Optional[float] = None
-
-    tp: Optional[float] = None
-
     order_type: int
 
-    state: int
+    requested_volume: float = Field(..., gt=0)
+    executed_volume: Optional[float] = Field(default=None, ge=0)
 
-    comment: str
+    requested_price: Optional[float] = Field(default=None, gt=0)
+    execution_price: Optional[float] = Field(default=None, gt=0)
+
+    order_id: Optional[int] = None
+    deal_id: Optional[int] = None
+    position_id: Optional[int] = None
+
+    retcode: Optional[int] = None
+    request_id: Optional[int] = None
+    retcode_external: Optional[int] = None
+
+    sl: Optional[float] = None
+    tp: Optional[float] = None
+
+    comment: str = ""
+
+    # Temporary backwards-compatibility fields.
+    # New AQE code must use executed_volume, execution_price and retcode.
+    volume: Optional[float] = None
+    price_open: Optional[float] = None
+    state: Optional[int] = None
+
+class OrderOutcome(str, Enum):
+    """Outcome of an MT5 order submission attempt."""
+
+    NOT_SUBMITTED = "NOT_SUBMITTED"
+    PLACED = "PLACED"
+    FILLED = "FILLED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    REJECTED = "REJECTED"
+    UNKNOWN = "UNKNOWN"

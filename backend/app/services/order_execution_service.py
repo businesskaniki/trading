@@ -1,15 +1,15 @@
+
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
-from typing import Any
+from uuid import UUID
 
-from app.broker.exceptions import (
-    BrokerConnectionError,
-    BrokerDataError,
-    BrokerOrderError,
-    BrokerPositionError,
-)
+from app.core.constants import OrderStatus
 from app.database.models.order import Order
+from app.repositories.account_symbol_repository import (
+    AccountSymbolRepository,
+)
 from app.repositories.order_repository import OrderRepository
 from app.schemas.execution import (
     ExecutionOrder,
@@ -18,32 +18,43 @@ from app.schemas.execution import (
     OrderSide,
     OrderType,
 )
-from app.schemas.order import OrderStatus
 from app.services.execution_service import ExecutionService
+
+logger = logging.getLogger(__name__)
 
 
 class OrderExecutionService:
     """
-    Orchestrates AQE order lifecycle and broker execution.
+    Application service orchestrating AQE order submission.
 
     Responsibilities:
-        1. Load and lock the AQE order.
-        2. Validate that the order can be executed.
-        3. Resolve the broker symbol.
-        4. Convert the AQE order into an ExecutionOrder.
-        5. Submit the order through ExecutionService.
-        6. Persist broker identifiers and execution state.
+        1. Load and lock a CREATED AQE order.
+        2. Validate account ownership and order state.
+        3. Resolve and persist the broker-native symbol.
+        4. Build a broker-independent ExecutionOrder.
+        5. Commit SUBMITTED before crossing the broker boundary.
+        6. Interpret broker outcomes without inventing fills.
+        7. Persist broker identifiers and confirmed execution data.
 
-    This service does not communicate with MT5 directly.
+    Important invariants:
+        - Only CREATED orders can enter normal submission.
+        - SUBMITTED is durable before the external broker request.
+        - An exception after submission begins does not prove rejection.
+        - UNKNOWN remains SUBMITTED for reconciliation.
+        - NOT_SUBMITTED can return the order to CREATED.
+        - A pending-order acceptance is not a fill.
+        - Execution volume and price must be broker-confirmed.
     """
 
     def __init__(
         self,
         order_repository: OrderRepository,
         execution_service: ExecutionService,
+        account_symbol_repository: AccountSymbolRepository,
     ) -> None:
         self.order_repository = order_repository
         self.execution_service = execution_service
+        self.account_symbol_repository = account_symbol_repository
 
     # ==========================================================
     # PUBLIC API
@@ -51,15 +62,18 @@ class OrderExecutionService:
 
     async def execute_order(
         self,
-        order_id: int,
+        order_id: UUID,
         user_id,
     ) -> Order:
         """
-        Execute an existing AQE order.
+        Submit an existing CREATED order.
 
-        The order must belong to the authenticated user and must
-        still be executable.
+        The submission state is committed before invoking the broker.
+        If the process subsequently fails, reconciliation can find the
+        durable SUBMITTED record.
         """
+
+        db = self.order_repository.db
 
         order = await self.order_repository.get_by_id_for_update(
             order_id,
@@ -73,57 +87,114 @@ class OrderExecutionService:
 
         if order.account.user_id != user_id:
             raise PermissionError(
-                "You do not have permission to execute this order.",
+                "You do not have permission to execute this order."
             )
 
         self._validate_order_state(order)
-        self._validate_order_symbol(order)
 
-        execution_order = self._build_execution_order(order)
+        broker_symbol = await self._resolve_broker_symbol(
+            order,
+        )
 
-        # Mark the AQE order as submitted before sending it to
-        # the broker. The database transaction remains responsible
-        # for committing the complete lifecycle transition.
+        execution_order = self._build_execution_order(
+            order,
+            broker_symbol,
+        )
+
+        # Persist the exact instrument sent to the broker.
+        order.broker_symbol = broker_symbol
+
+        # This is a recovery marker, not proof that the broker
+        # accepted or filled the order.
         order.status = OrderStatus.SUBMITTED
 
-        await self.order_repository.db.flush()
+        # CRITICAL: commit before making the external broker call.
+        # If this commit fails, execution must not be attempted.
+        await db.commit()
+
+        # Refresh the scalar columns after commit before continuing.
+        await db.refresh(order)
+
+        logger.info(
+            "Submitting AQE order to broker. "
+            "order_id=%s account_id=%s symbol=%s side=%s type=%s "
+            "volume=%s",
+            order.id,
+            order.account_id,
+            broker_symbol,
+            order.side.value,
+            order.order_type.value,
+            order.volume,
+        )
 
         try:
             result = await self.execution_service.execute_order(
                 execution_order,
             )
 
-        except (
-            BrokerConnectionError,
-            BrokerDataError,
-            BrokerOrderError,
-            BrokerPositionError,
-        ) as exc:
-            order.status = OrderStatus.REJECTED
-            self._append_execution_message(
-                order,
-                str(exc),
-            )
-
-            await self.order_repository.db.flush()
-            return order
-
         except Exception as exc:
-            order.status = OrderStatus.REJECTED
-            self._append_execution_message(
-                order,
-                f"Execution failed: {exc}",
+            # An exception here does not establish that the broker
+            # failed to execute. Keep the durable recovery marker.
+            #
+            # Broker adapters should return NOT_SUBMITTED for failures
+            # they can prove occurred before broker submission.
+            logger.exception(
+                "Order submission raised an exception. "
+                "Keeping order recoverable. order_id=%s",
+                order.id,
             )
 
-            await self.order_repository.db.flush()
-            return order
+            self._append_execution_message(
+                order,
+                (
+                    "Submission outcome is unresolved; order remains "
+                    f"SUBMITTED for reconciliation: {exc}"
+                ),
+            )
+
+            await db.commit()
+
+            return await self._reload_order(order.id)
 
         self._apply_execution_result(
             order,
             result,
         )
 
-        await self.order_repository.db.flush()
+        # If this commit fails after broker submission, the previously
+        # committed SUBMITTED state remains available for recovery.
+        await db.commit()
+
+        logger.info(
+            "AQE execution result persisted. "
+            "order_id=%s status=%s broker_order_id=%s "
+            "broker_deal_id=%s executed_volume=%s",
+            order.id,
+            order.status.value,
+            order.broker_order_id,
+            order.broker_deal_id,
+            order.executed_volume,
+        )
+
+        return await self._reload_order(order.id)
+
+    async def _reload_order(
+        self,
+        order_id: UUID,
+    ) -> Order:
+        """
+        Reload the order with its repository-defined relationships
+        so API serialization does not rely on implicit async loading.
+        """
+
+        order = await self.order_repository.get_by_id(
+            order_id,
+        )
+
+        if order is None:
+            raise RuntimeError(
+                f"Order {order_id} disappeared after execution."
+            )
 
         return order
 
@@ -136,109 +207,117 @@ class OrderExecutionService:
         order: Order,
     ) -> None:
         """
-        Ensure the order has not already reached a terminal state.
+        Restrict initial submission to CREATED orders.
+
+        Uncertain submissions and partial fills must be handled by
+        recovery/reconciliation, never by resubmitting this order.
         """
 
-        if order.status in {
-            OrderStatus.FILLED,
-            OrderStatus.CANCELLED,
-            OrderStatus.REJECTED,
-            OrderStatus.EXPIRED,
-        }:
+        if order.status != OrderStatus.CREATED:
             raise ValueError(
-                f"Order is already in terminal state " f"{order.status.value}.",
+                "Only CREATED orders may be submitted. "
+                f"Current order status is {order.status.value}."
             )
 
-        if order.status == OrderStatus.PENDING and order.broker_order_id is not None:
-            raise ValueError(
-                "Pending order has already been submitted " "to the broker.",
-            )
+    # ==========================================================
+    # BROKER SYMBOL RESOLUTION
+    # ==========================================================
 
-    @staticmethod
-    def _validate_order_symbol(
+    async def _resolve_broker_symbol(
+        self,
         order: Order,
-    ) -> None:
+    ) -> str:
         """
-        Ensure the AQE symbol has a broker symbol available.
+        Resolve the account-specific broker-native instrument.
         """
 
-        if order.symbol is None:
+        if order.account_id is None:
             raise ValueError(
-                "Order symbol is unavailable.",
+                "Order trading account is unavailable."
             )
 
-        broker_symbol = getattr(
-            order.symbol,
-            "broker_symbol",
-            None,
+        if order.symbol_id is None:
+            raise ValueError(
+                "Order symbol is unavailable."
+            )
+
+        account_symbol = (
+            await self.account_symbol_repository
+            .get_by_account_and_symbol(
+                account_id=order.account_id,
+                symbol_id=order.symbol_id,
+            )
+        )
+
+        if account_symbol is None:
+            raise ValueError(
+                "Symbol is not configured for the selected account."
+            )
+
+        broker_symbol = (
+            account_symbol.broker_symbol.strip()
+            if account_symbol.broker_symbol
+            else ""
         )
 
         if not broker_symbol:
-            broker_symbol = getattr(
-                order.symbol,
-                "symbol",
-                None,
+            raise ValueError(
+                "The account symbol has no broker-native symbol."
             )
 
-        if not broker_symbol:
-            raise ValueError(
-                "Order symbol does not have a broker symbol.",
-            )
+        return broker_symbol
 
     # ==========================================================
     # EXECUTION ORDER
     # ==========================================================
 
+    @staticmethod
     def _build_execution_order(
-        self,
         order: Order,
+        broker_symbol: str,
     ) -> ExecutionOrder:
         """
-        Convert an AQE Order model into the broker-independent
-        ExecutionOrder contract.
+        Convert the persisted order into a broker-independent request.
         """
 
-        if order.symbol is None:
+        if order.account_id is None:
             raise ValueError(
-                "Order symbol is unavailable.",
+                "Order trading account is unavailable."
             )
 
-        broker_symbol = getattr(
-            order.symbol,
-            "broker_symbol",
-            None,
-        )
-
-        if not broker_symbol:
-            broker_symbol = getattr(
-                order.symbol,
-                "symbol",
-                None,
+        if order.symbol_id is None:
+            raise ValueError(
+                "Order symbol is unavailable."
             )
+
+        broker_symbol = broker_symbol.strip()
 
         if not broker_symbol:
             raise ValueError(
-                "Order symbol does not have a broker symbol.",
+                "Broker symbol cannot be empty."
             )
+
+        order_type = OrderType(order.order_type.value)
+        side = OrderSide(order.side.value)
 
         price: Decimal | None = None
 
-        if order.order_type in {
+        if order_type in {
             OrderType.LIMIT,
             OrderType.STOP,
         }:
             price = order.requested_price
 
-            if price is None:
+            if price is None or price <= 0:
                 raise ValueError(
-                    "Pending orders require a requested price.",
+                    "Pending orders require a positive requested price."
                 )
 
         return ExecutionOrder(
             symbol=broker_symbol,
             account_id=order.account_id,
-            side=OrderSide(order.side),
-            order_type=OrderType(order.order_type),
+            side=side,
+            order_type=order_type,
             volume=order.volume,
             price=price,
             stop_loss=order.stop_loss,
@@ -248,7 +327,7 @@ class OrderExecutionService:
 
     # ==========================================================
     # RESULT PROCESSING
-    # ==========================================================
+    # ==============================================================
 
     def _apply_execution_result(
         self,
@@ -256,45 +335,121 @@ class OrderExecutionService:
         result: ExecutionResult,
     ) -> None:
         """
-        Apply broker execution information to the AQE order.
+        Apply a normalized result without assuming unconfirmed fills.
         """
 
+        status = result.status
+
+        # A bridge-confirmed NOT_SUBMITTED outcome indicates the MT5
+        # submission boundary was not crossed, making a later explicit
+        # user retry safe.
+        if status == ExecutionStatus.NOT_SUBMITTED:
+            order.status = OrderStatus.CREATED
+
+            self._append_execution_message(
+                order,
+                result.message or (
+                    "Bridge confirmed that the order was not submitted."
+                ),
+            )
+            return
+
+        # For all outcomes except NOT_SUBMITTED, preserve identifiers
+        # that the broker explicitly returned. They can help recovery
+        # even if execution itself has not been confirmed.
         self._apply_broker_identifiers(
             order,
             result,
         )
 
-        if result.symbol and order.symbol is not None:
-            # Keep the AQE symbol relationship authoritative.
-            # Broker response symbol is informational only.
-            pass
+        if status == ExecutionStatus.REJECTED:
+            order.status = OrderStatus.REJECTED
 
-        if result.price is not None:
-            order.executed_price = result.price
+            self._append_execution_message(
+                order,
+                result.message or "Broker confirmed order rejection.",
+            )
+            return
 
-        if result.status == ExecutionStatus.SUCCESS:
+        if status == ExecutionStatus.PLACED:
+            self._handle_placed_result(
+                order,
+                result,
+            )
+            return
+
+        if status == ExecutionStatus.PARTIALLY_FILLED:
+            self._apply_confirmed_fill(
+                order,
+                result,
+                partial_claimed=True,
+            )
+            return
+
+        if status == ExecutionStatus.SUCCESS:
             self._handle_success(
                 order,
                 result,
             )
             return
 
-        if result.status == ExecutionStatus.REJECTED:
-            order.status = OrderStatus.REJECTED
-            self._append_execution_message(
-                order,
-                result.message,
-            )
-            return
-
-        # ExecutionStatus.FAILED means the broker execution did not
-        # complete successfully. AQE has no FAILED order state, so
-        # the execution attempt is represented as REJECTED.
-        order.status = OrderStatus.REJECTED
+        # UNKNOWN and legacy FAILED are not proof of rejection.
+        # Keep SUBMITTED so the reconciliation service can investigate.
+        order.status = OrderStatus.SUBMITTED
 
         self._append_execution_message(
             order,
-            result.message or "Broker execution failed.",
+            result.message or (
+                "Broker execution outcome is unconfirmed; "
+                "reconciliation is required."
+            ),
+        )
+
+    def _handle_placed_result(
+        self,
+        order: Order,
+        result: ExecutionResult,
+    ) -> None:
+        """
+        Handle broker acceptance without confirmed execution.
+        """
+
+        if order.order_type in {
+            OrderType.LIMIT,
+            OrderType.STOP,
+        }:
+            if result.broker_order_id is None:
+                # No broker ticket means the accepted order cannot be
+                # identified confidently for later operations.
+                order.status = OrderStatus.SUBMITTED
+
+                self._append_execution_message(
+                    order,
+                    (
+                        "Broker reported a pending order was placed "
+                        "without an order ID; reconciliation is required."
+                    ),
+                )
+                return
+
+            order.status = OrderStatus.PENDING
+
+            self._append_execution_message(
+                order,
+                result.message or "Pending order accepted by broker.",
+            )
+            return
+
+        # A market-order PLACED response is not proof of a deal/fill.
+        # Retain SUBMITTED so reconciliation continues to track it.
+        order.status = OrderStatus.SUBMITTED
+
+        self._append_execution_message(
+            order,
+            result.message or (
+                "Broker placed the market order, but execution "
+                "has not yet been confirmed."
+            ),
         )
 
     def _handle_success(
@@ -303,72 +458,122 @@ class OrderExecutionService:
         result: ExecutionResult,
     ) -> None:
         """
-        Apply successful market/pending execution lifecycle.
-        """
+        Handle SUCCESS only when its execution data is sufficient.
 
-        if order.order_type == OrderType.MARKET:
-            self._handle_market_success(
-                order,
-                result,
-            )
-            return
+        For a pending order, a successful placement without deal
+        evidence remains PENDING rather than being marked FILLED.
+        """
 
         if order.order_type in {
             OrderType.LIMIT,
             OrderType.STOP,
         }:
-            self._handle_pending_success(
+            has_execution_evidence = (
+                result.broker_deal_id is not None
+                and result.volume is not None
+                and result.price is not None
+            )
+
+            if not has_execution_evidence:
+                if result.broker_order_id is not None:
+                    order.status = OrderStatus.PENDING
+                else:
+                    order.status = OrderStatus.SUBMITTED
+
+                return
+
+        self._apply_confirmed_fill(
+            order,
+            result,
+            partial_claimed=False,
+        )
+
+    def _apply_confirmed_fill(
+        self,
+        order: Order,
+        result: ExecutionResult,
+        *,
+        partial_claimed: bool,
+    ) -> None:
+        """
+        Persist only a positive, broker-confirmed execution quantity
+        and execution price.
+
+        A contradictory or incomplete result remains SUBMITTED and
+        must be resolved through reconciliation.
+        """
+
+        volume = result.volume
+        price = result.price
+
+        has_broker_identity = (
+            result.broker_deal_id is not None
+            or result.broker_order_id is not None
+        )
+
+        if (
+            not has_broker_identity
+            or volume is None
+            or price is None
+            or volume <= 0
+            or price <= 0
+        ):
+            order.status = OrderStatus.SUBMITTED
+
+            self._append_execution_message(
                 order,
-                result,
+                (
+                    "Execution result lacks sufficient confirmed "
+                    "identity, volume or price; reconciliation is required."
+                ),
             )
             return
 
-        raise ValueError(
-            f"Unsupported order type: {order.order_type}.",
-        )
+        requested_volume = order.volume
 
-    def _handle_market_success(
-        self,
-        order: Order,
-        result: ExecutionResult,
-    ) -> None:
-        """
-        A successful market order must have a broker execution
-        identifier.
+        if requested_volume <= 0 or volume > requested_volume:
+            order.status = OrderStatus.SUBMITTED
 
-        MT5 normally provides a deal and/or order identifier.
-        Position reconciliation may populate broker_position_id
-        later.
-        """
-
-        if result.broker_order_id is None and result.broker_deal_id is None:
-            raise ValueError(
-                "Broker reported successful market execution "
-                "without an order or deal identifier.",
+            self._append_execution_message(
+                order,
+                (
+                    "Broker execution volume conflicts with the "
+                    "requested volume; reconciliation is required."
+                ),
             )
+            return
 
-        order.status = OrderStatus.FILLED
+        if volume < requested_volume:
+            # A broker result labelled SUCCESS can still reveal that
+            # the actual executed quantity was smaller than requested.
+            order.status = OrderStatus.PARTIALLY_FILLED
 
-    def _handle_pending_success(
-        self,
-        order: Order,
-        result: ExecutionResult,
-    ) -> None:
-        """
-        A successful LIMIT/STOP submission becomes PENDING.
+        elif partial_claimed:
+            # A PARTIALLY_FILLED status with a complete volume is
+            # contradictory. Do not guess which representation wins.
+            order.status = OrderStatus.SUBMITTED
 
-        A broker order ID is mandatory because the pending order
-        must subsequently be identifiable for cancellation,
-        modification, and reconciliation.
-        """
-
-        if result.broker_order_id is None:
-            raise ValueError(
-                "Broker reported successful pending order "
-                "without a broker order identifier.",
+            self._append_execution_message(
+                order,
+                (
+                    "Broker partial-fill status conflicts with the "
+                    "reported executed volume; reconciliation is required."
+                ),
             )
+            return
 
-        order.status = OrderStatus.PENDING
+        else:
+            order.status = OrderStatus.FILLED
+
+        # These fields represent confirmed cumulative execution data.
+        order.executed_volume = volume
+        order.executed_price = price
+
+        if result.message:
+            self._append_execution_message(
+                order,
+                result.message,
+            )
 
     # ==========================================================
     # BROKER IDENTIFIERS
@@ -380,10 +585,8 @@ class OrderExecutionService:
         result: ExecutionResult,
     ) -> None:
         """
-        Persist broker-side identifiers independently.
-
-        AQE deliberately keeps order, deal, and position IDs
-        separate because they represent different broker objects.
+        Store identifiers independently and preserve identifiers
+        that were already recorded.
         """
 
         if result.broker_order_id is not None:
@@ -405,8 +608,8 @@ class OrderExecutionService:
         message: str | None,
     ) -> None:
         """
-        Preserve broker/execution information in the order comment
-        without replacing the original user/strategy comment.
+        Append execution diagnostics while respecting the database
+        comment column's 255-character limit.
         """
 
         if not message:
@@ -417,15 +620,19 @@ class OrderExecutionService:
         if not message:
             return
 
+        marker = "[execution] "
+
         existing = (order.comment or "").strip()
+        suffix = f"{marker}{message}"
 
-        execution_message = f"[execution] {message}"
-
-        if not existing:
-            order.comment = execution_message
+        # Avoid repeatedly appending the exact same diagnostic.
+        if suffix in existing:
             return
 
-        if execution_message in existing:
-            return
+        if existing:
+            combined = f"{existing} | {suffix}"
+        else:
+            combined = suffix
 
-        order.comment = f"{existing} | {execution_message}"
+        # Keep the persisted value within String(255).
+        order.comment = combined[:255]

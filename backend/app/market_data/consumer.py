@@ -5,7 +5,13 @@ import logging
 from datetime import datetime, timezone
 from math import isfinite
 from typing import Any
+from uuid import UUID
 
+from sqlalchemy import select
+
+from app.database.models.account_symbol import AccountSymbol
+from app.database.models.symbol import Symbol
+from app.database.session import SessionLocal
 from app.events.bus import event_bus
 from app.events.market import MarketTickEvent
 from app.infrastructure.redis.consumer import RedisStreamConsumer
@@ -17,16 +23,34 @@ logger = logging.getLogger(__name__)
 
 class MarketDataConsumer:
     """
-    Consumes market-data events from the Redis Stream and publishes
-    normalized MarketTickEvent instances to the AQE EventBus.
+    Consume market-data events from Redis and publish normalized
+    MarketTickEvent instances to the AQE EventBus.
 
-    Invalid broker payloads are rejected with detailed diagnostics
-    so the underlying Redis message remains pending and can be
-    inspected/reprocessed rather than silently discarded.
+    When account_id is supplied, broker-facing symbols are resolved
+    against that account's enabled AccountSymbol mappings.
 
-    Tracks last successful/failed event handling (see status()) so
-    the health of the backend's receiving side can be checked on
-    demand, rather than only by watching logs live.
+    Example:
+
+        Incoming broker symbol: XAUUSD.s
+        Canonical AQE symbol:   XAUUSD
+
+    The MarketTick published to the EventBus uses the canonical AQE
+    symbol so StrategyDispatcher can route it to matching strategies.
+
+    Broker-facing symbol identities remain authoritative in
+    AccountSymbol persistence and continue to be resolved by the
+    execution infrastructure.
+
+    Symbol mappings are loaded when the consumer starts. They are not
+    queried from PostgreSQL for every incoming tick.
+
+    When account_id is omitted, symbol mapping is disabled to preserve
+    compatibility with standalone consumers and existing tests.
+
+    Invalid broker payloads raise RedisMessageError so the Redis
+    consumer can apply its configured message failure handling.
+
+    Stream-health statistics are exposed through status().
     """
 
     STREAM_NAME = "aqe:market-data"
@@ -40,10 +64,14 @@ class MarketDataConsumer:
         stream_name: str = STREAM_NAME,
         group_name: str = GROUP_NAME,
         consumer_name: str = CONSUMER_NAME,
+        account_id: UUID | None = None,
+        session_factory=SessionLocal,
     ) -> None:
         self.stream_name = stream_name
         self.group_name = group_name
         self.consumer_name = consumer_name
+        self.account_id = account_id
+        self.session_factory = session_factory
 
         self._consumer = RedisStreamConsumer(
             stream_name=self.stream_name,
@@ -53,16 +81,29 @@ class MarketDataConsumer:
 
         self._started = False
 
-        # Stream-health tracking, exposed via status().
+        # Case-insensitive broker symbol -> canonical AQE symbol.
+        self._symbol_mapping: dict[str, str] = {}
+
+        # Canonical symbols belonging to this account's enabled universe.
+        self._canonical_symbols: set[str] = set()
+
+        # Stream-health tracking.
         self._event_count = 0
+        self._ignored_symbol_count = 0
         self._last_event_at: datetime | None = None
         self._last_event_symbol: str | None = None
         self._last_error: str | None = None
         self._last_error_at: datetime | None = None
 
+    # ==================================================================
+    # LIFECYCLE
+    # ==================================================================
+
     async def start(self) -> None:
         """
-        Start consuming market-data messages from Redis.
+        Load account symbol mappings and start consuming Redis messages.
+
+        Repeated calls while running are safe.
         """
 
         if self._started:
@@ -75,21 +116,27 @@ class MarketDataConsumer:
             )
             return
 
+        # Load mappings before accepting market-data messages.
+        if self.account_id is not None:
+            await self._load_symbol_mapping()
+
         await self._consumer.start(self._handle_message)
 
         self._started = True
 
         logger.info(
-            "Market-data consumer started. " "stream=%s group=%s consumer=%s",
+            "Market-data consumer started. "
+            "stream=%s group=%s consumer=%s account_id=%s "
+            "mapped_symbols=%d",
             self.stream_name,
             self.group_name,
             self.consumer_name,
+            self.account_id,
+            len(self._symbol_mapping),
         )
 
     async def stop(self) -> None:
-        """
-        Stop consuming market-data messages.
-        """
+        """Stop consuming market-data messages."""
 
         if not self._started:
             return
@@ -99,28 +146,168 @@ class MarketDataConsumer:
         self._started = False
 
         logger.info(
-            "Market-data consumer stopped. " "stream=%s group=%s consumer=%s",
+            "Market-data consumer stopped. "
+            "stream=%s group=%s consumer=%s account_id=%s",
             self.stream_name,
             self.group_name,
             self.consumer_name,
+            self.account_id,
         )
+
+    # ==================================================================
+    # SYMBOL MAPPING
+    # ==================================================================
+
+    async def _load_symbol_mapping(self) -> None:
+        """
+        Load enabled broker-symbol mappings for the runtime account.
+
+        Mapping source:
+
+            AccountSymbol.broker_symbol -> Symbol.name
+
+        Broker symbol case is preserved in the database. Case-folding
+        is used only for matching incoming symbol identifiers.
+
+        Conflicting mappings are rejected rather than guessed.
+        """
+
+        if self.account_id is None:
+            self._symbol_mapping.clear()
+            self._canonical_symbols.clear()
+            return
+
+        statement = (
+            select(
+                AccountSymbol.broker_symbol,
+                Symbol.name,
+            )
+            .join(
+                Symbol,
+                Symbol.id == AccountSymbol.symbol_id,
+            )
+            .where(
+                AccountSymbol.account_id == self.account_id,
+                AccountSymbol.enabled.is_(True),
+            )
+        )
+
+        async with self.session_factory() as session:
+            result = await session.execute(statement)
+            rows = result.all()
+
+        mapping: dict[str, str] = {}
+        canonical_symbols: set[str] = set()
+
+        for broker_symbol, canonical_symbol in rows:
+            broker_name = (
+                str(broker_symbol).strip() if broker_symbol is not None else ""
+            )
+
+            canonical_name = (
+                str(canonical_symbol).strip().upper()
+                if canonical_symbol is not None
+                else ""
+            )
+
+            if not broker_name or not canonical_name:
+                logger.warning(
+                    "Ignoring incomplete account-symbol mapping. "
+                    "account_id=%s broker_symbol=%r "
+                    "canonical_symbol=%r",
+                    self.account_id,
+                    broker_symbol,
+                    canonical_symbol,
+                )
+                continue
+
+            broker_key = broker_name.casefold()
+            existing = mapping.get(broker_key)
+
+            if existing is not None and existing != canonical_name:
+                raise ValueError(
+                    "Conflicting broker-to-canonical symbol mappings "
+                    f"for account_id={self.account_id}, "
+                    f"broker_symbol={broker_name!r}: "
+                    f"{existing!r} versus {canonical_name!r}."
+                )
+
+            mapping[broker_key] = canonical_name
+            canonical_symbols.add(canonical_name.casefold())
+
+        self._symbol_mapping = mapping
+        self._canonical_symbols = canonical_symbols
+
+        logger.info(
+            "Loaded market-data symbol mappings. "
+            "account_id=%s mapped_symbols=%d canonical_symbols=%d",
+            self.account_id,
+            len(mapping),
+            len(canonical_symbols),
+        )
+
+        if not mapping:
+            logger.warning(
+                "No enabled symbol mappings found for runtime account %s. "
+                "Unmapped market ticks will be ignored.",
+                self.account_id,
+            )
+
+    def _resolve_symbol(self, incoming_symbol: str) -> str | None:
+        """
+        Resolve an incoming symbol to its canonical AQE identity.
+
+        Broker-symbol mappings take precedence. Canonical symbols are
+        also accepted when they belong to the active account's enabled
+        symbol universe.
+
+        No suffix removal or speculative symbol matching is performed.
+        """
+
+        symbol = incoming_symbol.strip()
+
+        if not symbol:
+            return None
+
+        if self.account_id is None:
+            # Preserve the previous standalone-consumer behavior.
+            return symbol
+
+        canonical = self._symbol_mapping.get(symbol.casefold())
+
+        if canonical is not None:
+            return canonical
+
+        # Some upstream producers may already publish canonical names.
+        # Accept them only when present in this account's known universe.
+        if symbol.casefold() in self._canonical_symbols:
+            return symbol.upper()
+
+        return None
+
+    # ==================================================================
+    # STATUS
+    # ==================================================================
 
     def status(self) -> dict[str, Any]:
         """
-        Return a snapshot of the consumer's current health.
+        Return a snapshot of consumer health.
 
-        running: whether the consumer is subscribed at all.
-        last_event_at staying null (or going stale) while running is
-        true means the bridge isn't sending anything this backend is
-        receiving - check the bridge's own /market-data/subscriptions
-        status next, since that tells you whether the problem is
-        upstream (bridge not publishing) or specifically the
-        bridge -> Redis -> backend hop.
+        event_count counts successfully published MarketTickEvent
+        instances. ignored_unmapped_symbols counts otherwise valid ticks
+        ignored because their symbol is outside the configured account
+        universe.
         """
 
         return {
             "running": self._started,
+            "account_id": (
+                str(self.account_id) if self.account_id is not None else None
+            ),
+            "mapped_symbols": len(self._symbol_mapping),
+            "canonical_symbols": len(self._canonical_symbols),
             "event_count": self._event_count,
+            "ignored_unmapped_symbols": self._ignored_symbol_count,
             "last_event_at": (
                 self._last_event_at.isoformat()
                 if self._last_event_at is not None
@@ -135,6 +322,10 @@ class MarketDataConsumer:
             ),
         }
 
+    # ==================================================================
+    # REDIS MESSAGE HANDLING
+    # ==================================================================
+
     async def _handle_message(
         self,
         stream_name: str,
@@ -142,51 +333,32 @@ class MarketDataConsumer:
         fields: dict[str, Any],
     ) -> None:
         """
-        Process one Redis Stream message.
+        Validate a Redis Stream envelope, normalize its MarketTick,
+        and publish a MarketTickEvent to the shared AQE EventBus.
 
-        RedisStreamConsumer invokes handlers with:
-
-            stream_name
-            message_id
-            fields
-
-        Expected message envelope:
+        Expected envelope:
 
             event_id
             event_type
             occurred_at
             payload
 
-        The payload contains the serialized MarketTick.
-
-        Invalid messages raise RedisMessageError so the underlying
-        Redis infrastructure can handle them appropriately.
+        The payload contains symbol, timestamp, bid, ask, and optional
+        last/volume/volume_real fields.
         """
 
-        # =============================================================
-        # DEBUG: RAW MESSAGE RECEIVED FROM REDIS
-        # =============================================================
-
-        logger.info(
-            "📥 AQE RECEIVED MARKET-DATA MESSAGE FROM REDIS | "
-            "stream=%s | message_id=%s | fields=%r",
+        logger.debug(
+            "Received market-data message from Redis. " "stream=%s message_id=%s",
             stream_name,
             message_id,
-            fields,
         )
 
         try:
-            # =========================================================
-            # Validate event type
-            # =========================================================
+            # ----------------------------------------------------------
+            # Event type
+            # ----------------------------------------------------------
 
             event_type = fields.get("event_type")
-
-            logger.info(
-                "📨 AQE MARKET-DATA EVENT TYPE | " "message_id=%s | event_type=%r",
-                message_id,
-                event_type,
-            )
 
             if event_type != self.EXPECTED_EVENT_TYPE:
                 raise RedisMessageError(
@@ -195,21 +367,13 @@ class MarketDataConsumer:
                     f"Expected {self.EXPECTED_EVENT_TYPE!r}."
                 )
 
-            # =========================================================
-            # Extract event envelope
-            # =========================================================
+            # ----------------------------------------------------------
+            # Envelope
+            # ----------------------------------------------------------
 
             event_id = fields.get("event_id")
             occurred_at_raw = fields.get("occurred_at")
             payload_raw = fields.get("payload")
-
-            logger.info(
-                "📦 AQE MARKET-DATA ENVELOPE | "
-                "message_id=%s | event_id=%r | occurred_at=%r",
-                message_id,
-                event_id,
-                occurred_at_raw,
-            )
 
             if not event_id:
                 raise RedisMessageError(
@@ -224,9 +388,9 @@ class MarketDataConsumer:
             if payload_raw is None:
                 raise RedisMessageError("Market-data Redis message is missing payload.")
 
-            # =========================================================
-            # Parse occurred_at
-            # =========================================================
+            # ----------------------------------------------------------
+            # occurred_at
+            # ----------------------------------------------------------
 
             try:
                 occurred_at = datetime.fromisoformat(
@@ -237,9 +401,13 @@ class MarketDataConsumer:
                 )
 
                 if occurred_at.tzinfo is None:
-                    occurred_at = occurred_at.replace(tzinfo=timezone.utc)
+                    occurred_at = occurred_at.replace(
+                        tzinfo=timezone.utc,
+                    )
                 else:
-                    occurred_at = occurred_at.astimezone(timezone.utc)
+                    occurred_at = occurred_at.astimezone(
+                        timezone.utc,
+                    )
 
             except (TypeError, ValueError) as exc:
                 raise RedisMessageError(
@@ -247,9 +415,9 @@ class MarketDataConsumer:
                     f"occurred_at value: {occurred_at_raw!r}"
                 ) from exc
 
-            # =========================================================
-            # Parse JSON payload
-            # =========================================================
+            # ----------------------------------------------------------
+            # JSON payload
+            # ----------------------------------------------------------
 
             try:
                 if isinstance(payload_raw, bytes):
@@ -266,9 +434,8 @@ class MarketDataConsumer:
                 ValueError,
             ) as exc:
                 logger.error(
-                    "❌ INVALID MARKET-DATA JSON | "
-                    "stream=%s | message_id=%s | event_id=%s | "
-                    "payload=%r",
+                    "Invalid market-data JSON. "
+                    "stream=%s message_id=%s event_id=%s payload=%r",
                     stream_name,
                     message_id,
                     event_id,
@@ -276,7 +443,7 @@ class MarketDataConsumer:
                 )
 
                 raise RedisMessageError(
-                    "Market-data Redis message contains invalid " "JSON payload."
+                    "Market-data Redis message contains invalid JSON payload."
                 ) from exc
 
             if not isinstance(payload, dict):
@@ -284,21 +451,9 @@ class MarketDataConsumer:
                     "Market-data Redis payload must be a JSON object."
                 )
 
-            # =========================================================
-            # DEBUG: ACTUAL PAYLOAD AQE RECEIVED
-            # =========================================================
-
-            logger.info(
-                "📊 AQE RECEIVED MARKET-DATA PAYLOAD | "
-                "message_id=%s | event_id=%s | payload=%r",
-                message_id,
-                event_id,
-                payload,
-            )
-
-            # =========================================================
-            # Extract MarketTick fields
-            # =========================================================
+            # ----------------------------------------------------------
+            # Required and optional payload fields
+            # ----------------------------------------------------------
 
             symbol = payload.get("symbol")
             timestamp = payload.get("timestamp")
@@ -307,38 +462,7 @@ class MarketDataConsumer:
 
             last = payload.get("last", 0.0)
             volume = payload.get("volume", 0)
-            volume_real = payload.get(
-                "volume_real",
-                0.0,
-            )
-
-            # =========================================================
-            # DEBUG: EXTRACTED MARKET VALUES
-            # =========================================================
-
-            logger.info(
-                "🔎 AQE EXTRACTED TICK VALUES | "
-                "message_id=%s | "
-                "symbol=%r | "
-                "timestamp=%r | "
-                "bid=%r | "
-                "ask=%r | "
-                "last=%r | "
-                "volume=%r | "
-                "volume_real=%r",
-                message_id,
-                symbol,
-                timestamp,
-                bid,
-                ask,
-                last,
-                volume,
-                volume_real,
-            )
-
-            # =========================================================
-            # Required fields
-            # =========================================================
+            volume_real = payload.get("volume_real", 0.0)
 
             missing_fields: list[str] = []
 
@@ -355,31 +479,19 @@ class MarketDataConsumer:
                 missing_fields.append("ask")
 
             if missing_fields:
-                logger.error(
-                    "❌ MARKET-DATA PAYLOAD MISSING REQUIRED FIELDS | "
-                    "stream=%s | message_id=%s | event_id=%s | "
-                    "symbol=%r | missing=%s | payload=%r",
-                    stream_name,
-                    message_id,
-                    event_id,
-                    symbol,
-                    missing_fields,
-                    payload,
-                )
-
                 raise RedisMessageError(
                     "Market-data Redis payload is missing required "
                     f"fields: {', '.join(missing_fields)}."
                 )
 
-            # =========================================================
-            # Convert MarketTick
-            # =========================================================
+            # ----------------------------------------------------------
+            # Normalize and construct the MarketTick
+            # ----------------------------------------------------------
 
             try:
-                normalized_symbol = str(symbol).strip()
+                broker_symbol = str(symbol).strip()
 
-                if not normalized_symbol:
+                if not broker_symbol:
                     raise ValueError("symbol must not be empty")
 
                 normalized_timestamp = self._parse_timestamp(timestamp)
@@ -409,8 +521,29 @@ class MarketDataConsumer:
                     "volume_real",
                 )
 
+                canonical_symbol = self._resolve_symbol(
+                    broker_symbol,
+                )
+
+                if canonical_symbol is None:
+                    self._ignored_symbol_count += 1
+
+                    logger.debug(
+                        "Ignoring market tick outside the active "
+                        "account's enabled symbol universe. "
+                        "account_id=%s broker_symbol=%s "
+                        "message_id=%s",
+                        self.account_id,
+                        broker_symbol,
+                        message_id,
+                    )
+
+                    # This is a valid but irrelevant instrument, not a
+                    # malformed Redis message. Do not retry it forever.
+                    return
+
                 tick = MarketTick(
-                    symbol=normalized_symbol,
+                    symbol=canonical_symbol,
                     timestamp=normalized_timestamp,
                     bid=normalized_bid,
                     ask=normalized_ask,
@@ -425,84 +558,51 @@ class MarketDataConsumer:
                 OverflowError,
             ) as exc:
                 logger.error(
-                    "❌ MARKET-DATA COULD NOT BE CONVERTED "
-                    "TO MarketTick | "
-                    "stream=%s | message_id=%s | event_id=%s | "
-                    "symbol=%r | error=%s | payload=%r",
+                    "Market-data payload could not be converted "
+                    "to MarketTick. stream=%s message_id=%s "
+                    "event_id=%s incoming_symbol=%r error=%s",
                     stream_name,
                     message_id,
                     event_id,
                     symbol,
                     exc,
-                    payload,
                 )
 
                 raise RedisMessageError(
-                    "Market-data Redis payload could not be "
-                    "converted into MarketTick: "
-                    f"{exc}"
+                    "Market-data Redis payload could not be converted "
+                    f"into MarketTick: {exc}"
                 ) from exc
 
-            # =========================================================
-            # Validate normalized tick
-            # =========================================================
+            # ----------------------------------------------------------
+            # Domain validation
+            # ----------------------------------------------------------
 
             validation_errors = tick.validation_errors()
 
             if validation_errors:
                 logger.error(
-                    "❌ INVALID MarketTick RECEIVED | "
-                    "stream=%s | message_id=%s | event_id=%s | "
-                    "symbol=%s | timestamp=%s | datetime=%s | "
-                    "bid=%s | ask=%s | last=%s | volume=%s | "
-                    "volume_real=%s | spread=%s | "
-                    "validation_errors=%s | raw_payload=%r",
+                    "Invalid MarketTick. "
+                    "stream=%s message_id=%s event_id=%s "
+                    "symbol=%s timestamp=%s bid=%s ask=%s "
+                    "validation_errors=%s",
                     stream_name,
                     message_id,
                     event_id,
                     tick.symbol,
                     tick.timestamp,
-                    tick.datetime.isoformat(),
                     tick.bid,
                     tick.ask,
-                    tick.last,
-                    tick.volume,
-                    tick.volume_real,
-                    tick.spread,
                     validation_errors,
-                    payload,
                 )
 
                 raise RedisMessageError(
-                    "Invalid MarketTick received for "
-                    f"symbol={tick.symbol!r}: " + "; ".join(validation_errors)
+                    f"Invalid MarketTick for {tick.symbol!r}: "
+                    + "; ".join(validation_errors)
                 )
 
-            # =========================================================
-            # DEBUG: VALID MARKET TICK
-            # =========================================================
-
-            logger.info(
-                "✅ AQE MARKET TICK VALIDATED | "
-                "message_id=%s | event_id=%s | "
-                "symbol=%s | timestamp=%s | "
-                "bid=%s | ask=%s | last=%s | "
-                "volume=%s | volume_real=%s | spread=%s",
-                message_id,
-                event_id,
-                tick.symbol,
-                tick.timestamp,
-                tick.bid,
-                tick.ask,
-                tick.last,
-                tick.volume,
-                tick.volume_real,
-                tick.spread,
-            )
-
-            # =========================================================
-            # Reconstruct MarketTickEvent
-            # =========================================================
+            # ----------------------------------------------------------
+            # Event creation and publication
+            # ----------------------------------------------------------
 
             event = MarketTickEvent(
                 event_id=event_id,
@@ -510,53 +610,30 @@ class MarketDataConsumer:
                 tick=tick,
             )
 
-            # =========================================================
-            # Publish to AQE EventBus
-            # =========================================================
-
             await event_bus.publish(event)
 
-            # =========================================================
-            # Record success for status()
-            # =========================================================
+            # ----------------------------------------------------------
+            # Health statistics
+            # ----------------------------------------------------------
 
             self._event_count += 1
             self._last_event_at = datetime.now(timezone.utc)
             self._last_event_symbol = tick.symbol
-
-            # =========================================================
-            # DEBUG: SUCCESSFULLY ENTERED AQE EVENT BUS
-            # =========================================================
-
-            logger.info(
-                "🚀 AQE MARKET-DATA EVENT PUBLISHED "
-                "TO EVENT BUS | "
-                "message_id=%s | event_id=%s | "
-                "symbol=%s | timestamp=%s | "
-                "bid=%s | ask=%s",
-                message_id,
-                event.event_id,
-                tick.symbol,
-                tick.timestamp,
-                tick.bid,
-                tick.ask,
-            )
+            self._last_error = None
+            self._last_error_at = None
 
             logger.debug(
-                "MarketTickEvent published to EventBus. "
-                "stream=%s message_id=%s event_id=%s "
-                "symbol=%s timestamp=%s bid=%s ask=%s "
-                "last=%s volume=%s volume_real=%s",
-                stream_name,
+                "MarketTickEvent published. "
+                "message_id=%s event_id=%s "
+                "broker_symbol=%s canonical_symbol=%s "
+                "timestamp=%s bid=%s ask=%s",
                 message_id,
                 event.event_id,
+                broker_symbol,
                 tick.symbol,
                 tick.timestamp,
                 tick.bid,
                 tick.ask,
-                tick.last,
-                tick.volume,
-                tick.volume_real,
             )
 
         except RedisMessageError as exc:
@@ -586,15 +663,7 @@ class MarketDataConsumer:
     @staticmethod
     def _parse_timestamp(value: Any) -> int:
         """
-        Convert a Redis payload timestamp into a Unix timestamp.
-
-        Accepted values:
-
-            int
-            float
-            numeric string
-
-        The result must be a positive integer.
+        Convert a Redis payload timestamp into a positive Unix timestamp.
         """
 
         if isinstance(value, bool):
@@ -642,9 +711,7 @@ class MarketDataConsumer:
         value: Any,
         field_name: str,
     ) -> float:
-        """
-        Convert a payload value to a finite float.
-        """
+        """Convert a payload value to a finite float."""
 
         if isinstance(value, bool):
             raise ValueError(f"{field_name} must not be boolean")

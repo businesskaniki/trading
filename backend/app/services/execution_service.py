@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any
+from uuid import UUID
 
 from app.broker.broker_manager import BrokerManager
 from app.broker.exceptions import (
@@ -21,7 +22,7 @@ class ExecutionService:
     Application-level execution service.
 
     Responsibilities:
-        - Route market orders to the broker market-order path.
+        - Route MARKET orders to the broker market-order path.
         - Route LIMIT/STOP orders to the broker pending-order path.
         - Normalize broker responses into ExecutionResult.
         - Expose broker position operations.
@@ -29,10 +30,21 @@ class ExecutionService:
 
     Broker-specific behavior belongs inside BrokerAdapter
     implementations.
+
+    This service does not:
+        - calculate risk;
+        - generate signals;
+        - communicate directly with MT5;
+        - persist AQE orders.
     """
 
-    def __init__(self, broker: BrokerManager):
+    def __init__(
+        self,
+        broker: BrokerManager,
+        account_id: UUID | str | None = None,
+    ) -> None:
         self.broker = broker
+        self.account_id = str(account_id) if account_id is not None else None
 
     # ==========================================================
     # ORDER EXECUTION
@@ -46,21 +58,38 @@ class ExecutionService:
         Execute an order through the appropriate broker operation.
 
         MARKET:
-            broker.place_order()
+            BrokerManager.place_order()
 
         LIMIT / STOP:
-            broker.create_pending_order()
+            BrokerManager.create_pending_order()
+
+        The ExecutionOrder object is passed directly to BrokerManager.
+        BrokerManager and the underlying BrokerAdapter own the
+        broker-specific translation.
         """
 
+        if not isinstance(order, ExecutionOrder):
+            raise BrokerOrderError(
+                "ExecutionService requires an ExecutionOrder instance."
+            )
+
+        self._validate_account_binding(
+            order,
+        )
+
         try:
-            if order.order_type == OrderType.MARKET:
-                result = await self.broker.place_order(order.model_dump())
+            if order.order_type is OrderType.MARKET:
+                result = await self.broker.place_order(
+                    order,
+                )
 
             elif order.order_type in {
                 OrderType.LIMIT,
                 OrderType.STOP,
             }:
-                result = await self.broker.create_pending_order(order.model_dump())
+                result = await self.broker.create_pending_order(
+                    order,
+                )
 
             else:
                 return ExecutionResult(
@@ -85,6 +114,35 @@ class ExecutionService:
             ) from exc
 
     # ==========================================================
+    # ACCOUNT BINDING
+    # ==========================================================
+
+    def _validate_account_binding(
+        self,
+        order: ExecutionOrder,
+    ) -> None:
+        """
+        Prevent a runtime bound to one trading account from
+        executing an order belonging to another account.
+
+        A generic ExecutionService may have no account binding.
+        Validation is enforced when an account-scoped runtime
+        supplies ``account_id``.
+        """
+
+        if self.account_id is None:
+            return
+
+        if order.account_id is None:
+            raise BrokerOrderError("Execution order does not contain an account_id.")
+
+        if str(order.account_id) != self.account_id:
+            raise BrokerOrderError(
+                "Execution order account does not match "
+                "the active AQE runtime account."
+            )
+
+    # ==========================================================
     # RESULT NORMALIZATION
     # ==========================================================
 
@@ -106,35 +164,76 @@ class ExecutionService:
         if not isinstance(result, dict):
             raise BrokerOrderError("Broker returned an invalid execution response.")
 
-        status = self._normalize_status(result)
+        status = self._normalize_status(
+            result,
+        )
+
+        broker_order_id = self._first_present(
+            result,
+            "broker_order_id",
+            "order_id",
+            "ticket",
+        )
+
+        broker_deal_id = self._first_present(
+            result,
+            "broker_deal_id",
+            "deal_id",
+            "deal",
+        )
+
+        broker_position_id = self._first_present(
+            result,
+            "broker_position_id",
+            "position_id",
+            "position",
+        )
+
+        volume = result.get("volume")
+
+        if volume is None:
+            volume = result.get("volume_executed")
+
+        if volume is None:
+            volume = order.volume
+
+        price = result.get("price")
+
+        if price is None:
+            price = result.get("price_open")
+
+        message = result.get("message")
+
+        if message is None:
+            message = result.get("comment")
 
         return ExecutionResult(
             status=status,
             broker=self._broker_name(),
             broker_order_id=self._optional_int(
-                result.get(
-                    "broker_order_id",
-                    result.get("order_id"),
-                )
+                broker_order_id,
             ),
             broker_deal_id=self._optional_int(
-                result.get(
-                    "broker_deal_id",
-                    result.get("deal_id"),
-                )
+                broker_deal_id,
             ),
             broker_position_id=self._optional_int(
-                result.get(
-                    "broker_position_id",
-                    result.get("position_id"),
-                )
+                broker_position_id,
             ),
-            symbol=result.get("symbol") or order.symbol,
-            volume=result.get("volume") or order.volume,
-            price=result.get("price") or result.get("price_open"),
-            message=result.get("message") or result.get("comment"),
+            symbol=str(
+                result.get(
+                    "symbol",
+                    order.symbol,
+                )
+            ).strip(),
+            volume=volume,
+            price=price,
+            message=(str(message) if message is not None else None),
             raw_response=result,
         )
+
+    # ==========================================================
+    # STATUS NORMALIZATION
+    # ==========================================================
 
     @staticmethod
     def _normalize_status(
@@ -144,14 +243,22 @@ class ExecutionService:
         Normalize broker status or MT5 retcode into ExecutionStatus.
         """
 
-        status = result.get("status")
+        raw_status = result.get("status")
 
-        if isinstance(status, ExecutionStatus):
-            return status
+        if isinstance(
+            raw_status,
+            ExecutionStatus,
+        ):
+            return raw_status
 
-        if isinstance(status, str):
+        if isinstance(
+            raw_status,
+            str,
+        ):
             try:
-                return ExecutionStatus(status.upper())
+                return ExecutionStatus(
+                    raw_status.upper(),
+                )
             except ValueError:
                 pass
 
@@ -161,50 +268,50 @@ class ExecutionService:
         )
 
         if retcode in {
-            10008,  # TRADE_RETCODE_PLACED
-            10009,  # TRADE_RETCODE_DONE
-            10010,  # TRADE_RETCODE_DONE_PARTIAL
+            10008,
+            10009,
+            10010,
         }:
             return ExecutionStatus.SUCCESS
 
         if retcode in {
-            10006,  # REJECT
-            10007,  # CANCEL
-            10011,  # ERROR
-            10012,  # TIMEOUT
-            10013,  # INVALID
-            10014,  # INVALID_VOLUME
-            10015,  # INVALID_PRICE
-            10016,  # INVALID_STOPS
-            10017,  # TRADE_DISABLED
-            10018,  # MARKET_CLOSED
-            10019,  # NO_MONEY
-            10020,  # PRICE_CHANGED
-            10021,  # PRICE_OFF
-            10022,  # INVALID_EXPIRATION
-            10023,  # ORDER_CHANGED
-            10024,  # TOO_MANY_REQUESTS
-            10025,  # NO_CHANGES
-            10026,  # SERVER_DISABLES_AT
-            10027,  # CLIENT_DISABLES_AT
-            10028,  # LOCKED
-            10029,  # FROZEN
-            10030,  # INVALID_FILL
-            10031,  # CONNECTION
-            10032,  # ONLY_REAL
-            10033,  # LIMIT_ORDERS
-            10034,  # LIMIT_VOLUME
-            10035,  # INVALID_ORDER
-            10036,  # POSITION_CLOSED
-            10038,  # INVALID_CLOSE_VOLUME
-            10039,  # CLOSE_ORDER_EXIST
-            10040,  # LIMIT_POSITIONS
-            10041,  # REJECT_CANCEL
-            10042,  # LONG_ONLY
-            10043,  # SHORT_ONLY
-            10044,  # CLOSE_ONLY
-            10045,  # FIFO_CLOSE
-            10046,  # HEDGE_PROHIBITED
+            10006,
+            10007,
+            10011,
+            10012,
+            10013,
+            10014,
+            10015,
+            10016,
+            10017,
+            10018,
+            10019,
+            10020,
+            10021,
+            10022,
+            10023,
+            10024,
+            10025,
+            10026,
+            10027,
+            10028,
+            10029,
+            10030,
+            10031,
+            10032,
+            10033,
+            10034,
+            10035,
+            10036,
+            10038,
+            10039,
+            10040,
+            10041,
+            10042,
+            10043,
+            10044,
+            10045,
+            10046,
         }:
             return ExecutionStatus.REJECTED
 
@@ -215,7 +322,9 @@ class ExecutionService:
     # ==========================================================
 
     async def get_positions(self):
-        """Retrieve current broker positions."""
+        """
+        Retrieve current broker positions.
+        """
 
         try:
             return await self.broker.get_positions()
@@ -230,10 +339,14 @@ class ExecutionService:
         self,
         position_id: int,
     ):
-        """Retrieve a single broker position."""
+        """
+        Retrieve a single broker position.
+        """
 
         try:
-            return await self.broker.get_position(position_id)
+            return await self.broker.get_position(
+                position_id,
+            )
 
         except BrokerPositionError:
             raise
@@ -247,10 +360,14 @@ class ExecutionService:
         self,
         position_id: int,
     ):
-        """Close an existing broker position."""
+        """
+        Close an existing broker position.
+        """
 
         try:
-            return await self.broker.close_position(position_id)
+            return await self.broker.close_position(
+                position_id,
+            )
 
         except BrokerPositionError:
             raise
@@ -266,7 +383,9 @@ class ExecutionService:
         sl: float | None = None,
         tp: float | None = None,
     ):
-        """Modify stop-loss and/or take-profit."""
+        """
+        Modify stop-loss and/or take-profit.
+        """
 
         try:
             return await self.broker.modify_position(
@@ -292,7 +411,9 @@ class ExecutionService:
         start: datetime,
         end: datetime,
     ):
-        """Retrieve broker order history."""
+        """
+        Retrieve broker order history.
+        """
 
         try:
             return await self.broker.get_order_history(
@@ -311,7 +432,9 @@ class ExecutionService:
         start: datetime,
         end: datetime,
     ):
-        """Retrieve broker deal history."""
+        """
+        Retrieve broker deal history.
+        """
 
         try:
             return await self.broker.get_deal_history(
@@ -334,7 +457,9 @@ class ExecutionService:
         """
 
         try:
-            return await self.broker.get_deals_by_position(position_id)
+            return await self.broker.get_deals_by_position(
+                position_id,
+            )
 
         except BrokerOrderError:
             raise
@@ -362,6 +487,15 @@ class ExecutionService:
         if adapter is None:
             return "UNKNOWN"
 
+        broker_name = getattr(
+            adapter,
+            "BROKER_NAME",
+            None,
+        )
+
+        if broker_name:
+            return str(broker_name)
+
         name = getattr(
             adapter,
             "name",
@@ -377,12 +511,35 @@ class ExecutionService:
     def _optional_int(
         value: Any,
     ) -> int | None:
-        """Safely normalize an optional broker identifier."""
+        """
+        Safely normalize an optional broker identifier.
+        """
 
         if value is None:
             return None
 
         try:
             return int(value)
-        except (TypeError, ValueError):
+
+        except (
+            TypeError,
+            ValueError,
+        ):
             return None
+
+    @staticmethod
+    def _first_present(
+        result: dict[str, Any],
+        *keys: str,
+    ) -> Any:
+        """
+        Return the first non-None value from the supplied keys.
+        """
+
+        for key in keys:
+            value = result.get(key)
+
+            if value is not None:
+                return value
+
+        return None

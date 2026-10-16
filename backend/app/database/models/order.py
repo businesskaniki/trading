@@ -14,36 +14,82 @@ class Order(UUIDMixin, TimestampMixin, Base):
     """
     Persisted AQE order.
 
-    Broker identifiers are intentionally stored separately:
+    Order identity is represented at two levels:
+
+        symbol_id
+            Canonical AQE symbol identity.
+
+        broker_symbol
+            Exact broker-native symbol used for this execution.
+
+    Broker identifiers are stored independently:
 
         broker_order_id
-            Broker order/ticket created by order submission.
+            Broker order/ticket created by submission.
 
         broker_deal_id
             Broker execution/deal identifier.
 
         broker_position_id
-            Broker position created by the execution, when applicable.
+            Broker position identifier created by the execution,
+            when applicable.
 
     execution_correlation_id
-        AQE-generated deterministic identifier linking the persisted
-        order to the execution decision that created it.
+        AQE-generated deterministic identifier linking this persisted
+        order to the RiskDecision that created it.
 
-        This identifier is independent of broker-facing identifiers
-        and must be used as the primary AQE execution correlation key.
+    Volume semantics:
+
+        volume
+            Original volume requested by the Risk Engine.
+
+        executed_volume
+            Cumulative broker-confirmed executed volume.
+
+    Keeping requested and executed volume separately is essential for
+    partial fills and post-submission reconciliation.
     """
 
     __tablename__ = "orders"
 
     __table_args__ = (
-        Index("ix_orders_execution_correlation_id", "execution_correlation_id"),
-        Index("ix_orders_broker_order_id", "broker_order_id"),
-        Index("ix_orders_broker_deal_id", "broker_deal_id"),
-        Index("ix_orders_broker_position_id", "broker_position_id"),
-        Index("ix_orders_status", "status"),
-        Index("ix_orders_strategy", "strategy"),
-        Index("ix_orders_account_id", "account_id"),
-        Index("ix_orders_symbol_id", "symbol_id"),
+        Index(
+            "ix_orders_execution_correlation_id",
+            "execution_correlation_id",
+        ),
+        Index(
+            "ix_orders_broker_order_id",
+            "broker_order_id",
+        ),
+        Index(
+            "ix_orders_broker_deal_id",
+            "broker_deal_id",
+        ),
+        Index(
+            "ix_orders_broker_position_id",
+            "broker_position_id",
+        ),
+        Index(
+            "ix_orders_status",
+            "status",
+        ),
+        Index(
+            "ix_orders_strategy",
+            "strategy",
+        ),
+        Index(
+            "ix_orders_account_id",
+            "account_id",
+        ),
+        Index(
+            "ix_orders_symbol_id",
+            "symbol_id",
+        ),
+        Index(
+            "ix_orders_account_broker_symbol",
+            "account_id",
+            "broker_symbol",
+        ),
     )
 
     # ------------------------------------------------------------------
@@ -56,8 +102,13 @@ class Order(UUIDMixin, TimestampMixin, Base):
     )
 
     # ------------------------------------------------------------------
-    # Broker identifiers
+    # Broker identity
     # ------------------------------------------------------------------
+
+    broker_symbol: Mapped[str] = mapped_column(
+        String(100),
+        nullable=False,
+    )
 
     broker_order_id: Mapped[int | None] = mapped_column(
         nullable=True,
@@ -138,9 +189,18 @@ class Order(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
+    # Original volume requested by Risk Engine.
     volume: Mapped[Decimal] = mapped_column(
         Numeric(10, 2),
         nullable=False,
+    )
+
+    # Cumulative broker-confirmed executed volume.
+    #
+    # NULL means no broker-confirmed execution has been recorded yet.
+    executed_volume: Mapped[Decimal | None] = mapped_column(
+        Numeric(10, 2),
+        nullable=True,
     )
 
     # ------------------------------------------------------------------

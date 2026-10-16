@@ -23,6 +23,8 @@ const engineAPI = {
 
     const response = await api.post("/engine/start", {
       account_id: accountId,
+    },{
+      timeout: 300000,
     });
 
     return response.data;

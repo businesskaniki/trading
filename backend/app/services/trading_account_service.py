@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from uuid import UUID
-
-from app.core.constants import AccountStatus
+from app.core.constants import AccountStatus, BrokerType
 from app.core.security import decrypt_secret, encrypt_secret
 from app.database.models.trading_account import TradingAccount
 from app.repositories.trading_account_repository import (
@@ -286,6 +285,40 @@ class TradingAccountService:
             )
         except Exception as exc:
             raise ValueError("Unable to decrypt trading account credentials.") from exc
+
+    async def get_mt5_credentials_for_bridge(
+        self,
+        login: int,
+        server: str,
+    ) -> dict[str, Any]:
+        """
+        Retrieve credentials for an MT5 bridge recovery request.
+
+        This method is only exposed through the bridge-authenticated
+        internal API. It must never be exposed as a frontend endpoint.
+        """
+        account = await self.repository.get_by_identity(
+            broker=BrokerType.MT5,
+            server=server,
+            login=login,
+        )
+
+        if account is None:
+            raise ValueError("No matching MT5 trading account was found.")
+
+        if not account.credentials_encrypted:
+            raise ValueError("MT5 account credentials are not configured.")
+
+        try:
+            password = decrypt_secret(account.credentials_encrypted)
+        except Exception as exc:
+            raise ValueError("Unable to retrieve MT5 account credentials.") from exc
+
+        return {
+            "login": account.login,
+            "password": password,
+            "server": account.server,
+        }
 
     async def update_account_state(
         self,

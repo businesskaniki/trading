@@ -1,7 +1,9 @@
+
 from __future__ import annotations
 
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel, Field, model_validator
@@ -20,22 +22,19 @@ class OrderType(str, Enum):
 
 class ExecutionOrder(BaseModel):
     """
-    Normalized order instruction sent to the execution engine.
+    Broker-independent instruction to execute an order.
 
-    ExecutionOrder represents the intent to execute an order.
-    Broker-specific identifiers do not belong here because they do
-    not exist until the broker accepts/submits the order.
+    This represents requested intent, not an actual broker execution.
     """
 
     symbol: str = Field(..., min_length=1, max_length=32)
     account_id: UUID | None = None
+
     side: OrderSide
     order_type: OrderType = OrderType.MARKET
     volume: Decimal = Field(..., gt=0)
 
-    # Required for pending orders, optional for market orders.
     price: Decimal | None = Field(default=None, gt=0)
-
     stop_loss: Decimal | None = Field(default=None, gt=0)
     take_profit: Decimal | None = Field(default=None, gt=0)
 
@@ -45,46 +44,70 @@ class ExecutionOrder(BaseModel):
 
     @model_validator(mode="after")
     def validate_order(self) -> ExecutionOrder:
-        """
-        Pending orders require an explicit entry price.
-        Market orders obtain their execution price from the broker.
-        """
-
         if self.order_type in {OrderType.LIMIT, OrderType.STOP}:
             if self.price is None:
-                raise ValueError("Price is required for LIMIT and STOP orders.")
+                raise ValueError(
+                    "Price is required for LIMIT and STOP orders."
+                )
 
         return self
 
 
 class ExecutionStatus(str, Enum):
     """
-    Result status returned by the execution layer.
+    Normalized result of a broker submission or execution attempt.
+
+    SUCCESS:
+        Confirmed full execution.
+
+    PLACED:
+        Broker reports that an order was placed, but full execution
+        has not been confirmed.
+
+    PARTIALLY_FILLED:
+        Broker confirms that only part of the requested volume executed.
+
+    UNKNOWN:
+        The outcome cannot safely be established. Reconciliation is
+        required before deciding whether a retry is safe.
+
+    NOT_SUBMITTED:
+        The bridge confirms the broker submission boundary was not crossed.
+
+    REJECTED:
+        The broker explicitly rejected the request.
+
+    FAILED:
+        Legacy failure status. New execution code should use a more
+        precise status whenever the outcome is known.
     """
 
     SUCCESS = "SUCCESS"
+    PLACED = "PLACED"
+    PARTIALLY_FILLED = "PARTIALLY_FILLED"
+    UNKNOWN = "UNKNOWN"
+    NOT_SUBMITTED = "NOT_SUBMITTED"
     FAILED = "FAILED"
     REJECTED = "REJECTED"
 
 
 class ExecutionResult(BaseModel):
     """
-    Normalized result returned after a broker execution attempt.
+    Normalized result of a broker operation.
 
-    Broker identifiers are deliberately separated because they
-    represent different MT5 entities:
+    volume:
+        Broker-confirmed executed volume. None means that the result
+        does not confirm any executed quantity.
 
-        broker_order_id
-            Broker order/ticket.
+    requested_volume:
+        Original order volume, when known.
 
-        broker_deal_id
-            Executed transaction/deal.
+    price:
+        Confirmed execution price. It must not be populated merely
+        with the submitted or requested entry price.
 
-        broker_position_id
-            Resulting open position, when applicable.
-
-    These values may legitimately be None depending on the order
-    type and broker execution state.
+    The order, deal, and position identifiers refer to distinct
+    broker entities.
     """
 
     status: ExecutionStatus
@@ -95,8 +118,14 @@ class ExecutionResult(BaseModel):
     broker_position_id: int | None = None
 
     symbol: str | None = None
+
+    requested_volume: Decimal | None = None
     volume: Decimal | None = None
     price: Decimal | None = None
 
+    retcode: int | None = None
+    request_id: int | None = None
+    retcode_external: int | None = None
+
     message: str | None = None
-    raw_response: dict | None = None
+    raw_response: dict[str, Any] | None = None

@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import List
+import logging
+from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 
 from app.schemas.order import OrderRequest, OrderResponse
 from app.services.order_service import OrderService
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/orders",
@@ -19,39 +22,66 @@ service = OrderService()
     "",
     response_model=OrderResponse,
     status_code=status.HTTP_200_OK,
+    summary="Submit a market order",
+    description=(
+        "Returns the broker outcome in OrderResponse. REJECTED, UNKNOWN, "
+        "NOT_SUBMITTED, PLACED, PARTIALLY_FILLED, and FILLED are response "
+        "outcomes; they are not converted into HTTP errors merely because "
+        "the broker did not confirm a complete fill."
+    ),
 )
-def create_order(request: OrderRequest) -> OrderResponse:
-    """
-    Submit a market order to MetaTrader 5.
-    """
+def create_order(
+    request: OrderRequest,
+) -> OrderResponse:
+    """Submit a market order and preserve the service's classified outcome.
 
+    OrderService is responsible for classifying broker outcomes. A normal
+    OrderResponse—including REJECTED or UNKNOWN—must be returned as-is so
+    callers can distinguish a known rejection from an uncertain submission.
+    Only an exception that escapes OrderService becomes an HTTP gateway error.
+    """
     try:
-        result = service.send_order(request.model_dump())
-        return result
+        return service.send_order(request.model_dump())
+
+    except HTTPException:
+        # Preserve deliberate HTTP errors if the service starts raising them.
+        raise
 
     except Exception as exc:
+        logger.exception(
+            "MT5 market order handler failed "
+            "for symbol=%s volume=%s order_type=%s",
+            request.symbol,
+            request.volume,
+            request.order_type,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Order submission failed.",
+            detail=(
+                "Unable to obtain a classified result for the market order. "
+                "Check the order and broker history before retrying."
+            ),
         ) from exc
 
 
 @router.get(
     "",
-    response_model=List[OrderResponse],
+    response_model=list[dict[str, Any]],
+    summary="List active broker orders",
 )
-def list_orders() -> List[OrderResponse]:
-    """
-    Return currently active MT5 orders.
-    """
-
+def list_orders() -> list[dict[str, Any]]:
+    """Return active/pending broker-order snapshots."""
     try:
         return service.list_orders()
 
+    except HTTPException:
+        raise
+
     except Exception as exc:
+        logger.exception("Failed to retrieve active MT5 orders.")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Unable to retrieve orders.",
+            detail="Unable to retrieve active broker orders.",
         ) from exc
 
 
@@ -59,14 +89,19 @@ def list_orders() -> List[OrderResponse]:
     "/pending",
     response_model=OrderResponse,
     status_code=status.HTTP_200_OK,
+    summary="Submit a pending order",
+    description=(
+        "Returns PLACED when the broker confirms placement without a fill, "
+        "and FILLED or PARTIALLY_FILLED only when the service has sufficient "
+        "execution evidence."
+    ),
 )
-def create_pending_order(request: OrderRequest) -> OrderResponse:
-    """
-    Submit a pending order to MetaTrader 5.
-    """
-
+def create_pending_order(
+    request: OrderRequest,
+) -> OrderResponse:
+    """Submit a pending order and preserve the classified broker outcome."""
     try:
-        result = service.create_pending_order(
+        return service.create_pending_order(
             symbol=request.symbol,
             volume=request.volume,
             order_type=request.order_type,
@@ -78,10 +113,21 @@ def create_pending_order(request: OrderRequest) -> OrderResponse:
             comment=request.comment,
         )
 
-        return result
+    except HTTPException:
+        raise
 
     except Exception as exc:
+        logger.exception(
+            "MT5 pending order handler failed "
+            "for symbol=%s volume=%s order_type=%s",
+            request.symbol,
+            request.volume,
+            request.order_type,
+        )
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="Pending order submission failed.",
+            detail=(
+                "Unable to obtain a classified result for the pending order. "
+                "Check the order and broker history before retrying."
+            ),
         ) from exc

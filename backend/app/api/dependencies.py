@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.broker.broker_manager import BrokerManager
 from app.broker.factory import get_broker_adapter
 from app.core.config import settings
+from app.core.engine import AQEEngine, get_aqe_engine
 from app.core.security import oauth2_scheme, verify_token
 from app.database.session import get_db
 from app.market_data.subscription_manager import (
@@ -59,6 +60,7 @@ def get_db_session(
     db: AsyncSession = Depends(get_db),
 ) -> AsyncSession:
     """Return the current database session."""
+
     return db
 
 
@@ -225,7 +227,8 @@ def get_account_symbol_repository(
 def get_account_symbol_service(
     db: AsyncSession = Depends(get_db),
 ) -> AccountSymbolService:
-    """Provide AccountSymbolService with the global market-data
+    """
+    Provide AccountSymbolService with the global market-data
     subscription manager.
 
     The subscription manager reconciles the desired
@@ -249,6 +252,7 @@ def get_order_repository(
     db: AsyncSession = Depends(get_db),
 ) -> OrderRepository:
     """Provide the order repository for the current DB session."""
+
     return OrderRepository(db)
 
 
@@ -261,14 +265,19 @@ def get_order_service(
     order_repository: OrderRepository = Depends(
         get_order_repository,
     ),
+    trading_account_repository: TradingAccountRepository = Depends(
+        get_trading_account_repository,
+    ),
+    account_symbol_repository: AccountSymbolRepository = Depends(
+        get_account_symbol_repository,
+    ),
 ) -> OrderService:
-    """Provide the CRUD/order-management service."""
+    """Provide the AQE order CRUD and creation service."""
 
     return OrderService(
         order_repository=order_repository,
-        account_repository=TradingAccountRepository(
-            order_repository.db,
-        ),
+        trading_account_repository=trading_account_repository,
+        account_symbol_repository=account_symbol_repository,
     )
 
 
@@ -363,9 +372,13 @@ def get_risk_snapshot_service(
 
 
 def get_broker_manager() -> BrokerManager:
-    """Create the broker manager used by the execution engine.
+    """
+    Create the generic broker manager.
 
-    The concrete broker adapter is selected from AQE configuration.
+    This remains available for non-account-scoped consumers.
+
+    Live account execution and live account reconciliation must use
+    the broker owned by the active AQE runtime instead.
     """
 
     adapter = get_broker_adapter(
@@ -387,10 +400,57 @@ def get_execution_service(
         get_broker_manager,
     ),
 ) -> ExecutionService:
-    """Provide the broker-agnostic execution service."""
+    """
+    Provide the generic broker-agnostic execution service.
+
+    This dependency remains available for non-account-scoped
+    consumers.
+    """
 
     return ExecutionService(
         broker=broker,
+    )
+
+
+# ==========================================================
+# LIVE EXECUTION SERVICE
+# ==========================================================
+
+
+def get_live_execution_service(
+    engine: AQEEngine = Depends(
+        get_aqe_engine,
+    ),
+) -> ExecutionService:
+    """
+    Provide execution through the active account-scoped AQE runtime.
+
+    The live execution path never selects its broker from the global
+    settings.BROKER value.
+
+    AQEEngine.start(account_id) creates and connects the selected
+    account runtime. This dependency reuses that runtime.
+    """
+
+    engine_status = getattr(
+        engine.context.status,
+        "value",
+        str(engine.context.status),
+    )
+
+    if str(engine_status).upper() != "RUNNING":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "AQE engine must be RUNNING before a live operation " "can be executed."
+            ),
+        )
+
+    runtime = engine.runtime
+
+    return ExecutionService(
+        broker=runtime.broker_manager,
+        account_id=runtime.account.account_id,
     )
 
 
@@ -404,10 +464,14 @@ def get_order_execution_service(
         get_order_repository,
     ),
     execution_service: ExecutionService = Depends(
-        get_execution_service,
+        get_live_execution_service,
+    ),
+    account_symbol_repository: AccountSymbolRepository = Depends(
+        get_account_symbol_repository,
     ),
 ) -> OrderExecutionService:
-    """Provide the order lifecycle/execution orchestration service.
+    """
+    Provide live account-scoped order execution.
 
     Dependency chain:
 
@@ -415,19 +479,24 @@ def get_order_execution_service(
                 |
                 +-- OrderRepository
                 |
+                +-- AccountSymbolRepository
+                |
                 +-- ExecutionService
                         |
-                        +-- BrokerManager
+                        +-- active AQEEngine runtime
                                 |
-                                +-- BrokerAdapter
+                                +-- BrokerManager
+                                        |
+                                        +-- account-scoped
+                                            BrokerAdapter
 
-    OrderExecutionService owns the AQE order lifecycle while
-    ExecutionService handles broker execution.
+    The active runtime owns the already-connected broker session.
     """
 
     return OrderExecutionService(
         order_repository=order_repository,
         execution_service=execution_service,
+        account_symbol_repository=account_symbol_repository,
     )
 
 
@@ -447,12 +516,39 @@ def get_position_sync_service(
         get_order_repository,
     ),
     execution_service: ExecutionService = Depends(
-        get_execution_service,
+        get_live_execution_service,
     ),
     trade_service: TradeService = Depends(
         get_trade_service,
     ),
 ) -> PositionSyncService:
+    """
+    Provide live account-scoped position synchronization.
+
+    The position synchronizer must use the broker owned by the active
+    AQE runtime. It must never fall back to settings.BROKER because
+    settings.BROKER may remain configured as PAPER while the selected
+    AQE runtime is connected to MT5.
+
+    Dependency chain:
+
+        PositionSyncService
+                |
+                +-- PositionRepository
+                +-- PositionService
+                +-- OrderRepository
+                +-- TradeService
+                |
+                +-- ExecutionService
+                        |
+                        +-- active AQEEngine runtime
+                                |
+                                +-- BrokerManager
+                                        |
+                                        +-- account-scoped
+                                            BrokerAdapter
+    """
+
     return PositionSyncService(
         execution_service=execution_service,
         position_repository=position_repository,
@@ -481,7 +577,8 @@ def get_analytics_service(
 
 
 def get_mt5_bridge_service() -> MT5BridgeService:
-    """Provide the AQE service responsible for communicating
+    """
+    Provide the AQE service responsible for communicating
     with the MT5 Bridge.
     """
 

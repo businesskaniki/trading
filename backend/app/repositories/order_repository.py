@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Sequence
@@ -18,22 +19,38 @@ class OrderRepository:
     Broker identifiers are treated as separate entities:
 
         broker_order_id
+            Broker order/ticket identifier.
+
         broker_deal_id
+            Representative broker deal identifier stored on the order.
+
         broker_position_id
+            Broker position identifier associated with the order.
 
     The execution_correlation_id is the AQE-owned correlation key
     connecting a RiskDecision to its persisted Order.
 
+    Volume semantics:
+
+        volume
+            Original volume requested by the Risk Engine.
+
+        executed_volume
+            Cumulative broker-confirmed executed volume.
+
     Relationship loading required by higher-level services is handled
-    explicitly here so async SQLAlchemy never relies on implicit
-    lazy-loading.
+    explicitly so asynchronous SQLAlchemy code does not rely on
+    implicit lazy-loading.
     """
 
-    def __init__(self, db: AsyncSession):
+    def __init__(
+        self,
+        db: AsyncSession,
+    ) -> None:
         self.db = db
 
     # ------------------------------------------------------------------
-    # Create / read
+    # CREATE / READ
     # ------------------------------------------------------------------
 
     async def create(
@@ -41,7 +58,7 @@ class OrderRepository:
         order: Order,
     ) -> Order:
         """
-        Persist a new order.
+        Persist a new order and return the refreshed ORM entity.
         """
 
         self.db.add(order)
@@ -56,7 +73,7 @@ class OrderRepository:
         order_id: UUID,
     ) -> Order | None:
         """
-        Retrieve an order by AQE UUID.
+        Retrieve an order by its AQE UUID.
         """
 
         result = await self.db.execute(
@@ -66,7 +83,9 @@ class OrderRepository:
                 selectinload(Order.symbol),
                 selectinload(Order.position),
             )
-            .where(Order.id == order_id)
+            .where(
+                Order.id == order_id,
+            )
         )
 
         return result.scalar_one_or_none()
@@ -76,10 +95,13 @@ class OrderRepository:
         order_id: UUID,
     ) -> Order | None:
         """
-        Retrieve and lock an order for execution/update.
+        Retrieve and lock an order for execution or update.
 
-        The row lock prevents two execution requests from submitting
-        the same persisted order concurrently.
+        The row lock serializes concurrent updates to the same order
+        while the surrounding database transaction remains active.
+
+        The caller must commit or roll back the transaction and must
+        enforce the permitted order-state transition.
         """
 
         result = await self.db.execute(
@@ -89,14 +111,16 @@ class OrderRepository:
                 selectinload(Order.symbol),
                 selectinload(Order.position),
             )
-            .where(Order.id == order_id)
+            .where(
+                Order.id == order_id,
+            )
             .with_for_update()
         )
 
         return result.scalar_one_or_none()
 
     # ------------------------------------------------------------------
-    # Execution correlation lookup
+    # EXECUTION CORRELATION LOOKUP
     # ------------------------------------------------------------------
 
     async def get_by_execution_correlation_id(
@@ -104,23 +128,10 @@ class OrderRepository:
         execution_correlation_id: UUID,
     ) -> Order | None:
         """
-        Retrieve an AQE order by its execution correlation ID.
+        Retrieve an order by its unique AQE execution correlation ID.
 
-        This is the primary lookup used to correlate execution results
-        back to the AQE order that originated the broker submission.
-
-        The lookup intentionally does not depend on:
-
-            - broker symbol
-            - broker order ID
-            - broker deal ID
-            - broker position ID
-            - strategy name
-            - order timing
-            - volume
-
-        Those fields can be used for validation, but they are not the
-        primary execution correlation mechanism.
+        Broker identifiers, symbols, timing, volume and strategy names
+        are not used as substitutes for this AQE-owned correlation key.
         """
 
         result = await self.db.execute(
@@ -132,14 +143,14 @@ class OrderRepository:
             )
             .where(
                 Order.execution_correlation_id
-                == execution_correlation_id
+                == execution_correlation_id,
             )
         )
 
         return result.scalar_one_or_none()
 
     # ------------------------------------------------------------------
-    # Broker identifier lookups
+    # BROKER IDENTIFIER LOOKUPS
     # ------------------------------------------------------------------
 
     async def get_by_broker_order_id(
@@ -147,10 +158,11 @@ class OrderRepository:
         broker_order_id: int,
     ) -> Order | None:
         """
-        Retrieve an AQE order by broker order/ticket ID.
+        Retrieve an order by broker order/ticket ID.
 
-        The account relationship is loaded because execution and
-        reconciliation services may need to verify ownership.
+        This lookup follows the existing database uniqueness contract.
+        Callers operating across multiple broker accounts must also
+        validate that the matched order belongs to the expected account.
         """
 
         result = await self.db.execute(
@@ -161,7 +173,7 @@ class OrderRepository:
                 selectinload(Order.position),
             )
             .where(
-                Order.broker_order_id == broker_order_id
+                Order.broker_order_id == broker_order_id,
             )
         )
 
@@ -172,10 +184,10 @@ class OrderRepository:
         broker_deal_id: int,
     ) -> Order | None:
         """
-        Retrieve an AQE order by broker deal/execution ID.
+        Retrieve an order by its stored broker deal ID.
 
-        The account relationship is loaded because execution and
-        reconciliation services may need to verify ownership.
+        This identifies an order's representative deal, not a complete
+        ledger of every deal contributing to a partial or full fill.
         """
 
         result = await self.db.execute(
@@ -186,7 +198,7 @@ class OrderRepository:
                 selectinload(Order.position),
             )
             .where(
-                Order.broker_deal_id == broker_deal_id
+                Order.broker_deal_id == broker_deal_id,
             )
         )
 
@@ -197,10 +209,10 @@ class OrderRepository:
         broker_position_id: int,
     ) -> Order | None:
         """
-        Retrieve an AQE order by broker position ID.
+        Retrieve an order associated with a broker position ID.
 
-        The account relationship is loaded because position
-        synchronization may need to verify ownership.
+        Position synchronization must account for broker positions
+        that may be associated with more than one order.
         """
 
         result = await self.db.execute(
@@ -211,15 +223,14 @@ class OrderRepository:
                 selectinload(Order.position),
             )
             .where(
-                Order.broker_position_id
-                == broker_position_id
+                Order.broker_position_id == broker_position_id,
             )
         )
 
         return result.scalar_one_or_none()
 
     # ------------------------------------------------------------------
-    # Backwards-compatible broker order lookup
+    # BACKWARDS-COMPATIBLE BROKER ORDER LOOKUP
     # ------------------------------------------------------------------
 
     async def get_by_ticket(
@@ -232,10 +243,12 @@ class OrderRepository:
         New code should use get_by_broker_order_id().
         """
 
-        return await self.get_by_broker_order_id(ticket)
+        return await self.get_by_broker_order_id(
+            ticket,
+        )
 
     # ------------------------------------------------------------------
-    # General queries
+    # GENERAL QUERIES
     # ------------------------------------------------------------------
 
     async def get_all(
@@ -244,7 +257,7 @@ class OrderRepository:
         limit: int = 100,
     ) -> Sequence[Order]:
         """
-        Retrieve orders with pagination.
+        Retrieve orders with pagination, newest first.
         """
 
         result = await self.db.execute(
@@ -254,7 +267,9 @@ class OrderRepository:
                 selectinload(Order.symbol),
                 selectinload(Order.position),
             )
-            .order_by(Order.created_at.desc())
+            .order_by(
+                Order.created_at.desc(),
+            )
             .offset(skip)
             .limit(limit)
         )
@@ -268,7 +283,7 @@ class OrderRepository:
         limit: int = 100,
     ) -> Sequence[Order]:
         """
-        Retrieve orders belonging to a trading account.
+        Retrieve orders belonging to one trading account.
         """
 
         result = await self.db.execute(
@@ -279,9 +294,11 @@ class OrderRepository:
                 selectinload(Order.position),
             )
             .where(
-                Order.account_id == account_id
+                Order.account_id == account_id,
             )
-            .order_by(Order.created_at.desc())
+            .order_by(
+                Order.created_at.desc(),
+            )
             .offset(skip)
             .limit(limit)
         )
@@ -295,7 +312,7 @@ class OrderRepository:
         limit: int = 100,
     ) -> Sequence[Order]:
         """
-        Retrieve orders for a symbol.
+        Retrieve orders for a canonical AQE symbol.
         """
 
         result = await self.db.execute(
@@ -306,9 +323,11 @@ class OrderRepository:
                 selectinload(Order.position),
             )
             .where(
-                Order.symbol_id == symbol_id
+                Order.symbol_id == symbol_id,
             )
-            .order_by(Order.created_at.desc())
+            .order_by(
+                Order.created_at.desc(),
+            )
             .offset(skip)
             .limit(limit)
         )
@@ -333,14 +352,20 @@ class OrderRepository:
                 selectinload(Order.position),
             )
             .where(
-                Order.status == status
+                Order.status == status,
             )
-            .order_by(Order.created_at.desc())
+            .order_by(
+                Order.created_at.desc(),
+            )
             .offset(skip)
             .limit(limit)
         )
 
         return result.scalars().all()
+
+    # ------------------------------------------------------------------
+    # PENDING ORDER LIST
+    # ------------------------------------------------------------------
 
     async def get_pending_orders(
         self,
@@ -348,14 +373,19 @@ class OrderRepository:
         limit: int = 100,
     ) -> Sequence[Order]:
         """
-        Retrieve orders awaiting broker execution/submission.
+        Retrieve orders in CREATED or PENDING states.
 
         CREATED:
-            Not yet submitted.
+            An AQE order eligible for initial submission, subject to
+            the execution service's validation.
 
         PENDING:
-            Broker accepted a pending order and it is awaiting
-            execution.
+            An order accepted by the broker that is awaiting execution.
+
+        IMPORTANT:
+            PENDING orders must not be resubmitted as new orders.
+            They are included here for listing and monitoring purposes.
+            Only CREATED orders are eligible for initial submission.
         """
 
         result = await self.db.execute(
@@ -373,7 +403,9 @@ class OrderRepository:
                     )
                 )
             )
-            .order_by(Order.created_at.asc())
+            .order_by(
+                Order.created_at.asc(),
+            )
             .offset(skip)
             .limit(limit)
         )
@@ -381,7 +413,62 @@ class OrderRepository:
         return result.scalars().all()
 
     # ------------------------------------------------------------------
-    # Update
+    # ORDER RECONCILIATION
+    # ------------------------------------------------------------------
+
+    async def get_orders_requiring_reconciliation(
+        self,
+        account_id: UUID,
+    ) -> list[Order]:
+        """
+        Retrieve account orders that require broker-state monitoring.
+
+        SUBMITTED:
+            The broker submission outcome is unresolved.
+
+        PENDING:
+            The broker accepted an order, but it may subsequently fill,
+            be cancelled or expire.
+
+        PARTIALLY_FILLED:
+            Some volume has executed, and additional fills or a terminal
+            order state may still arrive.
+
+        Terminal states such as FILLED, CANCELLED, REJECTED and EXPIRED
+        are excluded from this active-order reconciliation query.
+
+        Orders are returned oldest-first so the longest-outstanding
+        orders are processed first.
+        """
+
+        result = await self.db.execute(
+            select(Order)
+            .options(
+                selectinload(Order.account),
+                selectinload(Order.symbol),
+                selectinload(Order.position),
+            )
+            .where(
+                Order.account_id == account_id,
+                Order.status.in_(
+                    (
+                        OrderStatus.SUBMITTED,
+                        OrderStatus.PENDING,
+                        OrderStatus.PARTIALLY_FILLED,
+                    )
+                ),
+            )
+            .order_by(
+                Order.created_at.asc(),
+            )
+        )
+
+        return list(
+            result.scalars().all(),
+        )
+
+    # ------------------------------------------------------------------
+    # UPDATE
     # ------------------------------------------------------------------
 
     async def update(
@@ -389,7 +476,11 @@ class OrderRepository:
         order: Order,
     ) -> Order:
         """
-        Persist changes to an existing order.
+        Persist updates to an existing order.
+
+        This method owns its transaction commit. Use direct ORM changes
+        and the caller-owned transaction when composing multiple writes
+        into a larger atomic operation.
         """
 
         self.db.add(order)
@@ -406,6 +497,9 @@ class OrderRepository:
     ) -> Order:
         """
         Update only the lifecycle status of an order.
+
+        This method commits the change. Callers must validate that the
+        transition is legal before invoking it.
         """
 
         order.status = status
@@ -418,7 +512,7 @@ class OrderRepository:
         return order
 
     # ------------------------------------------------------------------
-    # Delete
+    # DELETE
     # ------------------------------------------------------------------
 
     async def delete(
@@ -427,6 +521,9 @@ class OrderRepository:
     ) -> None:
         """
         Delete an order from persistence.
+
+        Order deletion should only be used where the application's
+        retention and referential-integrity rules permit it.
         """
 
         await self.db.delete(order)

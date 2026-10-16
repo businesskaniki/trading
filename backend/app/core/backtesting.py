@@ -727,14 +727,19 @@ async def create_selected_symbols(
                 broker_symbol,
                 symbol,
             )
-
             specifications.append(
                 BacktestSymbolSpecification(
                     symbol=symbol,
+                    broker_symbol=broker_symbol,
+                    digits=account_symbol.digits,
+                    point=account_symbol.point,
+                    tick_size=account_symbol.tick_size,
                     contract_size=contract_size,
+                    min_volume=account_symbol.min_volume,
+                    max_volume=account_symbol.max_volume,
+                    volume_step=account_symbol.volume_step,
                 ),
             )
-
     if not specifications:
         raise ValueError(
             "No enabled trading symbols are configured for account " f"'{account_id}'.",
