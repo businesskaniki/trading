@@ -52,9 +52,13 @@ const normalizeListResponse = (data) => {
 
 export const fetchStrategyRuns = createAsyncThunk(
   "strategyRuns/fetchAll",
-  async (_, { rejectWithValue }) => {
+  async (accountId, { rejectWithValue }) => {
     try {
-      const data = await strategyRunsAPI.getAll();
+      if (!accountId) {
+        return rejectWithValue("Select a trading account first.");
+      }
+
+      const data = await strategyRunsAPI.getAll(accountId);
 
       return normalizeListResponse(data);
     } catch (error) {

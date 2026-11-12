@@ -2,18 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+
+from datetime import datetime, timezone
 from typing import Any
 from uuid import UUID
 
 from app.broker.broker_manager import BrokerManager
+from app.broker.exceptions import MT5BridgeUnavailableError
 from app.database.session import SessionLocal
 from app.repositories.order_repository import OrderRepository
 from app.repositories.position_repository import PositionRepository
+from app.repositories.trade_repository import TradeRepository
 from app.services.execution_service import ExecutionService
 from app.services.position_service import PositionService
 from app.services.position_sync_service import PositionSyncService
 from app.services.trade_service import TradeService
-from app.repositories.trade_repository import TradeRepository
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +53,12 @@ class PositionReconciliationService:
 
     It only reads authoritative broker position state and synchronizes
     AQE's persisted position/trade ledger.
+
+    Other runtime components can access:
+        - running: reconciliation lifecycle state;
+        - account_id: account ownership;
+        - last_result: latest successful reconciliation result;
+        - last_successful_at: timestamp of latest successful sync.
     """
 
     DEFAULT_INTERVAL_SECONDS = 2.0
@@ -86,6 +95,9 @@ class PositionReconciliationService:
         self._reconcile_lock = asyncio.Lock()
 
         self._last_result: dict[str, Any] | None = None
+        self._last_successful_at: datetime | None = None
+
+        self._bridge_offline = False
 
     # ==================================================================
     # STATE
@@ -94,23 +106,32 @@ class PositionReconciliationService:
     @property
     def running(self) -> bool:
         """Return whether position reconciliation is running."""
-
         return self._running
 
     @property
     def account_id(self) -> UUID:
         """Return the account being reconciled."""
-
         return self._account_id
 
     @property
     def last_result(self) -> dict[str, Any] | None:
-        """Return the most recent synchronization result."""
-
+        """Return the most recent successful synchronization result."""
         if self._last_result is None:
             return None
 
         return dict(self._last_result)
+
+    @property
+    def last_successful_at(self) -> datetime | None:
+        """
+        Return the UTC timestamp of the last successful broker sync.
+
+        Failed synchronization attempts never update this timestamp.
+
+        Consumers use this value to determine whether the persisted
+        broker-position state is sufficiently fresh for risk evaluation.
+        """
+        return self._last_successful_at
 
     # ==================================================================
     # LIFECYCLE
@@ -120,31 +141,38 @@ class PositionReconciliationService:
         """
         Perform an immediate synchronization and start the background loop.
 
-        The broker is expected to already be connected.
+        The broker is expected to already be connected. The initial
+        synchronization must succeed before this service starts its loop.
         """
-
         if self._running:
             return
 
         logger.info(
-            "Starting position reconciliation. " "account_id=%s interval=%ss",
+            "Starting position reconciliation. account_id=%s interval=%ss",
             self._account_id,
             self._interval_seconds,
         )
 
-        # --------------------------------------------------------------
-        # Initial synchronization is deliberately synchronous.
-        #
-        # The engine must know the current broker position state before
-        # strategy execution begins.
-        # --------------------------------------------------------------
-
         try:
             result = await self._reconcile_once()
 
+        except MT5BridgeUnavailableError:
+            self._bridge_offline = True
+
+            logger.warning(
+                "Cannot complete initial position reconciliation because "
+                "MT5 Bridge is offline or unreachable. Position "
+                "reconciliation has not started. account_id=%s",
+                self._account_id,
+            )
+
+            # Preserve this specific exception so the API layer can return
+            # its normal MT5 Bridge unavailable response (HTTP 503).
+            raise
+
         except Exception as exc:
             logger.exception(
-                "Initial position reconciliation failed. " "account_id=%s",
+                "Initial position reconciliation failed. account_id=%s",
                 self._account_id,
             )
 
@@ -153,7 +181,19 @@ class PositionReconciliationService:
                 f"{self._account_id}: {exc}"
             ) from exc
 
+        if self._bridge_offline:
+            logger.info(
+                "MT5 Bridge connection restored. Initial position "
+                "reconciliation succeeded. account_id=%s",
+                self._account_id,
+            )
+
+            self._bridge_offline = False
+
+        # Record the successful initial synchronization.
+        # This timestamp is only updated after _reconcile_once succeeds.
         self._last_result = result
+        self._last_successful_at = datetime.now(timezone.utc)
 
         self._running = True
 
@@ -163,9 +203,11 @@ class PositionReconciliationService:
         )
 
         logger.info(
-            "Position reconciliation started. " "account_id=%s result=%s",
+            "Position reconciliation started. account_id=%s result=%s "
+            "last_successful_at=%s",
             self._account_id,
             result,
+            self._last_successful_at.isoformat(),
         )
 
     async def stop(self) -> None:
@@ -191,14 +233,8 @@ class PositionReconciliationService:
                 await task
 
             except asyncio.CancelledError:
+                # The background task was cancelled as requested.
                 pass
-
-            except Exception:
-                logger.exception(
-                    "Position reconciliation loop failed during shutdown. "
-                    "account_id=%s",
-                    self._account_id,
-                )
 
         logger.info(
             "Position reconciliation stopped. account_id=%s",
@@ -216,6 +252,7 @@ class PositionReconciliationService:
 
         async with self._reconcile_lock:
             async with self._session_factory() as db:
+
                 position_repository = PositionRepository(db)
                 order_repository = OrderRepository(db)
 
@@ -241,20 +278,20 @@ class PositionReconciliationService:
                     trade_service=trade_service,
                 )
 
-                result = await synchronizer.sync_positions(
+                return await synchronizer.sync_positions(
                     user_id=self._user_id,
                 )
 
-                return result
+    # ==================================================================
+    # BACKGROUND LOOP
+    # ==================================================================
 
     async def _run_loop(self) -> None:
         """Run periodic position reconciliation."""
 
         while self._running:
             try:
-                await asyncio.sleep(
-                    self._interval_seconds,
-                )
+                await asyncio.sleep(self._interval_seconds)
 
                 if not self._running:
                     break
@@ -262,20 +299,47 @@ class PositionReconciliationService:
                 try:
                     result = await self._reconcile_once()
 
+                    if self._bridge_offline:
+                        logger.info(
+                            "MT5 Bridge connection restored. Position "
+                            "reconciliation resumed. account_id=%s",
+                            self._account_id,
+                        )
+
+                        self._bridge_offline = False
+
+                    # Update the result and timestamp only after the
+                    # entire synchronization cycle succeeds.
                     self._last_result = result
+                    self._last_successful_at = datetime.now(timezone.utc)
 
                     logger.debug(
-                        "Position reconciliation completed. " "account_id=%s result=%s",
+                        "Position reconciliation completed. "
+                        "account_id=%s result=%s last_successful_at=%s",
                         self._account_id,
                         result,
+                        self._last_successful_at.isoformat(),
                     )
 
                 except asyncio.CancelledError:
                     raise
 
+                except MT5BridgeUnavailableError:
+                    # Emit one warning per outage, not one traceback per retry.
+                    if not self._bridge_offline:
+                        logger.warning(
+                            "MT5 Bridge is offline or unreachable. "
+                            "Position reconciliation will retry. account_id=%s",
+                            self._account_id,
+                        )
+
+                    self._bridge_offline = True
+
                 except Exception:
+                    # Unexpected failures retain their traceback.
+                    # last_successful_at is deliberately not changed.
                     logger.exception(
-                        "Position reconciliation cycle failed. " "account_id=%s",
+                        "Position reconciliation cycle failed. account_id=%s",
                         self._account_id,
                     )
 

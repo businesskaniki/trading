@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   FaCheckCircle,
@@ -13,6 +14,8 @@ import {
   FaTimesCircle,
 } from "react-icons/fa";
 import { useDispatch, useSelector } from "react-redux";
+
+import { fetchAccounts } from "../../../redux/dashboard/accounts/accountsThunks";
 
 import {
   disableStrategyRun,
@@ -34,15 +37,15 @@ const getStatusClass = (status) => {
 };
 
 const getStatusIcon = (status) => {
-  const normalized = String(status || "")
-    .trim()
-    .toLowerCase();
+  const normalized = String(status || "").trim().toLowerCase();
 
   if (["running", "active", "started"].includes(normalized)) {
     return <FaClock />;
   }
 
-  if (["completed", "complete", "success", "successful"].includes(normalized)) {
+  if (
+    ["completed", "complete", "success", "successful"].includes(normalized)
+  ) {
     return <FaCheckCircle />;
   }
 
@@ -71,21 +74,18 @@ const formatDateTime = (value) => {
   return date.toLocaleString();
 };
 
-const normalizeStatus = (status) => {
-  return String(status || "")
-    .trim()
-    .toLowerCase();
-};
+const normalizeStatus = (status) =>
+  String(status || "").trim().toLowerCase();
+
+const normalizeSymbolName = (value) =>
+  typeof value === "string" ? value.trim().toUpperCase() : "";
 
 /**
- * Extract the broker symbol name from an account-symbol object.
- *
- * The trading-universe endpoint may expose the symbol under different
- * property names depending on the backend response schema.
+ * Resolve a display name from an account-symbol object.
  */
 const getSymbolName = (item) => {
   if (typeof item === "string") {
-    return item;
+    return item.trim() || null;
   }
 
   if (!item || typeof item !== "object") {
@@ -101,34 +101,46 @@ const getSymbolName = (item) => {
   ];
 
   const value = candidates.find(
-    (candidate) => typeof candidate === "string" && candidate.trim().length > 0,
+    (candidate) =>
+      typeof candidate === "string" && candidate.trim().length > 0,
   );
 
   return value ? value.trim() : null;
 };
 
-const normalizeSymbolName = (value) => {
-  if (typeof value !== "string") {
-    return "";
-  }
-
-  return value.trim().toUpperCase();
-};
+/**
+ * Defensive account ownership check for records displayed in this page.
+ */
+const belongsToAccount = (run, accountId) =>
+  accountId != null &&
+  run?.account_id != null &&
+  String(run.account_id) === String(accountId);
 
 const StrategyRuns = () => {
   const dispatch = useDispatch();
 
   const {
-    items: strategyRuns,
+    items: strategyRuns = [],
     loading,
     error,
     mutationLoading,
     mutationError,
   } = useSelector((state) => state.strategyRuns);
 
+  const accounts = useSelector(
+    (state) => state.accounts?.accounts || [],
+  );
+
+  // The accounts slice is the source of truth for account selection.
+  const selectedAccount = useSelector(
+    (state) => state.accounts?.selectedAccount ?? null,
+  );
+
+  const selectedAccountId = selectedAccount?.id ?? null;
+
   const {
     selectedSymbols,
-    selectedAccountId,
+    selectedAccountId: universeAccountId,
     loading: symbolsLoading,
     error: symbolsError,
   } = useSelector((state) => state.symbols);
@@ -140,19 +152,91 @@ const StrategyRuns = () => {
   const [editingSymbols, setEditingSymbols] = useState([]);
   const [symbolSaveError, setSymbolSaveError] = useState(null);
 
-  const runs = Array.isArray(strategyRuns) ? strategyRuns : [];
+  /*
+   * Show only runs belonging to the currently selected account.
+   * This protects the UI from stale Redux records during account switches.
+   */
+  const runs = useMemo(() => {
+    if (!selectedAccountId) {
+      return [];
+    }
 
-  const availableAccountSymbols = Array.isArray(selectedSymbols)
-    ? selectedSymbols
-    : [];
+    const source = Array.isArray(strategyRuns) ? strategyRuns : [];
 
-  const loadRuns = useCallback(() => {
-    dispatch(fetchStrategyRuns());
+    return source.filter((run) =>
+      belongsToAccount(run, selectedAccountId),
+    );
+  }, [strategyRuns, selectedAccountId]);
+
+  /*
+   * Only use the trading universe if it belongs to the selected account.
+   * A response for a previously selected account must not populate this editor.
+   */
+  const availableAccountSymbols = useMemo(() => {
+    if (
+      !selectedAccountId ||
+      String(universeAccountId) !== String(selectedAccountId)
+    ) {
+      return [];
+    }
+
+    return Array.isArray(selectedSymbols) ? selectedSymbols : [];
+  }, [selectedSymbols, selectedAccountId, universeAccountId]);
+
+  /*
+   * Load accounts first. Once the selected account is established,
+   * loadRuns() below will request that account's strategy runs.
+   */
+  useEffect(() => {
+    dispatch(fetchAccounts());
   }, [dispatch]);
+
+  /*
+   * Fetch the strategy list for the selected account only.
+   * fetchStrategyRuns and its API must accept the account ID.
+   */
+  const loadRuns = useCallback(() => {
+    if (!selectedAccountId) {
+      return;
+    }
+
+    return dispatch(fetchStrategyRuns(selectedAccountId));
+  }, [dispatch, selectedAccountId]);
 
   useEffect(() => {
     loadRuns();
   }, [loadRuns]);
+
+  /*
+   * Load the selected account's trading universe.
+   * The symbol editor also reloads the universe for its own strategy's account.
+   */
+  useEffect(() => {
+    if (!selectedAccountId) {
+      return;
+    }
+
+    dispatch(fetchTradingUniverse(selectedAccountId));
+  }, [dispatch, selectedAccountId]);
+
+  /*
+   * Clear any account-specific editor or pending confirmation state
+   * when the selected account changes.
+   */
+  useEffect(() => {
+    setSymbolEditorOpen(false);
+    setEditingStrategy(null);
+    setEditingSymbols([]);
+    setSymbolSaveError(null);
+    setActionStrategyId(null);
+  }, [selectedAccountId]);
+
+  const selectedAccountName =
+    selectedAccount?.account_name ||
+    selectedAccount?.account_number ||
+    (selectedAccountId
+      ? String(selectedAccountId).slice(0, 8)
+      : null);
 
   const summary = useMemo(() => {
     let running = 0;
@@ -168,7 +252,9 @@ const StrategyRuns = () => {
         running += 1;
       }
 
-      if (["completed", "complete", "success", "successful"].includes(status)) {
+      if (
+        ["completed", "complete", "success", "successful"].includes(status)
+      ) {
         completed += 1;
       }
 
@@ -191,8 +277,16 @@ const StrategyRuns = () => {
     };
   }, [runs]);
 
+  /*
+   * Enable or disable a run only if it belongs to the selected account.
+   */
   const handleToggleStrategy = async (run) => {
-    if (!run?.id || mutationLoading || actionStrategyId) {
+    if (
+      !run?.id ||
+      !belongsToAccount(run, selectedAccountId) ||
+      mutationLoading ||
+      actionStrategyId
+    ) {
       return;
     }
 
@@ -204,39 +298,47 @@ const StrategyRuns = () => {
       } else {
         await dispatch(enableStrategyRun(run.id)).unwrap();
       }
+
+      // Reload the currently selected account's authoritative list.
+      if (selectedAccountId) {
+        await dispatch(fetchStrategyRuns(selectedAccountId)).unwrap();
+      }
     } catch {
-      // The thunk stores the mutation error in Redux.
+      // Redux retains the mutation or fetch error.
     } finally {
       setActionStrategyId(null);
     }
   };
 
-  /**
-   * Open the symbol editor for a strategy.
-   *
-   * The trading universe is loaded specifically for this strategy's
-   * account so symbols from another account cannot accidentally appear.
+  /*
+   * Open the symbol editor for a run from the selected account.
    */
   const handleOpenSymbolEditor = async (run) => {
-    if (!run?.id || !run?.account_id) {
+    if (
+      !run?.id ||
+      !belongsToAccount(run, selectedAccountId)
+    ) {
       return;
     }
 
     setSymbolSaveError(null);
     setEditingStrategy(run);
+
     setEditingSymbols(
       Array.isArray(run.symbols)
         ? run.symbols.filter(
-            (symbol) => typeof symbol === "string" && symbol.trim().length > 0,
+            (symbol) =>
+              typeof symbol === "string" && symbol.trim().length > 0,
           )
         : [],
     );
+
     setSymbolEditorOpen(true);
 
     try {
       await dispatch(fetchTradingUniverse(run.account_id)).unwrap();
     } catch {
-      // symbolsError from Redux is displayed inside the modal.
+      // Display symbolsError when provided by the symbols slice.
     }
   };
 
@@ -262,14 +364,11 @@ const StrategyRuns = () => {
       const normalized = normalizeSymbolName(symbolName);
 
       const alreadyAssigned = current.some(
-        (assignedSymbol) => normalizeSymbolName(assignedSymbol) === normalized,
+        (assignedSymbol) =>
+          normalizeSymbolName(assignedSymbol) === normalized,
       );
 
-      if (alreadyAssigned) {
-        return current;
-      }
-
-      return [...current, symbolName];
+      return alreadyAssigned ? current : [...current, symbolName];
     });
 
     setSymbolSaveError(null);
@@ -280,15 +379,36 @@ const StrategyRuns = () => {
 
     setEditingSymbols((current) =>
       current.filter(
-        (assignedSymbol) => normalizeSymbolName(assignedSymbol) !== normalized,
+        (assignedSymbol) =>
+          normalizeSymbolName(assignedSymbol) !== normalized,
       ),
     );
 
     setSymbolSaveError(null);
   };
 
+  /*
+   * Save symbol assignments only if the edited run still belongs to
+   * the selected account.
+   */
   const handleSaveSymbols = async () => {
-    if (!editingStrategy?.id) {
+    if (
+      !editingStrategy?.id ||
+      !belongsToAccount(editingStrategy, selectedAccountId)
+    ) {
+      setSymbolSaveError(
+        "The selected account changed. Reopen the symbol editor before saving.",
+      );
+      return;
+    }
+
+    if (
+      String(universeAccountId) !==
+      String(editingStrategy.account_id)
+    ) {
+      setSymbolSaveError(
+        "The trading universe does not match this strategy's account. Reload the symbols and try again.",
+      );
       return;
     }
 
@@ -304,35 +424,30 @@ const StrategyRuns = () => {
         }),
       ).unwrap();
 
+      // Reload only the account currently being viewed.
+      await dispatch(fetchStrategyRuns(selectedAccountId)).unwrap();
+
       setSymbolEditorOpen(false);
       setEditingStrategy(null);
       setEditingSymbols([]);
-
-      /*
-       * The update thunk already updates the strategy in Redux.
-       * Reloading ensures the table reflects the authoritative backend
-       * representation as well.
-       */
-      await dispatch(fetchStrategyRuns()).unwrap();
-    } catch (error) {
+    } catch (saveError) {
       setSymbolSaveError(
-        typeof error === "string"
-          ? error
+        typeof saveError === "string"
+          ? saveError
           : "Failed to update strategy symbols.",
       );
     }
   };
 
   const assignedSymbolKeys = useMemo(
-    () => new Set(editingSymbols.map((symbol) => normalizeSymbolName(symbol))),
+    () =>
+      new Set(
+        editingSymbols.map((symbol) => normalizeSymbolName(symbol)),
+      ),
     [editingSymbols],
   );
 
   const availableSymbols = useMemo(() => {
-    if (!Array.isArray(availableAccountSymbols)) {
-      return [];
-    }
-
     return availableAccountSymbols.filter((symbol) => {
       const symbolName = getSymbolName(symbol);
 
@@ -340,26 +455,42 @@ const StrategyRuns = () => {
         return false;
       }
 
-      return !assignedSymbolKeys.has(normalizeSymbolName(symbolName));
+      return !assignedSymbolKeys.has(
+        normalizeSymbolName(symbolName),
+      );
     });
   }, [availableAccountSymbols, assignedSymbolKeys]);
 
+  /*
+   * This check requires both the strategy and the loaded trading universe
+   * to match the currently selected account.
+   */
   const universeBelongsToStrategyAccount =
-    editingStrategy?.account_id &&
-    selectedAccountId &&
-    String(editingStrategy.account_id) === String(selectedAccountId);
+    Boolean(
+      editingStrategy?.account_id &&
+      selectedAccountId &&
+      String(editingStrategy.account_id) ===
+        String(selectedAccountId) &&
+      String(universeAccountId) ===
+        String(editingStrategy.account_id),
+    );
 
   return (
     <main className="strategy-runs-page">
       <header className="strategy-runs-header">
         <div className="strategy-runs-header__content">
-          <span className="dashboard-eyebrow">AUTOMATION MONITOR</span>
+          <span className="dashboard-eyebrow">
+            AUTOMATION MONITOR
+            {selectedAccountName
+              ? ` · ${selectedAccountName}`
+              : ""}
+          </span>
 
           <h1>Strategy Runs</h1>
 
           <p>
-            Monitor deployed strategies, their assigned symbols, execution
-            state, and trading performance.
+            Monitor deployed strategies, their assigned symbols,
+            execution state, and trading performance for the selected account.
           </p>
         </div>
 
@@ -367,7 +498,7 @@ const StrategyRuns = () => {
           type="button"
           className="strategy-runs-refresh"
           onClick={loadRuns}
-          disabled={loading || mutationLoading}
+          disabled={loading || mutationLoading || !selectedAccountId}
         >
           <FaSyncAlt className={loading ? "strategy-spin" : ""} />
 
@@ -375,11 +506,23 @@ const StrategyRuns = () => {
         </button>
       </header>
 
+      {!selectedAccountId && (
+        <div className="dashboard-error strategy-runs-error">
+          <FaExclamationCircle />
+
+          <span>Select a trading account to view its strategy runs.</span>
+        </div>
+      )}
+
       {error && (
         <div className="dashboard-error strategy-runs-error">
           <FaExclamationCircle />
 
-          <span>{error}</span>
+          <span>
+            {typeof error === "string"
+              ? error
+              : "Unable to load strategy runs."}
+          </span>
         </div>
       )}
 
@@ -387,7 +530,11 @@ const StrategyRuns = () => {
         <div className="dashboard-error strategy-runs-error">
           <FaExclamationCircle />
 
-          <span>{mutationError}</span>
+          <span>
+            {typeof mutationError === "string"
+              ? mutationError
+              : "Unable to update the strategy."}
+          </span>
         </div>
       )}
 
@@ -451,37 +598,50 @@ const StrategyRuns = () => {
             </thead>
 
             <tbody>
-              {loading && (
+              {!selectedAccountId && (
                 <tr>
-                  <td colSpan="10" className="strategy-empty">
-                    <FaSyncAlt className="strategy-spin" />
+                  <td colSpan={10} className="strategy-empty">
+                    <FaRobot />
 
-                    <strong>Loading strategies...</strong>
+                    <strong>No trading account selected</strong>
 
                     <span>
-                      Retrieving the latest strategy assignments and execution
-                      history.
+                      Select an account to view its strategy assignments.
                     </span>
                   </td>
                 </tr>
               )}
 
-              {!loading && runs.length === 0 && (
+              {selectedAccountId && loading && (
                 <tr>
-                  <td colSpan="10" className="strategy-empty">
+                  <td colSpan={10} className="strategy-empty">
+                    <FaSyncAlt className="strategy-spin" />
+
+                    <strong>Loading strategies...</strong>
+
+                    <span>
+                      Retrieving strategy assignments for this account.
+                    </span>
+                  </td>
+                </tr>
+              )}
+
+              {selectedAccountId && !loading && runs.length === 0 && (
+                <tr>
+                  <td colSpan={10} className="strategy-empty">
                     <FaRobot />
 
                     <strong>No strategies assigned</strong>
 
                     <span>
-                      Existing strategy assignments will appear here when they
-                      are available.
+                      No strategy runs were returned for the selected account.
                     </span>
                   </td>
                 </tr>
               )}
 
               {!loading &&
+                selectedAccountId &&
                 runs.map((run) => {
                   const status = run.status || "UNKNOWN";
                   const statusClass = getStatusClass(status);
@@ -554,7 +714,10 @@ const StrategyRuns = () => {
                             type="button"
                             className="strategy-symbol-manage"
                             onClick={() => handleOpenSymbolEditor(run)}
-                            disabled={mutationLoading}
+                            disabled={
+                              mutationLoading ||
+                              !belongsToAccount(run, selectedAccountId)
+                            }
                             title="Manage strategy symbols"
                           >
                             <FaPlus />
@@ -599,7 +762,8 @@ const StrategyRuns = () => {
                           onClick={() => handleToggleStrategy(run)}
                           disabled={
                             mutationLoading ||
-                            Boolean(actionStrategyId && !isProcessing)
+                            Boolean(actionStrategyId) ||
+                            !belongsToAccount(run, selectedAccountId)
                           }
                           title={
                             run.enabled
@@ -657,7 +821,19 @@ const StrategyRuns = () => {
                   {editingStrategy.strategy_name || "Strategy"}
                 </h2>
 
-                {editingStrategy.run_name && <p>{editingStrategy.run_name}</p>}
+                {editingStrategy.run_name && (
+                  <p>{editingStrategy.run_name}</p>
+                )}
+
+                <p>
+                  Account:{" "}
+                  {accounts.find(
+                    (account) =>
+                      String(account.id) ===
+                      String(editingStrategy.account_id),
+                  )?.account_name ||
+                    String(editingStrategy.account_id).slice(0, 8)}
+                </p>
               </div>
 
               <button
@@ -684,7 +860,11 @@ const StrategyRuns = () => {
                 <div className="dashboard-error strategy-symbol-modal__error">
                   <FaExclamationCircle />
 
-                  <span>{symbolsError}</span>
+                  <span>
+                    {typeof symbolsError === "string"
+                      ? symbolsError
+                      : "Unable to load account symbols."}
+                  </span>
                 </div>
               )}
 
@@ -739,8 +919,8 @@ const StrategyRuns = () => {
                     <h3>Available account symbols</h3>
 
                     <p>
-                      Only symbols selected for this trading account can be
-                      assigned to the strategy.
+                      Only symbols from this strategy's trading account can
+                      be assigned.
                     </p>
                   </div>
 
@@ -749,13 +929,24 @@ const StrategyRuns = () => {
                   )}
                 </div>
 
-                {!symbolsLoading && !universeBelongsToStrategyAccount && (
+                {symbolsLoading && (
                   <div className="strategy-symbol-empty">
                     <FaSyncAlt className="strategy-spin" />
 
-                    <span>Loading the account trading universe...</span>
+                    <span>Loading account symbols...</span>
                   </div>
                 )}
+
+                {!symbolsLoading &&
+                  !universeBelongsToStrategyAccount && (
+                    <div className="strategy-symbol-empty">
+                      <FaSyncAlt className="strategy-spin" />
+
+                      <span>
+                        Waiting for the trading universe for this account.
+                      </span>
+                    </div>
+                  )}
 
                 {!symbolsLoading &&
                   universeBelongsToStrategyAccount &&
@@ -764,8 +955,8 @@ const StrategyRuns = () => {
                       <FaCheckCircle />
 
                       <span>
-                        All selected account symbols are already assigned to
-                        this strategy.
+                        All selected account symbols are already assigned
+                        to this strategy.
                       </span>
                     </div>
                   )}
@@ -782,10 +973,15 @@ const StrategyRuns = () => {
                             type="button"
                             className="strategy-symbol-available__item"
                             key={
-                              symbol?.id || symbolName || JSON.stringify(symbol)
+                              symbol?.id ||
+                              symbolName ||
+                              JSON.stringify(symbol)
                             }
                             onClick={() => handleAddSymbol(symbol)}
-                            disabled={mutationLoading}
+                            disabled={
+                              mutationLoading ||
+                              !universeBelongsToStrategyAccount
+                            }
                           >
                             <span>{symbolName}</span>
 
@@ -817,7 +1013,8 @@ const StrategyRuns = () => {
                 disabled={
                   mutationLoading ||
                   symbolsLoading ||
-                  !universeBelongsToStrategyAccount
+                  !universeBelongsToStrategyAccount ||
+                  !belongsToAccount(editingStrategy, selectedAccountId)
                 }
               >
                 {mutationLoading ? (
@@ -826,7 +1023,9 @@ const StrategyRuns = () => {
                   <FaSave />
                 )}
 
-                <span>{mutationLoading ? "Saving..." : "Save Changes"}</span>
+                <span>
+                  {mutationLoading ? "Saving..." : "Save Changes"}
+                </span>
               </button>
             </footer>
           </section>

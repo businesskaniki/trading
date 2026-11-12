@@ -79,27 +79,26 @@ async def create_order(
     response_model=list[OrderResponse],
 )
 async def list_orders(
-    skip: int = Query(
-        default=0,
-        ge=0,
-    ),
-    limit: int = Query(
-        default=100,
-        ge=1,
-        le=500,
-    ),
+    account_id: UUID = Query(...),
+    skip: int = Query(default=0, ge=0),
+    limit: int = Query(default=100, ge=1, le=500),
     current_user: User = Depends(get_current_user),
     service: OrderService = Depends(get_order_service),
 ):
-    """
-    List orders belonging to the current user.
-    """
+    """Return orders for one account owned by the current user."""
 
-    return await service.get_orders(
-        skip=skip,
-        limit=limit,
-        user_id=current_user.id,
-    )
+    try:
+        return await service.get_orders_by_account(
+            account_id=account_id,
+            skip=skip,
+            limit=limit,
+            user_id=current_user.id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trading account not found.",
+        ) from exc
 
 
 # ----------------------------------------------------------------------

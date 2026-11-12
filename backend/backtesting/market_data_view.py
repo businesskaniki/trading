@@ -37,6 +37,7 @@ class BacktestMarketDataView(MarketDataView):
         market_data: BacktestMarketData,
         *,
         current_time: datetime | None = None,
+        warmup_end: datetime | None = None,
     ) -> None:
         if not isinstance(market_data, BacktestMarketData):
             raise TypeError("market_data must be a BacktestMarketData instance.")
@@ -45,6 +46,12 @@ class BacktestMarketDataView(MarketDataView):
 
         self._current_time = self._normalize_datetime(
             current_time,
+        )
+
+        # Exclusive boundary: initialization can see only candles
+        # strictly before the requested test start.
+        self._warmup_end = self._normalize_datetime(
+            warmup_end,
         )
 
     # ==================================================================
@@ -139,22 +146,17 @@ class BacktestMarketDataView(MarketDataView):
         count: int = 200,
     ) -> list[BacktestCandle]:
         """
-        Return the latest candles visible to the strategy.
+        Return recent candles visible at initialization or simulation time.
 
-        Only candles satisfying:
-
-            candle.timestamp <= current_time
-
-        are exposed.
-
-        When the simulation clock has not started, an empty result is
-        returned rather than exposing the complete historical dataset.
+        During initialization, only candles strictly before warmup_end are
+        visible. After the simulation clock starts, visibility is limited
+        to candles whose timestamps are at or before that clock.
         """
 
         if count <= 0:
             return []
 
-        if self._current_time is None:
+        if self._current_time is None and self._warmup_end is None:
             return []
 
         candles = self._market_data.candles(
@@ -165,12 +167,23 @@ class BacktestMarketDataView(MarketDataView):
         if not candles:
             return []
 
-        visible = [
-            candle for candle in candles if candle.timestamp <= self._current_time
-        ]
+        if self._current_time is None:
+            warmup_end = self._warmup_end
+            if warmup_end is None:
+                return []
 
-        if not visible:
-            return []
+            visible = [
+                candle
+                for candle in candles
+                if candle.timestamp < warmup_end
+            ]
+        else:
+            current_time = self._current_time
+            visible = [
+                candle
+                for candle in candles
+                if candle.timestamp <= current_time
+            ]
 
         return visible[-count:]
 

@@ -1,3 +1,4 @@
+
 import { useEffect, useMemo, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 import {
@@ -33,55 +34,35 @@ import "../../../css/orders.css";
 
 const terminalStatuses = ["FILLED", "CANCELLED", "REJECTED", "EXPIRED"];
 
+const belongsToAccount = (order, accountId) =>
+  accountId != null &&
+  order?.account_id != null &&
+  String(order.account_id) === String(accountId);
+
 const Orders = () => {
   const dispatch = useDispatch();
 
-  const { orders, loading, saving, acting, error } = useSelector(
-    (state) => state.orders,
+  const {
+    orders: reduxOrders = [],
+    loading,
+    saving,
+    acting,
+    error,
+  } = useSelector((state) => state.orders);
+
+  const accounts = useSelector(
+    (state) => state.accounts?.accounts || [],
   );
 
-  const accounts = useSelector((state) => state.accounts?.accounts || []);
+  const selectedAccount = useSelector(
+    (state) => state.accounts?.selectedAccount ?? null,
+  );
+
+  const selectedAccountId = selectedAccount?.id ?? null;
 
   const symbolsByAccount = useSelector(
     (state) => state.symbols?.symbolsByAccount || {},
   );
-
-  /*
-   * Flatten all account-specific symbol collections for OrderForm.
-   *
-   * OrderForm can use the account-specific fields to determine which
-   * symbols belong to the selected account.
-   */
-  const symbols = useMemo(() => {
-    const flattened = [];
-
-    Object.entries(symbolsByAccount).forEach(([accountId, accountSymbols]) => {
-      if (!Array.isArray(accountSymbols)) {
-        return;
-      }
-
-      accountSymbols.forEach((symbol) => {
-        flattened.push({
-          ...symbol,
-          account_id: symbol.account_id || accountId,
-        });
-      });
-    });
-
-    return flattened;
-  }, [symbolsByAccount]);
-
-  /*
-   * Accounts represented by the current order registry.
-   *
-   * Retained for refresh/search behavior and compatibility with
-   * account-specific order loading.
-   */
-  const orderAccountIds = useMemo(() => {
-    return [
-      ...new Set(orders.map((order) => order.account_id).filter(Boolean)),
-    ];
-  }, [orders]);
 
   const [query, setQuery] = useState("");
   const [status, setStatus] = useState("ALL");
@@ -90,38 +71,79 @@ const Orders = () => {
   const [confirmation, setConfirmation] = useState(null);
 
   /*
-   * Load orders and trading accounts.
+   * Account-scoped order registry.
+   *
+   * Filter locally as an additional safeguard against stale Redux data
+   * when the selected account changes.
+   */
+  const orders = useMemo(() => {
+    if (!selectedAccountId) {
+      return [];
+    }
+
+    const source = Array.isArray(reduxOrders) ? reduxOrders : [];
+
+    return source.filter((order) =>
+      belongsToAccount(order, selectedAccountId),
+    );
+  }, [reduxOrders, selectedAccountId]);
+
+  /*
+   * The order form uses only the selected account and its symbols.
+   * This prevents accidentally creating an order against another
+   * account while viewing the current account's order registry.
+   */
+  const formAccounts = useMemo(
+    () => (selectedAccount ? [selectedAccount] : []),
+    [selectedAccount],
+  );
+
+  const symbols = useMemo(() => {
+    if (!selectedAccountId) {
+      return [];
+    }
+
+    const accountSymbols =
+      symbolsByAccount[String(selectedAccountId)] || [];
+
+    if (!Array.isArray(accountSymbols)) {
+      return [];
+    }
+
+    return accountSymbols.map((symbol) => ({
+      ...symbol,
+      account_id: symbol.account_id || selectedAccountId,
+    }));
+  }, [symbolsByAccount, selectedAccountId]);
+
+  /*
+   * Load accounts first. The selected-account effect below will load
+   * orders once the account slice establishes the active selection.
    */
   useEffect(() => {
-    dispatch(fetchOrders());
     dispatch(fetchAccounts());
   }, [dispatch]);
 
   /*
-   * Load symbols for every available trading account.
-   *
-   * This is required for the Create Order form because there may be
-   * no existing orders yet, in which case orderAccountIds is empty.
+   * Load only the selected account's orders and symbol mapping.
+   * Re-run these requests whenever the selected account changes.
    */
   useEffect(() => {
-    if (!accounts.length) {
+    if (!selectedAccountId) {
       return;
     }
 
-    accounts.forEach((account) => {
-      if (!account?.id) {
-        return;
-      }
-
-      dispatch(fetchAccountSymbols(account.id));
-    });
-  }, [dispatch, accounts]);
+    dispatch(fetchOrders(selectedAccountId));
+    dispatch(fetchAccountSymbols(selectedAccountId));
+  }, [dispatch, selectedAccountId]);
 
   /*
-   * Find an account by ID.
+   * Resolve an account name.
    */
   const accountName = (id) => {
-    const account = accounts.find((item) => item.id === id);
+    const account = accounts.find(
+      (item) => String(item.id) === String(id),
+    );
 
     return (
       account?.account_name ||
@@ -131,11 +153,18 @@ const Orders = () => {
   };
 
   /*
-   * Find a symbol by canonical symbol ID and account.
+   * Resolve a symbol against the relevant account's symbol mapping.
    */
   const symbolName = (id, accountId) => {
-    const accountSymbol = (symbolsByAccount[String(accountId)] || []).find(
-      (item) => item.symbol_id === id || item.symbol?.id === id,
+    const accountSymbols =
+      symbolsByAccount[String(accountId)] || [];
+
+    const accountSymbol = accountSymbols.find(
+      (item) =>
+        (item.symbol_id != null &&
+          String(item.symbol_id) === String(id)) ||
+        (item.symbol?.id != null &&
+          String(item.symbol.id) === String(id)),
     );
 
     return (
@@ -148,55 +177,78 @@ const Orders = () => {
   };
 
   /*
-   * Status filter options.
+   * Status options are derived from the selected account's orders only.
    */
   const statuses = useMemo(
     () =>
-      [...new Set(orders.map((order) => order.status).filter(Boolean))].sort(),
+      [
+        ...new Set(
+          orders
+            .map((order) => order.status)
+            .filter(Boolean),
+        ),
+      ].sort(),
     [orders],
   );
 
   /*
-   * Filter orders.
+   * Search and status filtering, applied after account scoping.
    */
-  const filteredOrders = useMemo(
-    () =>
-      orders.filter((order) => {
-        const symbol = (symbolsByAccount[String(order.account_id)] || []).find(
-          (item) =>
-            item.symbol_id === order.symbol_id ||
-            item.symbol?.id === order.symbol_id,
-        );
+  const filteredOrders = useMemo(() => {
+    const normalizedQuery = query.trim().toLowerCase();
 
-        const symbolDisplayName =
-          symbol?.symbol_name ||
-          symbol?.name ||
-          symbol?.symbol?.name ||
-          symbol?.broker_symbol ||
-          "";
+    return orders.filter((order) => {
+      const accountSymbols =
+        symbolsByAccount[String(selectedAccountId)] || [];
 
-        const text = `
-          ${order.strategy || ""}
-          ${order.comment || ""}
-          ${symbolDisplayName}
-          ${order.ticket || ""}
-        `.toLowerCase();
+      const symbol = accountSymbols.find(
+        (item) =>
+          (item.symbol_id != null &&
+            String(item.symbol_id) === String(order.symbol_id)) ||
+          (item.symbol?.id != null &&
+            String(item.symbol.id) === String(order.symbol_id)),
+      );
 
-        return (
-          (!query || text.includes(query.toLowerCase())) &&
-          (status === "ALL" || order.status === status)
-        );
-      }),
-    [orders, query, status, symbolsByAccount],
-  );
+      const symbolDisplayName =
+        symbol?.symbol_name ||
+        symbol?.name ||
+        symbol?.symbol?.name ||
+        symbol?.broker_symbol ||
+        "";
+
+      const searchableText = [
+        order.strategy,
+        order.comment,
+        symbolDisplayName,
+        order.ticket,
+        order.side,
+        order.order_type,
+      ]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+
+      return (
+        (!normalizedQuery ||
+          searchableText.includes(normalizedQuery)) &&
+        (status === "ALL" || order.status === status)
+      );
+    });
+  }, [orders, query, status, symbolsByAccount, selectedAccountId]);
 
   /*
-   * Create / update order.
+   * Create or update an order.
    */
   const handleSubmit = async (data) => {
+    if (!selectedAccountId) {
+      return;
+    }
+
     let result;
 
     if (editingOrder) {
+      // Do not permit edits to move the order to a different account
+      // or symbol through the update payload.
       const updateData = Object.fromEntries(
         Object.entries(data).filter(
           ([key]) => !["account_id", "symbol_id"].includes(key),
@@ -210,7 +262,13 @@ const Orders = () => {
         }),
       );
     } else {
-      result = await dispatch(createOrder(data));
+      // Ensure new orders belong to the currently selected account.
+      result = await dispatch(
+        createOrder({
+          ...data,
+          account_id: selectedAccountId,
+        }),
+      );
     }
 
     if (
@@ -219,6 +277,9 @@ const Orders = () => {
     ) {
       setModalOpen(false);
       setEditingOrder(null);
+
+      // Reload the scoped registry to reflect the persisted result.
+      dispatch(fetchOrders(selectedAccountId));
     }
   };
 
@@ -226,6 +287,10 @@ const Orders = () => {
    * Delete an order.
    */
   const handleDelete = (order) => {
+    if (!belongsToAccount(order, selectedAccountId)) {
+      return;
+    }
+
     setConfirmation({
       title: "Delete order?",
       message: `Order ${
@@ -239,20 +304,12 @@ const Orders = () => {
 
   /*
    * Execute an order.
-   *
-   * This is the controlled manual execution test path:
-   *
-   * Orders page
-   *     ↓
-   * POST /orders/{id}/execute
-   *     ↓
-   * broker execution
-   *     ↓
-   * MT5 Bridge
-   *     ↓
-   * mt5.order_send()
    */
   const handleExecute = (order) => {
+    if (!belongsToAccount(order, selectedAccountId)) {
+      return;
+    }
+
     setConfirmation({
       title: "Execute order?",
       message: `Submit ${order.side} ${order.volume} ${symbolName(
@@ -268,6 +325,10 @@ const Orders = () => {
    * Cancel an order.
    */
   const handleCancel = (order) => {
+    if (!belongsToAccount(order, selectedAccountId)) {
+      return;
+    }
+
     setConfirmation({
       title: "Cancel order?",
       message:
@@ -285,74 +346,86 @@ const Orders = () => {
   };
 
   /*
-   * Execute confirmation action.
+   * Execute a confirmation action and reload the current account's
+   * orders after a successful mutation.
    */
   const confirmAction = async () => {
     if (!confirmation?.action) {
       return;
     }
 
-    await confirmation.action();
+    try {
+      const result = await confirmation.action();
 
-    setConfirmation(null);
+      // Redux Toolkit rejected async thunks resolve to rejected actions
+      // unless unwrap() is used. Detect those responses here.
+      if (result?.meta?.requestStatus === "rejected") {
+        return;
+      }
+
+      if (selectedAccountId) {
+        dispatch(fetchOrders(selectedAccountId));
+      }
+
+      setConfirmation(null);
+    } catch (actionError) {
+      console.error("Order action failed:", actionError);
+    }
   };
 
   /*
-   * Open create modal.
+   * Open the create modal.
    */
   const openCreate = () => {
+    if (!selectedAccountId) {
+      return;
+    }
+
     setEditingOrder(null);
     setModalOpen(true);
   };
 
   /*
-   * Open edit modal.
+   * Open the edit modal only for an order in the selected account.
    */
   const openEdit = (order) => {
+    if (!belongsToAccount(order, selectedAccountId)) {
+      return;
+    }
+
     setEditingOrder(order);
     setModalOpen(true);
   };
 
   /*
-   * Refresh orders and account symbols.
+   * Refresh only the selected account's orders and symbols.
    */
   const refreshOrders = () => {
-    dispatch(fetchOrders());
+    if (!selectedAccountId) {
+      return;
+    }
 
-    accounts.forEach((account) => {
-      if (!account?.id) {
-        return;
-      }
-
-      dispatch(fetchAccountSymbols(account.id));
-    });
-
-    /*
-     * Also refresh account symbols for accounts currently represented
-     * in the order registry, preserving the previous behavior.
-     */
-    orderAccountIds.forEach((accountId) => {
-      if (!accounts.some((account) => account.id === accountId)) {
-        dispatch(fetchAccountSymbols(accountId));
-      }
-    });
+    dispatch(fetchOrders(selectedAccountId));
+    dispatch(fetchAccountSymbols(selectedAccountId));
   };
 
   return (
     <main className="orders-page">
-      {/* =====================================================
-          HEADER
-      ====================================================== */}
-
+      {/* HEADER */}
       <section className="orders-header">
         <div>
-          <span className="orders-eyebrow">EXECUTION PIPELINE</span>
+          <span className="orders-eyebrow">
+            EXECUTION PIPELINE
+            {selectedAccountId
+              ? ` · ${accountName(selectedAccountId)}`
+              : ""}
+          </span>
 
           <h1>Orders</h1>
 
           <p>
-            Create, monitor and execute trading instructions across your
-            accounts.
+            Create, monitor and execute trading instructions for
+            the selected trading account.
           </p>
         </div>
 
@@ -360,17 +433,14 @@ const Orders = () => {
           type="button"
           className="order-button order-button--primary"
           onClick={openCreate}
-          disabled={saving || accounts.length === 0}
+          disabled={saving || !selectedAccountId}
         >
           <FaPlus />
           Create Order
         </button>
       </section>
 
-      {/* =====================================================
-          ERROR
-      ====================================================== */}
-
+      {/* ERROR */}
       {error && (
         <div className="orders-error">
           <span>
@@ -389,10 +459,7 @@ const Orders = () => {
         </div>
       )}
 
-      {/* =====================================================
-          STATISTICS
-      ====================================================== */}
-
+      {/* STATISTICS — SELECTED ACCOUNT ONLY */}
       <section className="orders-stats">
         <div className="order-stat">
           <FaClipboardList />
@@ -412,7 +479,9 @@ const Orders = () => {
             <strong>
               {
                 orders.filter((order) =>
-                  ["CREATED", "SUBMITTED", "PENDING"].includes(order.status),
+                  ["CREATED", "SUBMITTED", "PENDING"].includes(
+                    order.status,
+                  ),
                 ).length
               }
             </strong>
@@ -426,7 +495,11 @@ const Orders = () => {
             <span>Filled Orders</span>
 
             <strong>
-              {orders.filter((order) => order.status === "FILLED").length}
+              {
+                orders.filter(
+                  (order) => order.status === "FILLED",
+                ).length
+              }
             </strong>
           </div>
         </div>
@@ -438,16 +511,17 @@ const Orders = () => {
             <span>Sell Orders</span>
 
             <strong>
-              {orders.filter((order) => order.side === "SELL").length}
+              {
+                orders.filter(
+                  (order) => order.side === "SELL",
+                ).length
+              }
             </strong>
           </div>
         </div>
       </section>
 
-      {/* =====================================================
-          SEARCH / FILTER
-      ====================================================== */}
-
+      {/* SEARCH / FILTER */}
       <section className="orders-toolbar">
         <div className="orders-search">
           <FaSearch />
@@ -456,6 +530,8 @@ const Orders = () => {
             value={query}
             onChange={(event) => setQuery(event.target.value)}
             placeholder="Search strategy, symbol or ticket..."
+            aria-label="Search orders"
+            disabled={!selectedAccountId}
           />
         </div>
 
@@ -463,6 +539,8 @@ const Orders = () => {
           <select
             value={status}
             onChange={(event) => setStatus(event.target.value)}
+            aria-label="Filter orders by status"
+            disabled={!selectedAccountId}
           >
             <option value="ALL">All statuses</option>
 
@@ -477,23 +555,21 @@ const Orders = () => {
             type="button"
             className="orders-refresh"
             onClick={refreshOrders}
-            disabled={loading}
+            disabled={loading || !selectedAccountId}
             title="Refresh orders"
           >
-            <FaSyncAlt className={loading ? "orders-spin" : ""} />
+            <FaSyncAlt
+              className={loading ? "orders-spin" : ""}
+            />
           </button>
         </div>
       </section>
 
-      {/* =====================================================
-          ORDER TABLE
-      ====================================================== */}
-
+      {/* ORDER TABLE */}
       <section className="orders-card">
         <header className="orders-card__header">
           <div>
             <span>ORDER REGISTRY</span>
-
             <h2>Trading Orders</h2>
           </div>
 
@@ -518,45 +594,63 @@ const Orders = () => {
             </thead>
 
             <tbody>
-              {loading && (
+              {!selectedAccountId && (
                 <tr>
-                  <td colSpan="7" className="orders-empty">
-                    <FaSyncAlt className="orders-spin" />
-
-                    <strong>Loading orders...</strong>
-                  </td>
-                </tr>
-              )}
-
-              {!loading && filteredOrders.length === 0 && (
-                <tr>
-                  <td colSpan="7" className="orders-empty">
+                  <td colSpan={7} className="orders-empty">
                     <FaClipboardList />
-
-                    <strong>
-                      {orders.length
-                        ? "No matching orders"
-                        : "No orders configured"}
-                    </strong>
-
+                    <strong>No trading account selected</strong>
                     <span>
-                      {orders.length
-                        ? "Try changing your search or filter."
-                        : "Create your first trading instruction to get started."}
+                      Select a trading account to view and manage
+                      its orders.
                     </span>
-
-                    <button
-                      type="button"
-                      className="order-button order-button--primary"
-                      onClick={openCreate}
-                      disabled={accounts.length === 0}
-                    >
-                      <FaPlus />
-                      Create Order
-                    </button>
                   </td>
                 </tr>
               )}
+
+              {selectedAccountId &&
+                loading &&
+                orders.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="orders-empty">
+                      <FaSyncAlt className="orders-spin" />
+                      <strong>Loading orders...</strong>
+                    </td>
+                  </tr>
+                )}
+
+              {selectedAccountId &&
+                !loading &&
+                filteredOrders.length === 0 && (
+                  <tr>
+                    <td colSpan={7} className="orders-empty">
+                      <FaClipboardList />
+
+                      <strong>
+                        {orders.length
+                          ? "No matching orders"
+                          : "No orders configured"}
+                      </strong>
+
+                      <span>
+                        {orders.length
+                          ? "Try changing your search or status filter."
+                          : "Create your first trading instruction for this account."}
+                      </span>
+
+                      {!orders.length && (
+                        <button
+                          type="button"
+                          className="order-button order-button--primary"
+                          onClick={openCreate}
+                          disabled={!selectedAccountId || saving}
+                        >
+                          <FaPlus />
+                          Create Order
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                )}
 
               {!loading &&
                 filteredOrders.map((order) => (
@@ -579,7 +673,9 @@ const Orders = () => {
                         </span>
 
                         <div>
-                          <strong>{order.strategy || "Manual Order"}</strong>
+                          <strong>
+                            {order.strategy || "Manual Order"}
+                          </strong>
 
                           <span>
                             {order.order_type}{" "}
@@ -594,7 +690,10 @@ const Orders = () => {
                     {/* INSTRUMENT */}
                     <td>
                       <strong>
-                        {symbolName(order.symbol_id, order.account_id)}
+                        {symbolName(
+                          order.symbol_id,
+                          order.account_id,
+                        )}
                       </strong>
 
                       <span className="order-subvalue">
@@ -610,8 +709,12 @@ const Orders = () => {
                       <strong>{order.volume}</strong>
 
                       <span className="order-subvalue">
-                        {order.executed_price || order.requested_price
-                          ? `@ ${order.executed_price || order.requested_price}`
+                        {order.executed_price ||
+                        order.requested_price
+                          ? `@ ${
+                              order.executed_price ||
+                              order.requested_price
+                            }`
                           : "Market price"}
                       </span>
                     </td>
@@ -630,7 +733,9 @@ const Orders = () => {
                     {/* CREATED */}
                     <td>
                       {order.created_at
-                        ? new Date(order.created_at).toLocaleDateString()
+                        ? new Date(
+                            order.created_at,
+                          ).toLocaleDateString()
                         : "-"}
                     </td>
 
@@ -642,7 +747,8 @@ const Orders = () => {
                           title="Execute order"
                           onClick={() => handleExecute(order)}
                           disabled={
-                            acting || terminalStatuses.includes(order.status)
+                            acting ||
+                            terminalStatuses.includes(order.status)
                           }
                         >
                           <FaPlay />
@@ -653,7 +759,8 @@ const Orders = () => {
                           title="Cancel order"
                           onClick={() => handleCancel(order)}
                           disabled={
-                            acting || terminalStatuses.includes(order.status)
+                            acting ||
+                            terminalStatuses.includes(order.status)
                           }
                         >
                           <FaTrash />
@@ -685,24 +792,18 @@ const Orders = () => {
         </div>
       </section>
 
-      {/* =====================================================
-          ORDER FORM
-      ====================================================== */}
-
+      {/* ORDER FORM — SELECTED ACCOUNT */}
       <OrderForm
         isOpen={modalOpen}
         onClose={() => !saving && setModalOpen(false)}
         onSubmit={handleSubmit}
         order={editingOrder}
-        accounts={accounts}
+        accounts={formAccounts}
         symbols={symbols}
         loading={saving}
       />
 
-      {/* =====================================================
-          CONFIRMATION
-      ====================================================== */}
-
+      {/* CONFIRMATION */}
       <ConfirmModal
         isOpen={Boolean(confirmation)}
         {...confirmation}

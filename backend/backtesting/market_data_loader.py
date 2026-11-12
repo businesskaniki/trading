@@ -415,6 +415,9 @@ class HistoricalMarketDataLoader:
         hours=6,
     )
 
+    # Bounded history for strategy indicator initialization.
+    DEFAULT_WARMUP_CANDLE_COUNT = 500
+
     def __init__(
         self,
         *,
@@ -627,7 +630,59 @@ class HistoricalMarketDataLoader:
                 statement,
             )
 
-            rows = result.scalars().unique().all()
+            range_rows = result.scalars().unique().all()
+
+            # Select the latest pre-start candles independently for each
+            # symbol/timeframe. They warm indicators but are not part of
+            # the requested backtest range or its coverage calculation.
+            warmup_ranked = (
+                select(
+                    HistoricalCandle.symbol_id.label("symbol_id"),
+                    HistoricalCandle.timeframe.label("timeframe"),
+                    HistoricalCandle.timestamp.label("timestamp"),
+                    func.row_number().over(
+                        partition_by=(
+                            HistoricalCandle.symbol_id,
+                            HistoricalCandle.timeframe,
+                        ),
+                        order_by=HistoricalCandle.timestamp.desc(),
+                    ).label("warmup_rank"),
+                )
+                .join(HistoricalCandle.symbol)
+                .where(func.upper(Symbol.name).in_(symbols))
+                .where(HistoricalCandle.timeframe.in_(timeframes))
+                .where(HistoricalCandle.timestamp < start)
+                .subquery()
+            )
+
+            warmup_statement = (
+                select(HistoricalCandle)
+                .options(joinedload(HistoricalCandle.symbol))
+                .join(
+                    warmup_ranked,
+                    and_(
+                        HistoricalCandle.symbol_id
+                        == warmup_ranked.c.symbol_id,
+                        HistoricalCandle.timeframe
+                        == warmup_ranked.c.timeframe,
+                        HistoricalCandle.timestamp
+                        == warmup_ranked.c.timestamp,
+                    ),
+                )
+                .where(
+                    warmup_ranked.c.warmup_rank
+                    <= self.DEFAULT_WARMUP_CANDLE_COUNT,
+                )
+                .order_by(
+                    HistoricalCandle.timestamp.asc(),
+                    HistoricalCandle.symbol_id.asc(),
+                    HistoricalCandle.timeframe.asc(),
+                )
+            )
+
+            warmup_result = await session.execute(warmup_statement)
+            warmup_rows = warmup_result.scalars().unique().all()
+            rows = list(warmup_rows) + list(range_rows)
 
             symbol_metadata_result = await session.execute(
                 select(
@@ -711,19 +766,7 @@ class HistoricalMarketDataLoader:
             if state is None:
                 continue
 
-            state["candles"] += 1
-
             state["symbol_id"] = row.symbol_id
-
-            if state["range_first"] is None or timestamp < state["range_first"]:
-                state["range_first"] = timestamp
-
-            if state["range_last"] is None or timestamp > state["range_last"]:
-                state["range_last"] = timestamp
-
-            state["timestamps"].append(
-                timestamp,
-            )
 
             dedupe_key = (
                 symbol,
@@ -739,12 +782,27 @@ class HistoricalMarketDataLoader:
                     timeframe,
                     timestamp,
                 )
-
                 continue
 
-            seen_candles.add(
-                dedupe_key,
-            )
+            seen_candles.add(dedupe_key)
+
+            # Only requested-range bars count toward coverage validation.
+            if start <= timestamp < end:
+                state["candles"] += 1
+
+                if (
+                    state["range_first"] is None
+                    or timestamp < state["range_first"]
+                ):
+                    state["range_first"] = timestamp
+
+                if (
+                    state["range_last"] is None
+                    or timestamp > state["range_last"]
+                ):
+                    state["range_last"] = timestamp
+
+                state["timestamps"].append(timestamp)
 
             candles.append(
                 self._to_backtest_candle(

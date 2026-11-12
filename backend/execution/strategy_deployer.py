@@ -616,7 +616,10 @@ class LiveStrategyDeployer:
         if not run.enabled:
             return False
 
-        if run.status != StrategyRunStatus.RUNNING:
+        if run.status not in {
+            StrategyRunStatus.CREATED,
+            StrategyRunStatus.RUNNING,
+        }:
             return False
 
         return run.run_type in {

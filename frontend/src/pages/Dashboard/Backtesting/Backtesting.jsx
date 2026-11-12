@@ -88,15 +88,27 @@ const isRunningStatus = (status) => {
 };
 
 const isCompletedStatus = (status) => {
-  return ["COMPLETED", "COMPLETE", "FINISHED"].includes(status);
+  return ["COMPLETED", "COMPLETE", "FINISHED"].includes(
+    String(status || "").toUpperCase(),
+  );
 };
 
 const isStoppedStatus = (status) => {
-  return ["STOPPED", "CANCELLED", "CANCELED"].includes(status);
+  return ["STOPPED", "CANCELLED", "CANCELED"].includes(
+    String(status || "").toUpperCase(),
+  );
 };
 
 const isFailedStatus = (status) => {
-  return ["FAILED", "ERROR"].includes(status);
+  return ["FAILED", "ERROR"].includes(String(status || "").toUpperCase());
+};
+
+const isDeletableStatus = (status) => {
+  return (
+    isCompletedStatus(status) ||
+    isStoppedStatus(status) ||
+    isFailedStatus(status)
+  );
 };
 
 const formatDate = (value) => {
@@ -214,6 +226,10 @@ const Backtesting = () => {
 
   const [showConfiguration, setShowConfiguration] = useState(true);
   const [actionError, setActionError] = useState(null);
+  const [actionNotice, setActionNotice] = useState(null);
+  const [selectedBacktestIds, setSelectedBacktestIds] = useState([]);
+  const [bulkDeleting, setBulkDeleting] = useState(false);
+  const [deleteConfirmation, setDeleteConfirmation] = useState(null);
 
   /* ====================================================================== */
   /* INITIAL LOAD                                                           */
@@ -222,6 +238,21 @@ const Backtesting = () => {
   useEffect(() => {
     dispatch(fetchBacktests());
   }, [dispatch]);
+
+  useEffect(() => {
+    if (!deleteConfirmation || bulkDeleting) {
+      return undefined;
+    }
+
+    const handleKeyDown = (event) => {
+      if (event.key === "Escape") {
+        setDeleteConfirmation(null);
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [deleteConfirmation, bulkDeleting]);
 
   /* ====================================================================== */
   /* DEFAULT ACCOUNT                                                        */
@@ -285,6 +316,7 @@ const Backtesting = () => {
       }
 
       setActionError(null);
+      setActionNotice(null);
       setShowConfiguration(false);
 
       dispatch(clearBacktestDetailError());
@@ -293,9 +325,7 @@ const Backtesting = () => {
       try {
         await dispatch(fetchBacktest(backtestId)).unwrap();
       } catch {
-        /*
-         * Redux stores the detail error.
-         */
+        /* Redux stores the detail error. */
       }
     },
     [dispatch],
@@ -311,6 +341,7 @@ const Backtesting = () => {
     console.log("[AQE] Create Backtest clicked.");
 
     setActionError(null);
+    setActionNotice(null);
 
     dispatch(clearBacktestingError());
     dispatch(clearBacktestCreateError());
@@ -371,9 +402,7 @@ const Backtesting = () => {
             dispatch(setSelectedBacktest(refreshed));
           }
         } catch {
-          /*
-           * Creation succeeded even if detail refresh fails.
-           */
+          /* Creation succeeded even if detail refresh fails. */
         }
       } else {
         setActionError(
@@ -409,6 +438,7 @@ const Backtesting = () => {
     console.log("[AQE] Starting backtest:", backtestId);
 
     setActionError(null);
+    setActionNotice(null);
     dispatch(clearBacktestStartError());
 
     try {
@@ -451,6 +481,7 @@ const Backtesting = () => {
     console.log("[AQE] Stopping backtest:", backtestId);
 
     setActionError(null);
+    setActionNotice(null);
     dispatch(clearBacktestStopError());
 
     try {
@@ -482,7 +513,7 @@ const Backtesting = () => {
   /* DELETE BACKTEST                                                        */
   /* ====================================================================== */
 
-  const handleDeleteBacktest = async (backtest) => {
+  const handleDeleteBacktest = async (backtest, confirmed = false) => {
     const backtestId = getBacktestId(backtest);
 
     if (!backtestId) {
@@ -495,28 +526,34 @@ const Backtesting = () => {
 
     const status = getBacktestStatus(backtest);
 
-    if (isRunningStatus(status)) {
+    if (!isDeletableStatus(status)) {
       setActionError(
-        "A running backtest must be stopped before it can be deleted.",
+        "Only completed, stopped, or failed backtests can be deleted.",
       );
       return;
     }
 
-    const confirmed = window.confirm(
-      "Delete this backtest? This action cannot be undone.",
-    );
-
     if (!confirmed) {
+      setDeleteConfirmation({
+        type: "single",
+        backtest,
+        backtestId: String(backtestId),
+      });
       return;
     }
 
     console.log("[AQE] Deleting backtest:", backtestId);
 
     setActionError(null);
+    setActionNotice(null);
     dispatch(clearBacktestDeleteError());
 
     try {
       await dispatch(deleteBacktest(backtestId)).unwrap();
+
+      setSelectedBacktestIds((current) =>
+        current.filter((id) => id !== String(backtestId)),
+      );
 
       dispatch(clearSelectedBacktest());
 
@@ -533,6 +570,131 @@ const Backtesting = () => {
   };
 
   /* ====================================================================== */
+  /* BULK DELETE BACKTESTS                                                  */
+  /* ====================================================================== */
+
+  const handleDeleteSelectedBacktests = async (confirmed = false) => {
+    const targets = items.filter((backtest) => {
+      const id = getBacktestId(backtest);
+
+      return (
+        id !== null &&
+        id !== undefined &&
+        selectedDeletableIds.includes(String(id)) &&
+        isDeletableStatus(getBacktestStatus(backtest))
+      );
+    });
+
+    if (targets.length === 0) {
+      setActionError(
+        "Select at least one completed, stopped, or failed backtest to delete.",
+      );
+      return;
+    }
+
+    if (!confirmed) {
+      setDeleteConfirmation({ type: "bulk", count: targets.length });
+      return;
+    }
+
+    setActionError(null);
+    setActionNotice(null);
+    setBulkDeleting(true);
+    dispatch(clearBacktestDeleteError());
+
+    const selectedIdBeforeDelete = getBacktestId(selected);
+    const deletedIds = [];
+    const failures = [];
+
+    try {
+      // Delete sequentially through the existing API thunk.
+      for (const backtest of targets) {
+        const backtestId = String(getBacktestId(backtest));
+
+        try {
+          await dispatch(deleteBacktest(backtestId)).unwrap();
+          deletedIds.push(backtestId);
+        } catch (error) {
+          failures.push({
+            id: backtestId,
+            message:
+              typeof error === "string"
+                ? error
+                : error?.message || "Delete request failed.",
+          });
+        }
+      }
+
+      setSelectedBacktestIds((current) =>
+        current.filter((id) => !deletedIds.includes(id)),
+      );
+
+      // Clear the detail panel only if its backtest was deleted.
+      if (
+        selectedIdBeforeDelete &&
+        deletedIds.includes(String(selectedIdBeforeDelete))
+      ) {
+        dispatch(clearSelectedBacktest());
+        setShowConfiguration(true);
+      }
+
+      let refreshError = null;
+
+      try {
+        await dispatch(fetchBacktests()).unwrap();
+      } catch (error) {
+        refreshError =
+          typeof error === "string"
+            ? error
+            : error?.message || "The backtest list could not be refreshed.";
+      }
+
+      if (failures.length > 0) {
+        const failureDetails = failures
+          .slice(0, 3)
+          .map(({ id, message }) => `${id.slice(0, 8)}: ${message}`)
+          .join(" | ");
+
+        const remainingFailures =
+          failures.length > 3 ? ` (+${failures.length - 3} more)` : "";
+
+        setActionError(
+          `Deleted ${deletedIds.length} of ${targets.length} selected backtests. ` +
+            `${failures.length} failed. ${failureDetails}${remainingFailures}` +
+            (refreshError ? ` List refresh also failed: ${refreshError}` : ""),
+        );
+      } else if (refreshError) {
+        setActionError(
+          `Deleted ${deletedIds.length} backtest(s), but the list refresh failed: ${refreshError}`,
+        );
+      } else {
+        setActionNotice(
+          `Successfully deleted ${deletedIds.length} backtest(s).`,
+        );
+      }
+    } finally {
+      setBulkDeleting(false);
+    }
+  };
+
+  const handleConfirmDelete = async () => {
+    const confirmation = deleteConfirmation;
+
+    if (!confirmation) {
+      return;
+    }
+
+    setDeleteConfirmation(null);
+
+    if (confirmation.type === "single") {
+      await handleDeleteBacktest(confirmation.backtest, true);
+      return;
+    }
+
+    await handleDeleteSelectedBacktests(true);
+  };
+
+  /* ====================================================================== */
   /* REFRESH                                                                */
   /* ====================================================================== */
 
@@ -540,6 +702,7 @@ const Backtesting = () => {
     console.log("[AQE] Refreshing backtests.");
 
     setActionError(null);
+    setActionNotice(null);
     dispatch(clearBacktestingError());
 
     try {
@@ -555,15 +718,53 @@ const Backtesting = () => {
         }
       }
     } catch {
-      /*
-       * Redux owns the error state.
-       */
+      /* Redux owns the error state. */
     }
   };
 
   /* ====================================================================== */
   /* DERIVED STATE                                                          */
   /* ====================================================================== */
+
+  const deletableIds = useMemo(
+    () =>
+      items
+        .filter((backtest) => {
+          const id = getBacktestId(backtest);
+
+          return (
+            id !== null &&
+            id !== undefined &&
+            isDeletableStatus(getBacktestStatus(backtest))
+          );
+        })
+        .map((backtest) => String(getBacktestId(backtest))),
+    [items],
+  );
+
+  const selectedDeletableIds = useMemo(() => {
+    const eligibleIds = new Set(deletableIds);
+
+    return selectedBacktestIds.filter((id) => eligibleIds.has(id));
+  }, [deletableIds, selectedBacktestIds]);
+
+  const allDeletableSelected =
+    deletableIds.length > 0 &&
+    deletableIds.every((id) => selectedBacktestIds.includes(id));
+
+  const handleToggleBacktestSelection = (backtestId, checked) => {
+    const normalizedId = String(backtestId);
+
+    setSelectedBacktestIds((current) => {
+      if (checked) {
+        return current.includes(normalizedId)
+          ? current
+          : [...current, normalizedId];
+      }
+
+      return current.filter((id) => id !== normalizedId);
+    });
+  };
 
   const selectedBacktestId = getBacktestId(selected);
 
@@ -629,7 +830,7 @@ const Backtesting = () => {
             type="button"
             className="backtesting-button secondary"
             onClick={handleRefresh}
-            disabled={loading || detailLoading}
+            disabled={loading || detailLoading || bulkDeleting}
           >
             <FaRedo className={loading ? "backtesting-spin" : ""} />
             Refresh
@@ -641,8 +842,10 @@ const Backtesting = () => {
             onClick={() => {
               setShowConfiguration(true);
               setActionError(null);
+              setActionNotice(null);
               dispatch(clearSelectedBacktest());
             }}
+            disabled={bulkDeleting}
           >
             <FaPlus />
             New Backtest
@@ -655,7 +858,7 @@ const Backtesting = () => {
       {/* ================================================================== */}
 
       {displayedError && (
-        <div className="backtesting-error">
+        <div className="backtesting-error" role="alert" aria-live="polite">
           <span>{displayedError}</span>
 
           <button
@@ -681,6 +884,27 @@ const Backtesting = () => {
         </div>
       )}
 
+      {actionNotice && (
+        <div
+          className="backtesting-result-placeholder"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="backtesting-result-icon">
+            <FaCheckCircle />
+          </div>
+
+          <div>
+            <strong>Bulk delete complete</strong>
+            <span>{actionNotice}</span>
+          </div>
+
+          <button type="button" onClick={() => setActionNotice(null)}>
+            Dismiss
+          </button>
+        </div>
+      )}
+
       {/* ================================================================== */}
       {/* MAIN                                                               */}
       {/* ================================================================== */}
@@ -701,6 +925,62 @@ const Backtesting = () => {
             <FaClock />
           </div>
 
+          <div
+            className="backtesting-bulk-toolbar"
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "0.75rem",
+              padding: "0.75rem 1rem",
+              borderBottom: "1px solid rgba(128, 128, 128, 0.25)",
+            }}
+          >
+            <label
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "0.5rem",
+                cursor: deletableIds.length > 0 ? "pointer" : "default",
+              }}
+            >
+              <input
+                type="checkbox"
+                checked={allDeletableSelected}
+                disabled={deletableIds.length === 0 || bulkDeleting}
+                onChange={(event) => {
+                  setSelectedBacktestIds(
+                    event.target.checked ? [...deletableIds] : [],
+                  );
+                }}
+              />
+
+              <span>Select all deletable ({deletableIds.length})</span>
+            </label>
+
+            <button
+              type="button"
+              className="backtesting-button danger-outline"
+              onClick={handleDeleteSelectedBacktests}
+              disabled={selectedDeletableIds.length === 0 || bulkDeleting}
+              style={{
+                width: "100%",
+                justifyContent: "center",
+              }}
+            >
+              {bulkDeleting ? (
+                <>
+                  <FaRedo className="backtesting-spin" />
+                  Deleting selected...
+                </>
+              ) : (
+                <>
+                  <FaTrash />
+                  Delete selected ({selectedDeletableIds.length})
+                </>
+              )}
+            </button>
+          </div>
+
           {loading && items.length === 0 ? (
             <div className="backtesting-sidebar-empty">
               <FaRedo className="backtesting-spin" />
@@ -717,16 +997,23 @@ const Backtesting = () => {
             </div>
           ) : (
             <div className="backtesting-list">
-              {items.map((backtest) => {
+              {items.map((backtest, index) => {
                 const backtestId = getBacktestId(backtest);
+                const backtestIdKey =
+                  backtestId !== null && backtestId !== undefined
+                    ? String(backtestId)
+                    : "";
 
                 const config = getBacktestConfig(backtest);
-
                 const status = getBacktestStatus(backtest);
+                const canBulkDelete =
+                  Boolean(backtestIdKey) && isDeletableStatus(status);
 
                 const isSelected =
                   selectedBacktestId &&
-                  String(selectedBacktestId) === String(backtestId);
+                  String(selectedBacktestId) === backtestIdKey;
+
+                const isChecked = selectedBacktestIds.includes(backtestIdKey);
 
                 const backtestAccount = accounts.find(
                   (account) =>
@@ -735,32 +1022,75 @@ const Backtesting = () => {
                 );
 
                 return (
-                  <button
-                    type="button"
-                    key={backtestId}
-                    className={`backtesting-list-item ${
-                      isSelected ? "selected" : ""
-                    }`}
-                    onClick={() => handleSelectBacktest(backtest)}
+                  <div
+                    key={backtestIdKey || `backtest-${index}`}
+                    className="backtesting-list-row"
+                    style={{
+                      display: "flex",
+                      alignItems: "stretch",
+                      gap: "0.5rem",
+                    }}
                   >
-                    <div className="backtesting-list-item-top">
-                      <strong>{getAccountName(backtestAccount)}</strong>
+                    <label
+                      title={
+                        canBulkDelete
+                          ? "Select this backtest for bulk deletion"
+                          : "Only completed, stopped, or failed backtests can be bulk deleted"
+                      }
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "center",
+                        padding: "0 0.25rem",
+                        cursor: canBulkDelete ? "pointer" : "not-allowed",
+                        flexShrink: 0,
+                      }}
+                    >
+                      <input
+                        type="checkbox"
+                        aria-label={`Select backtest ${backtestIdKey || "without an ID"}`}
+                        checked={Boolean(backtestIdKey) && isChecked}
+                        disabled={!canBulkDelete || bulkDeleting}
+                        onChange={(event) =>
+                          handleToggleBacktestSelection(
+                            backtestIdKey,
+                            event.target.checked,
+                          )
+                        }
+                      />
+                    </label>
 
-                      <span
-                        className={`backtesting-status ${status.toLowerCase()}`}
-                      >
-                        {status}
-                      </span>
-                    </div>
+                    <button
+                      type="button"
+                      className={`backtesting-list-item ${
+                        isSelected ? "selected" : ""
+                      }`}
+                      onClick={() => handleSelectBacktest(backtest)}
+                      disabled={bulkDeleting}
+                      style={{
+                        flex: 1,
+                        minWidth: 0,
+                      }}
+                    >
+                      <div className="backtesting-list-item-top">
+                        <strong>{getAccountName(backtestAccount)}</strong>
 
-                    <div className="backtesting-list-item-meta">
-                      <span>{formatDate(config.start)}</span>
+                        <span
+                          className={`backtesting-status ${status.toLowerCase()}`}
+                        >
+                          {status}
+                        </span>
+                      </div>
 
-                      <span>
-                        {backtestId ? String(backtestId).slice(0, 8) : "—"}
-                      </span>
-                    </div>
-                  </button>
+                      <div className="backtesting-list-item-meta">
+                        <span>{formatDate(config.start)}</span>
+
+                        <span>
+                          {backtestIdKey ? backtestIdKey.slice(0, 8) : "—"}
+                        </span>
+                      </div>
+                    </button>
+                  </div>
                 );
               })}
             </div>
@@ -1051,7 +1381,7 @@ const Backtesting = () => {
                     type="button"
                     className="backtesting-button primary"
                     onClick={() => handleStartBacktest(selected)}
-                    disabled={startingId === selectedBacktestId}
+                    disabled={startingId === selectedBacktestId || bulkDeleting}
                   >
                     {startingId === selectedBacktestId ? (
                       <>
@@ -1072,7 +1402,7 @@ const Backtesting = () => {
                     type="button"
                     className="backtesting-button danger"
                     onClick={() => handleStopBacktest(selected)}
-                    disabled={stoppingId === selectedBacktestId}
+                    disabled={stoppingId === selectedBacktestId || bulkDeleting}
                   >
                     {stoppingId === selectedBacktestId ? (
                       <>
@@ -1093,7 +1423,7 @@ const Backtesting = () => {
                     type="button"
                     className="backtesting-button danger-outline"
                     onClick={() => handleDeleteBacktest(selected)}
-                    disabled={deletingId === selectedBacktestId}
+                    disabled={deletingId === selectedBacktestId || bulkDeleting}
                   >
                     {deletingId === selectedBacktestId ? (
                       <>
@@ -1228,6 +1558,150 @@ const Backtesting = () => {
           )}
         </main>
       </div>
+
+      {deleteConfirmation && (
+        <div
+          className="backtesting-confirm-backdrop"
+          role="presentation"
+          onClick={(event) => {
+            if (event.target === event.currentTarget && !bulkDeleting) {
+              setDeleteConfirmation(null);
+            }
+          }}
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 2000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            padding: "1.25rem",
+            background: "rgba(15, 23, 42, 0.62)",
+            backdropFilter: "blur(4px)",
+          }}
+        >
+          <section
+            className="backtesting-confirm-modal"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="backtesting-confirm-title"
+            aria-describedby="backtesting-confirm-description"
+            onClick={(event) => event.stopPropagation()}
+            style={{
+              width: "100%",
+              maxWidth: "440px",
+              border: "1px solid rgba(148, 163, 184, 0.25)",
+              borderRadius: "18px",
+              padding: "1.5rem",
+              background: "var(--backtesting-card-bg, #ffffff)",
+              color: "var(--backtesting-text, #0f172a)",
+              boxShadow: "0 24px 80px rgba(0, 0, 0, 0.3)",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                alignItems: "flex-start",
+                gap: "1rem",
+                marginBottom: "1.25rem",
+              }}
+            >
+              <div
+                aria-hidden="true"
+                style={{
+                  display: "grid",
+                  placeItems: "center",
+                  flexShrink: 0,
+                  width: "46px",
+                  height: "46px",
+                  borderRadius: "14px",
+                  color: "#b91c1c",
+                  background: "#fee2e2",
+                  fontSize: "1.15rem",
+                }}
+              >
+                <FaTrash />
+              </div>
+
+              <div style={{ minWidth: 0, flex: 1 }}>
+                <h2
+                  id="backtesting-confirm-title"
+                  style={{
+                    margin: "0 0 0.45rem",
+                    fontSize: "1.2rem",
+                    lineHeight: 1.35,
+                    fontWeight: 700,
+                  }}
+                >
+                  {deleteConfirmation.type === "bulk"
+                    ? `Delete ${deleteConfirmation.count} backtests?`
+                    : "Delete this backtest?"}
+                </h2>
+
+                <p
+                  id="backtesting-confirm-description"
+                  style={{
+                    margin: 0,
+                    color: "var(--backtesting-muted, #64748b)",
+                    fontSize: "0.95rem",
+                    lineHeight: 1.6,
+                  }}
+                >
+                  {deleteConfirmation.type === "bulk"
+                    ? `You are about to permanently delete ${deleteConfirmation.count} selected backtest${deleteConfirmation.count === 1 ? "" : "s"}.`
+                    : `You are about to permanently delete backtest ${String(
+                        deleteConfirmation.backtestId || "",
+                      ).slice(0, 8)}.`}{" "}
+                  This action cannot be undone.
+                </p>
+              </div>
+            </div>
+
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "flex-end",
+                gap: "0.75rem",
+                paddingTop: "0.25rem",
+              }}
+            >
+              <button
+                type="button"
+                className="backtesting-button secondary"
+                onClick={() => setDeleteConfirmation(null)}
+                disabled={bulkDeleting}
+              >
+                Cancel
+              </button>
+
+              <button
+                type="button"
+                className="backtesting-button"
+                onClick={handleConfirmDelete}
+                disabled={bulkDeleting}
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  justifyContent: "center",
+                  gap: "0.5rem",
+                  border: "1px solid #b91c1c",
+                  borderRadius: "9px",
+                  padding: "0.65rem 1rem",
+                  color: "#ffffff",
+                  background: "#b91c1c",
+                  fontWeight: 700,
+                  cursor: bulkDeleting ? "wait" : "pointer",
+                }}
+              >
+                <FaTrash />
+                {deleteConfirmation.type === "bulk"
+                  ? `Delete ${deleteConfirmation.count}`
+                  : "Delete backtest"}
+              </button>
+            </div>
+          </section>
+        </div>
+      )}
     </div>
   );
 };

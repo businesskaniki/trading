@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 import httpx
+from app.broker.exceptions import MT5BridgeUnavailableError
 
 
 class MT5Client:
@@ -96,13 +97,13 @@ class MT5Client:
             response.raise_for_status()
 
         except httpx.TimeoutException as exc:
-            raise RuntimeError(
-                f"MT5 Bridge request timed out: " f"{method} {endpoint}",
+            raise MT5BridgeUnavailableError(
+                "MT5 Bridge is offline or unreachable: request timed out."
             ) from exc
 
         except httpx.ConnectError as exc:
-            raise RuntimeError(
-                f"Unable to connect to MT5 Bridge: " f"{method} {endpoint}",
+            raise MT5BridgeUnavailableError(
+                "MT5 Bridge is offline or unreachable."
             ) from exc
 
         except httpx.HTTPStatusError as exc:

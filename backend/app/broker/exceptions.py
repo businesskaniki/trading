@@ -61,3 +61,9 @@ class BrokerTimeoutError(BrokerError):
     """
 
     pass
+
+
+class MT5BridgeUnavailableError(BrokerConnectionError):
+    """Raised when the AQE MT5 Bridge is offline or unreachable."""
+
+    pass

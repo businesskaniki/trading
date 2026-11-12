@@ -42,7 +42,7 @@ class PositionCreate(BaseModel):
 
     symbol_id: UUID
 
-    order_id: UUID
+    order_id: UUID | None = None
 
     direction: PositionDirection
 
@@ -219,7 +219,7 @@ class PositionResponse(BaseModel):
 
     symbol_id: UUID
 
-    order_id: UUID
+    order_id: UUID | None = None
 
     direction: PositionDirection
 

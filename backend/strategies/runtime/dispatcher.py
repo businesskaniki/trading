@@ -422,8 +422,8 @@ class StrategyDispatcher:
                 continue
 
             if not instance.supports_candle(
-                normalized_symbol,
-                normalized_timeframe,
+                symbol=normalized_symbol,
+                timeframe=normalized_timeframe,
             ):
                 continue
 

@@ -1,16 +1,14 @@
+
+import logging
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ..dependencies import (
-    get_current_user,
-    get_mt5_bridge_service,
-    get_symbol_sync_service,
-    get_trading_account_service,
-)
-
 from app.core.constants import AccountStatus
 from app.database.models.user import User
+from app.market_data.subscription_manager import (
+    market_data_subscription_manager,
+)
 from app.schemas.trading_account import (
     TradingAccountCreate,
     TradingAccountListResponse,
@@ -22,16 +20,80 @@ from app.services.mt5_bridge_service import (
     MT5BridgeError,
     MT5BridgeService,
 )
-from app.services.trading_account_service import TradingAccountService
 from app.services.symbol_sync_service import (
     SymbolSyncError,
     SymbolSyncService,
 )
+from app.services.trading_account_service import TradingAccountService
+
+from ..dependencies import (
+    get_current_user,
+    get_mt5_bridge_service,
+    get_symbol_sync_service,
+    get_trading_account_service,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(
     prefix="/trading-accounts",
     tags=["Trading Accounts"],
 )
+
+
+# ============================================================
+# MARKET-DATA RECONCILIATION
+# ============================================================
+
+
+async def _reconcile_market_data_after_connection_change(
+    account_id: UUID,
+    operation: str,
+) -> None:
+    """Reconcile subscriptions after a trading-account state change.
+
+    The subscription manager must determine the desired symbols from the
+    actual connected MT5 account, not from the frontend's selected account.
+
+    A market-data reconciliation failure should not turn an already
+    successful account connection or disconnection into an HTTP 500.
+    """
+    try:
+        result = await market_data_subscription_manager.reconcile()
+
+        failed_subscriptions = result.get(
+            "failed_subscriptions",
+            [],
+        )
+        failed_unsubscriptions = result.get(
+            "failed_unsubscriptions",
+            [],
+        )
+
+        if failed_subscriptions or failed_unsubscriptions:
+            logger.warning(
+                (
+                    "Market-data reconciliation after %s for account %s "
+                    "completed with failures: subscribe=%s unsubscribe=%s"
+                ),
+                operation,
+                account_id,
+                failed_subscriptions,
+                failed_unsubscriptions,
+            )
+        else:
+            logger.info(
+                "Market-data reconciliation after %s completed for account %s",
+                operation,
+                account_id,
+            )
+
+    except Exception:
+        logger.exception(
+            "Market-data reconciliation failed after %s for account %s",
+            operation,
+            account_id,
+        )
 
 
 # ============================================================
@@ -55,7 +117,6 @@ async def create_trading_account(
     Broker credentials are encrypted by TradingAccountService
     before being persisted.
     """
-
     try:
         return await service.create_account(
             user_id=current_user.id,
@@ -83,10 +144,7 @@ async def list_trading_accounts(
     service: TradingAccountService = Depends(get_trading_account_service),
     bridge_service: MT5BridgeService = Depends(get_mt5_bridge_service),
 ):
-    """
-    Return all trading accounts belonging to the authenticated user.
-    """
-
+    """Return all trading accounts belonging to the authenticated user."""
     try:
         bridge_status = await bridge_service.status()
     except MT5BridgeError:
@@ -104,8 +162,9 @@ async def list_trading_accounts(
 
 
 # ============================================================
-# CONNECT
+# ACTIVE ACCOUNT
 # ============================================================
+
 
 @router.get(
     "/active",
@@ -116,17 +175,18 @@ async def get_active_trading_account(
     service: TradingAccountService = Depends(get_trading_account_service),
     bridge_service: MT5BridgeService = Depends(get_mt5_bridge_service),
 ):
-    """
-    Return the authenticated user's active connected trading account.
-    """
-
+    """Return the authenticated user's active connected trading account."""
     try:
         try:
             bridge_status = await bridge_service.status()
         except MT5BridgeError:
             bridge_status = None
 
-        await service.reconcile_bridge_state(current_user.id, bridge_status)
+        await service.reconcile_bridge_state(
+            current_user.id,
+            bridge_status,
+        )
+
         return await service.get_active_account(
             user_id=current_user.id,
         )
@@ -136,6 +196,12 @@ async def get_active_trading_account(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+
+
+# ============================================================
+# CONNECT
+# ============================================================
+
 
 @router.post(
     "/{account_id}/connect",
@@ -148,18 +214,17 @@ async def connect_trading_account(
     bridge_service: MT5BridgeService = Depends(get_mt5_bridge_service),
 ):
     """
-    Connect an owned trading account to the MT5 bridge
-    and synchronize its broker state into AQE.
+    Connect an owned trading account to the MT5 bridge and synchronize
+    its broker state into AQE.
 
-    The broker password is retrieved from encrypted storage,
-    decrypted only in memory, and sent to the MT5 bridge.
-
-    The password is never returned to the frontend.
+    The bridge maintains one global MT5 session. After a successful
+    connection, market-data subscriptions are reconciled against the
+    connected account.
     """
 
-    # ========================================================
+    # --------------------------------------------------------
     # 1. Verify account ownership
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         account = await service.get_owned_account(
@@ -173,9 +238,9 @@ async def connect_trading_account(
             detail=str(exc),
         ) from exc
 
-    # ========================================================
+    # --------------------------------------------------------
     # 2. Retrieve and decrypt broker credentials
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         password = await service.get_decrypted_credentials(
@@ -189,9 +254,9 @@ async def connect_trading_account(
             detail=str(exc),
         ) from exc
 
-    # ========================================================
+    # --------------------------------------------------------
     # 3. Connect selected account through MT5 bridge
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         bridge_status = await bridge_service.connect(
@@ -201,7 +266,6 @@ async def connect_trading_account(
         )
 
     except MT5BridgeError as exc:
-
         try:
             await service.update_account_state(
                 account_id=account.id,
@@ -210,19 +274,21 @@ async def connect_trading_account(
                 ),
             )
         except ValueError:
-            pass
+            logger.exception(
+                "Failed to persist connection error for account %s",
+                account.id,
+            )
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
 
-    # ========================================================
+    # --------------------------------------------------------
     # 4. Verify bridge reported successful connection
-    # ========================================================
+    # --------------------------------------------------------
 
     if not bridge_status.get("connected", False):
-
         try:
             await service.update_account_state(
                 account_id=account.id,
@@ -231,21 +297,23 @@ async def connect_trading_account(
                 ),
             )
         except ValueError:
-            pass
+            logger.exception(
+                "Failed to persist connection error for account %s",
+                account.id,
+            )
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail="MT5 bridge failed to establish the connection.",
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 5. Verify connected account login
-    # ========================================================
+    # --------------------------------------------------------
 
     bridge_login = bridge_status.get("login")
 
     if bridge_login is not None:
-
         try:
             bridge_login = int(bridge_login)
 
@@ -258,30 +326,29 @@ async def connect_trading_account(
         if bridge_login != account.login:
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=("MT5 bridge connected to an unexpected " "trading account."),
+                detail="MT5 bridge connected to an unexpected trading account.",
             )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 6. Verify connected trading server
-    # ========================================================
+    # --------------------------------------------------------
 
     bridge_server = bridge_status.get("server")
 
     if bridge_server is not None and bridge_server != account.server:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=("MT5 bridge connected to an unexpected " "trading server."),
+            detail="MT5 bridge connected to an unexpected trading server.",
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 7. Retrieve actual MT5 account state
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         broker_account = await bridge_service.get_account()
 
     except MT5BridgeError as exc:
-
         try:
             await service.update_account_state(
                 account_id=account.id,
@@ -290,7 +357,10 @@ async def connect_trading_account(
                 ),
             )
         except ValueError:
-            pass
+            logger.exception(
+                "Failed to persist account-state error for account %s",
+                account.id,
+            )
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -300,14 +370,13 @@ async def connect_trading_account(
             ),
         ) from exc
 
-    # ========================================================
+    # --------------------------------------------------------
     # 8. Verify account identity from /account
-    # ========================================================
+    # --------------------------------------------------------
 
     broker_login = broker_account.get("login")
 
     if broker_login is not None:
-
         try:
             broker_login = int(broker_login)
 
@@ -321,7 +390,8 @@ async def connect_trading_account(
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=(
-                    "MT5 account information belongs to a " "different trading account."
+                    "MT5 account information belongs to a different "
+                    "trading account."
                 ),
             )
 
@@ -331,13 +401,14 @@ async def connect_trading_account(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=(
-                "MT5 account information belongs to a " "different trading server."
+                "MT5 account information belongs to a different "
+                "trading server."
             ),
         )
 
-    # ========================================================
-    # 9. Map MT5 state → AQE state
-    # ========================================================
+    # --------------------------------------------------------
+    # 9. Map MT5 state to AQE state
+    # --------------------------------------------------------
 
     state = TradingAccountStateUpdate(
         status=AccountStatus.CONNECTED,
@@ -350,9 +421,9 @@ async def connect_trading_account(
         margin_level=broker_account.get("margin_level"),
     )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 10. Persist synchronized state
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         account = await service.update_account_state(
@@ -365,6 +436,15 @@ async def connect_trading_account(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+    # --------------------------------------------------------
+    # 11. Reconcile subscriptions for the new terminal session
+    # --------------------------------------------------------
+
+    await _reconcile_market_data_after_connection_change(
+        account_id=account.id,
+        operation="connect",
+    )
 
     return account
 
@@ -387,13 +467,13 @@ async def disconnect_trading_account(
     """
     Disconnect the selected trading account from the MT5 bridge.
 
-    Because the current MT5 bridge maintains one global MT5 session,
-    the bridge connection is verified before disconnecting it.
+    The bridge maintains one global MT5 session. The account identity
+    is verified before disconnecting the terminal.
     """
 
-    # ========================================================
+    # --------------------------------------------------------
     # 1. Verify account ownership
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         account = await service.get_owned_account(
@@ -407,9 +487,9 @@ async def disconnect_trading_account(
             detail=str(exc),
         ) from exc
 
-    # ========================================================
+    # --------------------------------------------------------
     # 2. Get current bridge status
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         bridge_status = await bridge_service.status()
@@ -417,19 +497,18 @@ async def disconnect_trading_account(
     except MT5BridgeError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=("Unable to determine MT5 bridge " f"connection status: {exc}"),
+            detail=f"Unable to determine MT5 bridge connection status: {exc}",
         ) from exc
 
     connected = bridge_status.get("connected", False)
 
-    # ========================================================
+    # --------------------------------------------------------
     # 3. Bridge already disconnected
-    # ========================================================
+    # --------------------------------------------------------
 
     if not connected:
-
         try:
-            return await service.update_account_state(
+            account = await service.update_account_state(
                 account_id=account.id,
                 state=TradingAccountStateUpdate(
                     status=AccountStatus.DISCONNECTED,
@@ -442,14 +521,21 @@ async def disconnect_trading_account(
                 detail=str(exc),
             ) from exc
 
-    # ========================================================
+        # Do not return early before recalculating subscriptions.
+        await _reconcile_market_data_after_connection_change(
+            account_id=account.id,
+            operation="disconnect",
+        )
+
+        return account
+
+    # --------------------------------------------------------
     # 4. Verify active bridge login
-    # ========================================================
+    # --------------------------------------------------------
 
     bridge_login = bridge_status.get("login")
 
     if bridge_login is not None:
-
         try:
             bridge_login = int(bridge_login)
 
@@ -463,15 +549,14 @@ async def disconnect_trading_account(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "The MT5 bridge is currently connected to a "
-                    "different trading account. Disconnecting this "
-                    "account was refused."
+                    "The MT5 bridge is currently connected to a different "
+                    "trading account. Disconnecting this account was refused."
                 ),
             )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 5. Verify active bridge server
-    # ========================================================
+    # --------------------------------------------------------
 
     bridge_server = bridge_status.get("server")
 
@@ -479,21 +564,19 @@ async def disconnect_trading_account(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "The MT5 bridge is currently connected to a "
-                "different trading server. Disconnecting this "
-                "account was refused."
+                "The MT5 bridge is currently connected to a different "
+                "trading server. Disconnecting this account was refused."
             ),
         )
 
-    # ========================================================
+    # --------------------------------------------------------
     # 6. Disconnect MT5
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         await bridge_service.disconnect()
 
     except MT5BridgeError as exc:
-
         try:
             await service.update_account_state(
                 account_id=account.id,
@@ -502,16 +585,19 @@ async def disconnect_trading_account(
                 ),
             )
         except ValueError:
-            pass
+            logger.exception(
+                "Failed to persist disconnection error for account %s",
+                account.id,
+            )
 
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Failed to disconnect the MT5 account: {exc}",
         ) from exc
 
-    # ========================================================
+    # --------------------------------------------------------
     # 7. Synchronize AQE state
-    # ========================================================
+    # --------------------------------------------------------
 
     try:
         account = await service.update_account_state(
@@ -526,6 +612,15 @@ async def disconnect_trading_account(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=str(exc),
         ) from exc
+
+    # --------------------------------------------------------
+    # 8. Reconcile after disconnection
+    # --------------------------------------------------------
+
+    await _reconcile_market_data_after_connection_change(
+        account_id=account.id,
+        operation="disconnect",
+    )
 
     return account
 
@@ -548,11 +643,12 @@ async def set_trading_account_active(
     """
     Enable or disable a trading account in AQE.
 
-    This does not connect or disconnect MT5.
+    This does not connect or disconnect MT5. It does, however, cause
+    the subscription manager to recalculate the required subscriptions.
     """
 
     try:
-        return await service.set_active(
+        account = await service.set_active(
             account_id=account_id,
             user_id=current_user.id,
             active=active,
@@ -563,6 +659,13 @@ async def set_trading_account_active(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
         ) from exc
+
+    await _reconcile_market_data_after_connection_change(
+        account_id=account.id,
+        operation="activate" if active else "deactivate",
+    )
+
+    return account
 
 
 # ============================================================
@@ -579,11 +682,7 @@ async def get_trading_account(
     current_user: User = Depends(get_current_user),
     service: TradingAccountService = Depends(get_trading_account_service),
 ):
-    """
-    Retrieve a specific trading account owned by the
-    authenticated user.
-    """
-
+    """Retrieve a specific trading account owned by the authenticated user."""
     try:
         return await service.get_owned_account(
             account_id=account_id,
@@ -616,11 +715,8 @@ async def update_trading_account(
     Update configuration for a trading account.
 
     Broker passwords are encrypted before being persisted.
-
-    Broker-derived financial state is intentionally excluded
-    from this endpoint.
+    Broker-derived financial state is intentionally excluded.
     """
-
     try:
         return await service.update_account(
             account_id=account_id,
@@ -649,10 +745,7 @@ async def delete_trading_account(
     current_user: User = Depends(get_current_user),
     service: TradingAccountService = Depends(get_trading_account_service),
 ):
-    """
-    Delete a trading account owned by the authenticated user.
-    """
-
+    """Delete a trading account owned by the authenticated user."""
     try:
         await service.delete_account(
             account_id=account_id,
@@ -665,6 +758,12 @@ async def delete_trading_account(
             detail=str(exc),
         ) from exc
 
+
+# ============================================================
+# SYNCHRONIZE ACCOUNT SYMBOLS
+# ============================================================
+
+
 @router.post(
     "/{account_id}/symbols/sync",
 )
@@ -672,19 +771,24 @@ async def sync_trading_account_symbols(
     account_id: UUID,
     current_user: User = Depends(get_current_user),
     service: TradingAccountService = Depends(
-        get_trading_account_service
+        get_trading_account_service,
     ),
     bridge_service: MT5BridgeService = Depends(
-        get_mt5_bridge_service
+        get_mt5_bridge_service,
     ),
     sync_service: SymbolSyncService = Depends(
-        get_symbol_sync_service
+        get_symbol_sync_service,
     ),
 ):
     """
-    Synchronize the symbols exposed by the connected MT5 account
-    into AQE.
+    Synchronize the symbols exposed by the connected MT5 account into AQE.
+
+    The requested account must match the actual connected bridge session.
     """
+
+    # --------------------------------------------------------
+    # 1. Verify account ownership
+    # --------------------------------------------------------
 
     try:
         account = await service.get_owned_account(
@@ -698,6 +802,10 @@ async def sync_trading_account_symbols(
             detail=str(exc),
         ) from exc
 
+    # --------------------------------------------------------
+    # 2. Verify persisted account state
+    # --------------------------------------------------------
+
     if account.status != AccountStatus.CONNECTED:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -707,16 +815,17 @@ async def sync_trading_account_symbols(
             ),
         )
 
+    # --------------------------------------------------------
+    # 3. Verify bridge connection
+    # --------------------------------------------------------
+
     try:
         bridge_status = await bridge_service.status()
 
     except MT5BridgeError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=(
-                "Unable to determine MT5 bridge "
-                f"connection status: {exc}"
-            ),
+            detail=f"Unable to determine MT5 bridge connection status: {exc}",
         ) from exc
 
     if not bridge_status.get("connected", False):
@@ -728,10 +837,13 @@ async def sync_trading_account_symbols(
             ),
         )
 
+    # --------------------------------------------------------
+    # 4. Verify bridge login
+    # --------------------------------------------------------
+
     bridge_login = bridge_status.get("login")
 
     if bridge_login is not None:
-
         try:
             bridge_login = int(bridge_login)
 
@@ -745,10 +857,14 @@ async def sync_trading_account_symbols(
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    "The MT5 bridge is connected to a "
-                    "different trading account."
+                    "The MT5 bridge is connected to a different "
+                    "trading account."
                 ),
             )
+
+    # --------------------------------------------------------
+    # 5. Verify bridge server
+    # --------------------------------------------------------
 
     bridge_server = bridge_status.get("server")
 
@@ -759,13 +875,17 @@ async def sync_trading_account_symbols(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "The MT5 bridge is connected to a "
-                "different trading server."
+                "The MT5 bridge is connected to a different "
+                "trading server."
             ),
         )
 
+    # --------------------------------------------------------
+    # 6. Synchronize symbols
+    # --------------------------------------------------------
+
     try:
-        return await sync_service.sync_account_symbols(
+        result = await sync_service.sync_account_symbols(
             account_id=account.id,
             user_id=current_user.id,
         )
@@ -775,3 +895,14 @@ async def sync_trading_account_symbols(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+
+    # --------------------------------------------------------
+    # 7. Reconcile subscription state
+    # --------------------------------------------------------
+
+    await _reconcile_market_data_after_connection_change(
+        account_id=account.id,
+        operation="symbol synchronization",
+    )
+
+    return result

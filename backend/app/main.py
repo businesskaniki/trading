@@ -3,8 +3,11 @@ from __future__ import annotations
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI,Request
+from fastapi.responses import JSONResponse
+
 from fastapi.middleware.cors import CORSMiddleware
+from app.broker.exceptions import MT5BridgeUnavailableError
 
 from app.api.router import api_router
 from app.core.config import settings
@@ -155,15 +158,32 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+@app.exception_handler(MT5BridgeUnavailableError)
+async def mt5_bridge_unavailable_handler(
+    request: Request,
+    exc: MT5BridgeUnavailableError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={
+            "status": "offline",
+            "code": "MT5_BRIDGE_OFFLINE",
+            "detail": "MT5 Bridge is offline or unreachable.",
+        },
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
-        origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()
+        origin.strip()
+        for origin in settings.CORS_ORIGINS.split(",")
+        if origin.strip()
     ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+    max_age=600,
 )
 
 

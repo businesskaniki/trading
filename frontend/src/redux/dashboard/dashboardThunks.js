@@ -21,32 +21,36 @@ const getErrorMessage = (error, fallback) => {
 };
 
 // =====================================================
+// ACCOUNT VALIDATION
+// =====================================================
+
+const requireAccountId = (accountId) => {
+  if (typeof accountId !== "string" || accountId.trim().length === 0) {
+    throw new Error("Select a trading account first.");
+  }
+
+  return accountId;
+};
+
+// =====================================================
 // LOAD DASHBOARD CORE DATA
 // =====================================================
 //
-// Only load data that is actually required by the
-// Dashboard itself.
+// Requires the selected trading account ID.
 //
-// Accounts are owned by accountsSlice.
-// Engine status is owned by engineSlice.
-// Trading universe is owned by symbolsSlice.
-// Broker account is loaded separately once an account
-// has been selected.
-//
-// This thunk therefore only loads:
-//   - positions
-//   - recent trades
-//
-// Both requests execute concurrently.
+// Positions and trades are fetched concurrently and
+// both requests are scoped to that account.
 // =====================================================
 
 export const loadDashboard = createAsyncThunk(
   "dashboard/loadDashboard",
-  async (_, thunkAPI) => {
+  async (accountId, thunkAPI) => {
     try {
+      const selectedAccountId = requireAccountId(accountId);
+
       const [positions, trades] = await Promise.all([
-        dashboardAPI.getPositions(),
-        dashboardAPI.getTrades(),
+        dashboardAPI.getPositions(selectedAccountId),
+        dashboardAPI.getTrades(selectedAccountId),
       ]);
 
       return {
@@ -64,20 +68,14 @@ export const loadDashboard = createAsyncThunk(
 // =====================================================
 // BROKER ACCOUNT
 // =====================================================
-//
-// This is intentionally separate from loadDashboard.
-// The broker account requires a selected account ID.
-// =====================================================
 
 export const fetchBrokerAccount = createAsyncThunk(
   "dashboard/fetchBrokerAccount",
   async (accountId, thunkAPI) => {
     try {
-      if (!accountId) {
-        return thunkAPI.rejectWithValue("A trading account must be selected.");
-      }
+      const selectedAccountId = requireAccountId(accountId);
 
-      return await dashboardAPI.getBrokerAccount(accountId);
+      return await dashboardAPI.getBrokerAccount(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load broker account information."),
@@ -87,7 +85,7 @@ export const fetchBrokerAccount = createAsyncThunk(
 );
 
 // =====================================================
-// INDIVIDUAL DASHBOARD REQUESTS
+// ACCOUNTS
 // =====================================================
 
 export const fetchAccounts = createAsyncThunk(
@@ -116,11 +114,17 @@ export const fetchActiveAccounts = createAsyncThunk(
   },
 );
 
+// =====================================================
+// INDIVIDUAL DASHBOARD REQUESTS
+// =====================================================
+
 export const fetchPositions = createAsyncThunk(
   "dashboard/fetchPositions",
-  async (_, thunkAPI) => {
+  async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getPositions();
+      const selectedAccountId = requireAccountId(accountId);
+
+      return await dashboardAPI.getPositions(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load positions."),
@@ -131,9 +135,11 @@ export const fetchPositions = createAsyncThunk(
 
 export const fetchTrades = createAsyncThunk(
   "dashboard/fetchTrades",
-  async (_, thunkAPI) => {
+  async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getTrades();
+      const selectedAccountId = requireAccountId(accountId);
+
+      return await dashboardAPI.getTrades(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load trades."),
@@ -141,6 +147,10 @@ export const fetchTrades = createAsyncThunk(
     }
   },
 );
+
+// =====================================================
+// LATEST TRADE
+// =====================================================
 
 export const fetchLatestTrade = createAsyncThunk(
   "dashboard/fetchLatestTrade",
@@ -155,6 +165,10 @@ export const fetchLatestTrade = createAsyncThunk(
   },
 );
 
+// =====================================================
+// SYMBOLS
+// =====================================================
+
 export const fetchSymbols = createAsyncThunk(
   "dashboard/fetchSymbols",
   async (_, thunkAPI) => {
@@ -167,6 +181,10 @@ export const fetchSymbols = createAsyncThunk(
     }
   },
 );
+
+// =====================================================
+// STRATEGY RUNS
+// =====================================================
 
 export const fetchStrategyRuns = createAsyncThunk(
   "dashboard/fetchStrategyRuns",
@@ -181,6 +199,10 @@ export const fetchStrategyRuns = createAsyncThunk(
   },
 );
 
+// =====================================================
+// PERFORMANCE
+// =====================================================
+
 export const fetchLatestPerformance = createAsyncThunk(
   "dashboard/fetchLatestPerformance",
   async (_, thunkAPI) => {
@@ -194,11 +216,17 @@ export const fetchLatestPerformance = createAsyncThunk(
   },
 );
 
+// =====================================================
+// ACCOUNT SUMMARY
+// =====================================================
+
 export const fetchAccountSummary = createAsyncThunk(
   "dashboard/fetchAccountSummary",
   async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getAccountSummary(accountId);
+      const selectedAccountId = requireAccountId(accountId);
+
+      return await dashboardAPI.getAccountSummary(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load account summary."),
@@ -207,11 +235,17 @@ export const fetchAccountSummary = createAsyncThunk(
   },
 );
 
+// =====================================================
+// STRATEGY PERFORMANCE
+// =====================================================
+
 export const fetchStrategyPerformance = createAsyncThunk(
   "dashboard/fetchStrategyPerformance",
   async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getStrategyPerformance(accountId);
+      const selectedAccountId = requireAccountId(accountId);
+
+      return await dashboardAPI.getStrategyPerformance(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load strategy performance."),
@@ -220,11 +254,17 @@ export const fetchStrategyPerformance = createAsyncThunk(
   },
 );
 
+// =====================================================
+// RISK PROFILE
+// =====================================================
+
 export const fetchRiskProfile = createAsyncThunk(
   "dashboard/fetchRiskProfile",
   async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getRiskProfile(accountId);
+      const selectedAccountId = requireAccountId(accountId);
+
+      return await dashboardAPI.getRiskProfile(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load risk profile."),
@@ -233,11 +273,17 @@ export const fetchRiskProfile = createAsyncThunk(
   },
 );
 
+// =====================================================
+// EFFECTIVE RISK
+// =====================================================
+
 export const fetchEffectiveRisk = createAsyncThunk(
   "dashboard/fetchEffectiveRisk",
   async (accountId, thunkAPI) => {
     try {
-      return await dashboardAPI.getEffectiveRisk(accountId);
+      const selectedAccountId = requireAccountId(accountId);
+
+      return await dashboardAPI.getEffectiveRisk(selectedAccountId);
     } catch (error) {
       return thunkAPI.rejectWithValue(
         getErrorMessage(error, "Failed to load effective risk."),

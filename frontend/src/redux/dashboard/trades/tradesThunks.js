@@ -1,14 +1,19 @@
 import { createAsyncThunk } from "@reduxjs/toolkit";
 import tradesAPI from "./tradesAPI";
-
 export const fetchTrades = createAsyncThunk(
   "trades/fetchTrades",
-  async (_, { rejectWithValue }) => {
+  async (accountId, { rejectWithValue }) => {
     try {
-      return await tradesAPI.getTrades();
+      if (!accountId) {
+        return rejectWithValue("Select a trading account first.");
+      }
+
+      return await tradesAPI.getTrades(accountId);
     } catch (error) {
       return rejectWithValue(
-        error.response?.data?.detail || error.message || "Failed to load trades.",
+        error.response?.data?.detail ||
+          error.message ||
+          "Failed to load trades.",
       );
     }
   },

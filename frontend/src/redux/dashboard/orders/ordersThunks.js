@@ -20,7 +20,13 @@ const thunk = (type, request, fallback) =>
 
 export const fetchOrders = thunk(
   "orders/fetchOrders",
-  () => ordersAPI.getOrders(),
+  (accountId) => {
+    if (!accountId) {
+      throw new Error("Select a trading account first.");
+    }
+
+    return ordersAPI.getOrders(accountId);
+  },
   "Failed to load orders.",
 );
 export const createOrder = thunk(

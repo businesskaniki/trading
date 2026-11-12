@@ -333,7 +333,8 @@ def get_strategy_run_service(
     db: AsyncSession = Depends(get_db),
 ) -> StrategyRunService:
     return StrategyRunService(
-        StrategyRunRepository(db),
+        repository=StrategyRunRepository(db),
+        account_repository=TradingAccountRepository(db),
     )
 
 

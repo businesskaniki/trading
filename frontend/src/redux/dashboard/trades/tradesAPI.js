@@ -1,7 +1,12 @@
 import api from "../../../api/axios";
 
 const tradesAPI = {
-  getTrades: async () => (await api.get("/trades/")).data,
+  getTrades: async (accountId) =>
+    (
+      await api.get("/trades/", {
+        params: { account_id: accountId },
+      })
+    ).data,
 };
 
 export default tradesAPI;

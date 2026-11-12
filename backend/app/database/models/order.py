@@ -4,6 +4,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import Enum, ForeignKey, Index, Numeric, String
+from sqlalchemy import BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import OrderSide, OrderStatus, OrderType
@@ -111,16 +112,19 @@ class Order(UUIDMixin, TimestampMixin, Base):
     )
 
     broker_order_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         nullable=True,
         unique=True,
     )
 
     broker_deal_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         nullable=True,
         unique=True,
     )
 
     broker_position_id: Mapped[int | None] = mapped_column(
+        BigInteger,
         nullable=True,
         unique=True,
     )

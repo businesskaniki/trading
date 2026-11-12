@@ -7,6 +7,7 @@ from sqlalchemy.orm import noload, selectinload
 from app.database.models.account_symbol import AccountSymbol
 from app.database.models.symbol import Symbol
 from app.database.models.trading_account import TradingAccount
+from app.database.models.trading_account import TradingAccount
 
 
 class AccountSymbolRepository:
@@ -143,6 +144,36 @@ class AccountSymbolRepository:
         )
 
         return list(result.scalars().all())
+
+
+    async def list_enabled_for_broker_account(
+        self,
+        login: int,
+        server: str,
+        ) -> list[AccountSymbol]:
+            """Return enabled symbols belonging to the active MT5 account identity.
+
+            The MT5 Bridge maintains one global terminal session. Therefore,
+            enabled symbols belonging to other saved trading accounts must not
+            contribute to its current subscription requirements.
+            """
+            result = await self.db.execute(
+                select(AccountSymbol)
+                .join(
+                    TradingAccount,
+                    TradingAccount.id == AccountSymbol.account_id,
+                )
+                .options(self._symbol_load())
+                .where(
+                    AccountSymbol.enabled.is_(True),
+                    TradingAccount.active.is_(True),
+                    TradingAccount.login == login,
+                    TradingAccount.server == server,
+                )
+                .order_by(AccountSymbol.broker_symbol.asc())
+            )
+
+            return list(result.scalars().all())
 
     async def list_all_enabled(
         self,

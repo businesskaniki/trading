@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, String
+from sqlalchemy import DateTime, Enum, ForeignKey, Index, Integer, Numeric, String,BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import PositionDirection, TradeResult
@@ -32,7 +32,7 @@ class Trade(UUIDMixin, TimestampMixin, Base):
     # ==========================================================
 
     ticket: Mapped[int] = mapped_column(
-        Integer,
+        BigInteger,
         unique=True,
         nullable=False,
     )

@@ -5,6 +5,17 @@ from app.market_data.history import record_history
 
 
 @celery_app.task(name="aqe.market_data.record_history")
-def record_market_history(symbol: str, count: int = 5000) -> int:
-    """Fetch and persist every supported MT5 timeframe for one symbol."""
-    return asyncio.run(record_history(symbol, count=count))
+def record_market_history(
+    symbol: str,
+    count: int = 5000,
+    canonical_symbol: str | None = None,
+) -> int:
+    """Fetch broker history and persist it under an AQE canonical symbol."""
+
+    return asyncio.run(
+        record_history(
+            symbol,
+            count=count,
+            canonical_symbol=canonical_symbol,
+        )
+    )

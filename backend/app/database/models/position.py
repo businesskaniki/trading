@@ -2,7 +2,9 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
+
 from sqlalchemy import DateTime, Enum, ForeignKey, Index, Numeric, String
+from sqlalchemy import BigInteger
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.constants import PositionDirection, PositionStatus
@@ -32,6 +34,7 @@ class Position(UUIDMixin, TimestampMixin, Base):
     # ==========================================================
 
     ticket: Mapped[int] = mapped_column(
+        BigInteger,
         unique=True,
         nullable=False,
     )
@@ -60,8 +63,7 @@ class Position(UUIDMixin, TimestampMixin, Base):
         nullable=False,
     )
 
-
-    order_id: Mapped[UUID] = mapped_column(
+    order_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("orders.id"),
         nullable=True,
     )

@@ -1,7 +1,7 @@
-
 from __future__ import annotations
 
 import logging
+
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -212,7 +212,10 @@ class ExecutionRuntimeFactory:
         # Construction does not start synchronization.
         # --------------------------------------------------------------
 
-        historical_data_synchronizer = HistoricalDataSynchronizer()
+        historical_data_synchronizer = HistoricalDataSynchronizer(
+            account_id=runtime_account.account_id,
+            bridge_service=bridge_service,
+        )
 
         # --------------------------------------------------------------
         # 8. Live tick hub.
@@ -276,7 +279,31 @@ class ExecutionRuntimeFactory:
         risk_engine = RiskEngine()
 
         # --------------------------------------------------------------
-        # 13. Live risk-context provider.
+        # 13. Position reconciliation service.
+        #
+        # Construct this before LiveContextFactory.
+        #
+        # This is the single account-scoped position reconciliation
+        # service instance shared by:
+        #
+        #   - AQEEngine, which owns its lifecycle;
+        #   - LiveContextFactory, which consumes its validated,
+        #     persisted position state;
+        #   - PositionWebSocketManager, which reads its latest
+        #     synchronization status.
+        #
+        # Construction does not start reconciliation.
+        # --------------------------------------------------------------
+
+        position_reconciliation_service = PositionReconciliationService(
+            broker=broker_manager,
+            account_id=runtime_account.account_id,
+            user_id=runtime_account.user_id,
+            session_factory=self.session_factory,
+        )
+
+        # --------------------------------------------------------------
+        # 14. Live risk-context provider.
         #
         # StrategySignalEvent intentionally remains account-agnostic.
         # StrategyManager.account_router owns strategy-to-account
@@ -284,6 +311,10 @@ class ExecutionRuntimeFactory:
         #
         # This runtime is account-scoped, so a signal assigned to a
         # different account must be rejected before risk evaluation.
+        #
+        # PositionReconciliationService is injected so the risk-context
+        # factory uses validated, persisted AQE positions rather than
+        # independently retrieving positions from MT5.
         # --------------------------------------------------------------
 
         async def resolve_account_id(
@@ -315,7 +346,7 @@ class ExecutionRuntimeFactory:
         risk_context_provider = live_context_factory.create()
 
         # --------------------------------------------------------------
-        # 14. Execution engine.
+        # 15. Execution engine.
         #
         # Approved RiskDecision objects enter the execution engine:
         #
@@ -341,7 +372,7 @@ class ExecutionRuntimeFactory:
         )
 
         # --------------------------------------------------------------
-        # 15. Order reconciliation service.
+        # 16. Order reconciliation service.
         #
         # Recovers orders whose final broker execution outcome may
         # be unknown. AQEEngine owns its lifecycle.
@@ -349,20 +380,6 @@ class ExecutionRuntimeFactory:
 
         order_reconciliation_service = OrderReconciliationService(
             broker=broker_manager,
-            session_factory=self.session_factory,
-        )
-
-        # --------------------------------------------------------------
-        # 16. Position reconciliation service.
-        #
-        # Keeps AQE's persisted position ledger aligned with the
-        # authoritative broker position state.
-        # --------------------------------------------------------------
-
-        position_reconciliation_service = PositionReconciliationService(
-            broker=broker_manager,
-            account_id=runtime_account.account_id,
-            user_id=runtime_account.user_id,
             session_factory=self.session_factory,
         )
 
@@ -419,9 +436,7 @@ class ExecutionRuntimeFactory:
             bridge_service=bridge_service,
             market_data_service=market_data_service,
             market_data_consumer=market_data_consumer,
-            market_data_subscription_manager=(
-                market_data_subscription_manager
-            ),
+            market_data_subscription_manager=(market_data_subscription_manager),
             historical_data_synchronizer=historical_data_synchronizer,
             live_tick_hub=live_tick_hub,
             live_candle_builder=live_candle_builder,
@@ -431,16 +446,13 @@ class ExecutionRuntimeFactory:
             risk_context_provider=risk_context_provider,
             execution_engine=execution_engine,
             order_reconciliation_service=order_reconciliation_service,
-            position_reconciliation_service=(
-                position_reconciliation_service
-            ),
+            position_reconciliation_service=(position_reconciliation_service),
             signal_pipeline=signal_pipeline,
             live_pipeline=live_pipeline,
         )
 
         logger.info(
-            "AQE execution runtime composed successfully: "
-            "account_id=%s broker=%s",
+            "AQE execution runtime composed successfully: " "account_id=%s broker=%s",
             runtime_account.account_id,
             runtime_account.broker,
         )

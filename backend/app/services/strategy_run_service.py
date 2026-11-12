@@ -189,39 +189,24 @@ class StrategyRunService:
         self,
         *,
         user_id: UUID,
+        account_id: UUID,
     ):
-        """
-        Retrieve all strategy runs belonging to the authenticated user.
-        """
+        """Retrieve strategy runs for one account owned by the user."""
 
         self._validate_user_id(user_id)
 
-        return await self.repository.get_all(
+        account_id = self._validate_uuid(
+            account_id,
+            "account_id",
+        )
+
+        await self._validate_account_ownership(
+            account_id=account_id,
             user_id=user_id,
         )
 
-    async def get_by_name(
-        self,
-        strategy_name: str,
-        *,
-        user_id: UUID,
-    ):
-        """
-        Retrieve runs using the persisted strategy-name snapshot.
-
-        This is a convenience query only. The authoritative strategy
-        identity remains strategy_definition_id.
-        """
-
-        self._validate_user_id(user_id)
-
-        strategy_name = self._normalize_required_string(
-            strategy_name,
-            "strategy_name",
-        )
-
-        return await self.repository.get_by_name(
-            strategy_name,
+        return await self.repository.get_by_account(
+            account_id=account_id,
             user_id=user_id,
         )
 
@@ -519,7 +504,7 @@ class StrategyRunService:
 
         if not strategy_definition.available:
             raise ValueError(
-                f"Strategy '{strategy_definition.name}' is not currently " "available."
+                f"Strategy '{strategy_definition.name}' is not currently available."
             )
 
         name = strategy_definition.name.strip()

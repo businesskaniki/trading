@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 import asyncio
@@ -10,17 +11,12 @@ from uuid import UUID
 from fastapi import WebSocket
 
 from app.database.session import SessionLocal
-from app.repositories.order_repository import OrderRepository
 from app.repositories.position_repository import PositionRepository
-from app.repositories.trade_repository import TradeRepository
 from app.repositories.trading_account_repository import (
     TradingAccountRepository,
 )
 from app.schemas.position import PositionResponse
-from app.services.execution_service import ExecutionService
 from app.services.position_service import PositionService
-from app.services.position_sync_service import PositionSyncService
-from app.services.trade_service import TradeService
 
 logger = logging.getLogger(__name__)
 
@@ -29,21 +25,28 @@ class PositionWebSocketManager:
     """
     Manage authenticated position WebSocket clients.
 
-    A single background feed is maintained per user within this
-    application process. Feeds start on demand and stop when the
-    user's final WebSocket connection disconnects.
+    One background feed is maintained per user within this application
+    process. Feeds start on demand and stop when the user's final
+    WebSocket connection disconnects.
 
-    The MT5 bridge currently supplies REST snapshots, so the backend
-    refreshes broker state periodically and broadcasts the results.
+    PositionReconciliationService owns broker synchronization and
+    persistence. This manager only reads the persisted AQE position
+    ledger and broadcasts snapshots to connected clients.
+
+    This service must never independently retrieve positions from MT5.
     """
 
-    POLL_INTERVAL_SECONDS = 1.0
+    POLL_INTERVAL_SECONDS = 2.0
     ERROR_RETRY_SECONDS = 3.0
 
     def __init__(self) -> None:
         self._connections: dict[UUID, set[WebSocket]] = {}
         self._feed_tasks: dict[UUID, asyncio.Task] = {}
         self._lock = asyncio.Lock()
+
+    # ==========================================================
+    # CONNECTION LIFECYCLE
+    # ==========================================================
 
     async def connect(
         self,
@@ -67,10 +70,12 @@ class PositionWebSocketManager:
                     name=f"position-feed-{user_id}",
                 )
 
+            client_count = len(connections)
+
         logger.info(
             "Position WebSocket connected. user_id=%s clients=%s",
             user_id,
-            len(self._connections.get(user_id, set())),
+            client_count,
         )
 
     async def disconnect(
@@ -78,7 +83,7 @@ class PositionWebSocketManager:
         user_id: UUID,
         websocket: WebSocket,
     ) -> None:
-        """Unregister a socket and stop its user's feed if unused."""
+        """Unregister a socket and stop its feed if it is no longer used."""
 
         task_to_cancel = None
 
@@ -114,7 +119,12 @@ class PositionWebSocketManager:
             user_id,
         )
 
-    async def _has_connections(self, user_id: UUID) -> bool:
+    async def _has_connections(
+        self,
+        user_id: UUID,
+    ) -> bool:
+        """Return whether the user still has active WebSocket clients."""
+
         async with self._lock:
             return bool(self._connections.get(user_id))
 
@@ -122,8 +132,14 @@ class PositionWebSocketManager:
         self,
         user_id: UUID,
     ) -> list[WebSocket]:
+        """Return a snapshot of the user's connected WebSockets."""
+
         async with self._lock:
             return list(self._connections.get(user_id, set()))
+
+    # ==========================================================
+    # BROADCAST
+    # ==========================================================
 
     async def _broadcast(
         self,
@@ -138,7 +154,10 @@ class PositionWebSocketManager:
             return
 
         results = await asyncio.gather(
-            *(websocket.send_json(message) for websocket in connections),
+            *(
+                websocket.send_json(message)
+                for websocket in connections
+            ),
             return_exceptions=True,
         )
 
@@ -159,52 +178,43 @@ class PositionWebSocketManager:
                     if not active:
                         self._connections.pop(user_id, None)
 
+    # ==========================================================
+    # PERSISTED POSITION SNAPSHOT
+    # ==========================================================
+
     async def _fetch_snapshot(
         self,
         user_id: UUID,
-        broker,
+        account_id: UUID,
+        sync_result: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """
-        Use a short-lived DB session for each synchronization cycle.
+        Read the latest persisted AQE positions for an account.
 
-        Never retain an AsyncSession for the lifetime of a WebSocket.
+        IMPORTANT:
+
+        This method does not retrieve positions from the broker.
+
+        PositionReconciliationService is the sole owner of periodic
+        broker-position synchronization and position persistence.
+
+        A fresh database session is used for each snapshot.
+        Both user_id and account_id are explicitly applied when
+        retrieving positions to prevent cross-account data leakage.
         """
 
         async with SessionLocal() as db:
             position_repository = PositionRepository(db)
             account_repository = TradingAccountRepository(db)
-            order_repository = OrderRepository(db)
 
             position_service = PositionService(
                 repository=position_repository,
                 account_repository=account_repository,
             )
 
-            trade_service = TradeService(
-                repository=TradeRepository(db),
-                position_repository=position_repository,
-            )
-
-            execution_service = ExecutionService(
-                broker=broker,
-            )
-
-            sync_service = PositionSyncService(
-                execution_service=execution_service,
-                position_repository=position_repository,
-                position_service=position_service,
-                order_repository=order_repository,
-                trade_service=trade_service,
-            )
-
-            # Refresh the database from the broker's current state.
-            sync_result = await sync_service.sync_positions(
+            positions = await position_service.get_open_positions_for_user(
                 user_id=user_id,
-            )
-
-            # Read the updated records within the same session.
-            positions = await position_service.get_positions(
-                user_id=user_id,
+                account_id=account_id,
             )
 
             serialized_positions = [
@@ -223,29 +233,110 @@ class PositionWebSocketManager:
                 "sync": sync_result,
             }
 
+    # ==========================================================
+    # USER FEED
+    # ==========================================================
+
     async def _run_user_feed(
         self,
         user_id: UUID,
     ) -> None:
         """
-        Refresh broker state while the user has active subscribers.
+        Broadcast persisted positions for the active AQE runtime.
+
+        The active runtime determines the account scope.
+
+        PositionReconciliationService maintains the persisted position
+        ledger. This feed only reads that ledger and broadcasts it.
+
+        Never fall back to a generic broker factory or independently
+        retrieve positions from MT5.
         """
 
         current_task = asyncio.current_task()
         last_error: str | None = None
 
         try:
-            # Import locally to avoid a module-level dependency cycle:
-            # the API dependency module also imports PositionSyncService.
-            from app.api.dependencies import get_broker_manager
-
-            broker = get_broker_manager()
+            # Local import avoids a module-level dependency cycle.
+            from app.core.engine import get_aqe_engine
 
             while await self._has_connections(user_id):
                 try:
+                    engine = get_aqe_engine()
+
+                    engine_status = getattr(
+                        engine.context.status,
+                        "value",
+                        str(engine.context.status),
+                    )
+
+                    if str(engine_status).upper() != "RUNNING":
+                        raise RuntimeError(
+                            "AQE engine must be RUNNING to broadcast live positions."
+                        )
+
+                    runtime = engine.runtime
+
+                    if runtime is None:
+                        raise RuntimeError(
+                            "AQE engine is RUNNING but has no active execution runtime."
+                        )
+
+                    runtime_account = runtime.account
+
+                    # --------------------------------------------------
+                    # Validate runtime ownership.
+                    # --------------------------------------------------
+
+                    try:
+                        runtime_user_id = UUID(
+                            str(runtime_account.user_id),
+                        )
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        raise PermissionError(
+                            "The active runtime account has no valid owner."
+                        ) from exc
+
+                    if runtime_user_id != user_id:
+                        raise PermissionError(
+                            "The active AQE runtime is not owned by this user."
+                        )
+
+                    account_id = runtime_account.account_id
+
+                    # --------------------------------------------------
+                    # Read the reconciliation service's latest result.
+                    # --------------------------------------------------
+
+                    reconciliation = getattr(
+                        runtime,
+                        "position_reconciliation_service",
+                        None,
+                    )
+
+                    if reconciliation is None:
+                        raise RuntimeError(
+                            "Position reconciliation service is not configured."
+                        )
+
+                    if not reconciliation.running:
+                        raise RuntimeError(
+                            "Position reconciliation is not running. "
+                            "Cannot guarantee fresh persisted positions."
+                        )
+
+                    sync_result = reconciliation.last_result
+
+                    # --------------------------------------------------
+                    # Read persisted AQE positions.
+                    #
+                    # No broker calls occur in this operation.
+                    # --------------------------------------------------
+
                     snapshot = await self._fetch_snapshot(
                         user_id=user_id,
-                        broker=broker,
+                        account_id=account_id,
+                        sync_result=sync_result,
                     )
 
                     await self._broadcast(
@@ -260,8 +351,12 @@ class PositionWebSocketManager:
                     raise
 
                 except Exception as exc:
-                    error_message = "Unable to refresh broker positions: " f"{exc}"
+                    error_message = (
+                        f"Unable to publish persisted position snapshot: {exc}"
+                    )
 
+                    # Avoid flooding logs and the WebSocket with the
+                    # same recurring error on every polling cycle.
                     if error_message != last_error:
                         logger.exception(
                             "Position feed failed. user_id=%s",
@@ -295,6 +390,8 @@ class PositionWebSocketManager:
             )
 
         finally:
+            # Only remove the task if this feed still owns the registry
+            # entry. Do not accidentally remove a replacement task.
             async with self._lock:
                 if self._feed_tasks.get(user_id) is current_task:
                     self._feed_tasks.pop(user_id, None)

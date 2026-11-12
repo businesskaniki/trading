@@ -9,6 +9,7 @@ from fastapi import (
     APIRouter,
     Depends,
     HTTPException,
+    Query,
     WebSocket,
     WebSocketDisconnect,
     status,
@@ -105,18 +106,15 @@ async def create_position(
     response_model=list[PositionResponse],
 )
 async def list_positions(
+    account_id: UUID = Query(...),
     current_user=Depends(get_current_user),
     service: PositionService = Depends(get_position_service),
 ):
-    """
-    Return persisted positions for the authenticated user.
+    """Return open positions for one account owned by the current user."""
 
-    Live updates are handled by the WebSocket feed. This endpoint
-    remains a read-only REST endpoint for initial loading and fallback.
-    """
-
-    return await service.get_positions(
+    return await service.get_open_positions_for_user(
         user_id=current_user.id,
+        account_id=account_id,
     )
 
 

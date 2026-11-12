@@ -10,6 +10,7 @@ from app.broker.exceptions import (
     BrokerOrderError,
     BrokerPositionError,
     BrokerSymbolError,
+    MT5BridgeUnavailableError
 )
 from app.schemas.execution import (
     ExecutionOrder,
@@ -308,9 +309,11 @@ class BrokerManager:
         """
         Retrieve all open broker positions.
         """
-
         try:
             return await self.adapter.get_positions()
+
+        except MT5BridgeUnavailableError:
+            raise
 
         except BrokerPositionError:
             raise

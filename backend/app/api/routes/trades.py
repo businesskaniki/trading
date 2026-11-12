@@ -1,7 +1,6 @@
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
-
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from app.api.dependencies import (
     get_current_user,
     get_trade_service,
@@ -27,10 +26,16 @@ router = APIRouter(
     response_model=list[TradeResponse],
 )
 async def list_trades(
+    account_id: UUID = Query(...),
     current_user=Depends(get_current_user),
     service: TradeService = Depends(get_trade_service),
 ):
-    return await service.get_trades(user_id=current_user.id)
+    """Return trades for one account owned by the current user."""
+
+    return await service.get_account_trades(
+        account_id=account_id,
+        user_id=current_user.id,
+    )
 
 
 # ==========================================================

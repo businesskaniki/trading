@@ -1,7 +1,12 @@
 import api from "../../../api/axios";
 
 const ordersAPI = {
-  getOrders: async () => (await api.get("/orders/")).data,
+  getOrders: async (accountId) =>
+    (
+      await api.get("/orders/", {
+        params: { account_id: accountId },
+      })
+    ).data,
   createOrder: async (orderData) =>
     (await api.post("/orders/", orderData)).data,
   getOrder: async (orderId) => (await api.get(`/orders/${orderId}`)).data,

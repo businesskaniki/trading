@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useDispatch, useSelector } from "react-redux";
 
 import {
@@ -64,6 +64,15 @@ const Dashboard = () => {
   // Do not maintain a second account source in dashboardSlice.
   const accountList = accountsState?.accounts || [];
 
+  // Prefer the explicitly selected account; otherwise use the first
+  // active account, falling back to the first available account.
+  // Positions and trades endpoints require this ID as account_id.
+  const dataAccountId =
+    selectedAccount?.id ??
+    accountList.find((account) => account?.active !== false)?.id ??
+    accountList[0]?.id ??
+    null;
+
   // --------------------------------------------------
   // SYMBOL STATE
   // --------------------------------------------------
@@ -74,7 +83,7 @@ const Dashboard = () => {
 
   const accountSymbols = useSelector(
     (state) =>
-      state.symbols?.symbolsByAccount?.[String(selectedAccount?.id)] || [],
+      state.symbols?.symbolsByAccount?.[String(dataAccountId)] || [],
   );
 
   // --------------------------------------------------
@@ -116,48 +125,174 @@ const Dashboard = () => {
   const [visibleError, setVisibleError] = useState(null);
 
   // --------------------------------------------------
+  // REQUEST DIAGNOSTICS + IN-FLIGHT DEDUPLICATION
+  // --------------------------------------------------
+  // Each dispatched async thunk is logged with its trigger,
+  // argument, Redux requestId, duration and resolved error.
+  // Identical requests are shared while one is still pending.
+  // --------------------------------------------------
+
+  const inFlightRequestsRef = useRef(new Map());
+
+  const runRequest = useCallback(
+    (trigger, label, thunkCreator, arg) => {
+      const thunkType = thunkCreator.typePrefix || thunkCreator.name || label;
+      let serializedArg = "<no-arg>";
+
+      if (arg !== undefined) {
+        try {
+          serializedArg = JSON.stringify(arg);
+        } catch {
+          serializedArg = String(arg);
+        }
+      }
+
+      const key = `${thunkType}:${serializedArg}`;
+      const existingRequest = inFlightRequestsRef.current.get(key);
+
+      if (existingRequest) {
+        console.debug("[AQE Request] DEDUPLICATED", {
+          trigger,
+          thunk: label,
+          thunkType,
+          arg: arg === undefined ? null : arg,
+          key,
+        });
+        return existingRequest;
+      }
+
+      const startedAt = performance.now();
+      console.info("[AQE Request] START", {
+        trigger,
+        thunk: label,
+        thunkType,
+        arg: arg === undefined ? null : arg,
+        key,
+      });
+
+      let dispatched;
+      try {
+        dispatched = dispatch(
+          arg === undefined ? thunkCreator() : thunkCreator(arg),
+        );
+      } catch (error) {
+        console.error("[AQE Request] THROWN", {
+          trigger,
+          thunk: label,
+          thunkType,
+          arg: arg === undefined ? null : arg,
+          durationMs: Math.round(performance.now() - startedAt),
+          error,
+        });
+        throw error;
+      }
+
+      let trackedPromise;
+      trackedPromise = Promise.resolve(dispatched)
+        .then((action) => {
+          const durationMs = Math.round(performance.now() - startedAt);
+          const meta = action?.meta || {};
+          const failed = meta.requestStatus === "rejected" || Boolean(action?.error);
+
+          const details = {
+            trigger,
+            thunk: label,
+            thunkType,
+            arg: arg === undefined ? null : arg,
+            requestId: meta.requestId || null,
+            requestStatus: meta.requestStatus || null,
+            durationMs,
+            payload: action?.payload,
+            error: action?.error || null,
+          };
+
+          if (failed) {
+            console.error("[AQE Request] FAILED", details);
+          } else {
+            console.info("[AQE Request] COMPLETED", details);
+          }
+
+          return action;
+        })
+        .catch((error) => {
+          console.error("[AQE Request] THROWN", {
+            trigger,
+            thunk: label,
+            thunkType,
+            arg: arg === undefined ? null : arg,
+            durationMs: Math.round(performance.now() - startedAt),
+            error,
+          });
+          throw error;
+        })
+        .finally(() => {
+          if (inFlightRequestsRef.current.get(key) === trackedPromise) {
+            inFlightRequestsRef.current.delete(key);
+          }
+        });
+
+      inFlightRequestsRef.current.set(key, trackedPromise);
+      return trackedPromise;
+    },
+    [dispatch],
+  );
+
+  // --------------------------------------------------
   // INITIAL DASHBOARD LOAD
   // --------------------------------------------------
   //
   // These requests are independent and start concurrently:
   //
   //   - accounts
-  //   - positions
-  //   - trades
   //   - engine status
   //
-  // Account-dependent data is loaded separately once
-  // selectedAccount becomes available.
+  // Positions and trades require account_id, so they are
+  // loaded only after an account ID is available below.
   // --------------------------------------------------
 
   useEffect(() => {
-    dispatch(fetchAccounts());
-    dispatch(fetchPositions());
-    dispatch(fetchTrades());
-    dispatch(fetchEngineStatus());
-  }, [dispatch]);
+    runRequest("initial-load", "fetchAccounts", fetchAccounts);
+    runRequest("initial-load", "fetchEngineStatus", fetchEngineStatus);
+  }, [runRequest]);
 
   // --------------------------------------------------
   // LOAD SELECTED ACCOUNT DATA
   // --------------------------------------------------
   //
-  // Once the account slice has selected an account,
-  // these requests execute concurrently:
-  //
-  //   - trading universe
-  //   - broker account
+  // Once an account ID is available, load all account-scoped data
+  // concurrently. Positions and trades must receive account_id.
   // --------------------------------------------------
 
   useEffect(() => {
-    const accountId = selectedAccount?.id;
-
-    if (!accountId) {
+    if (dataAccountId === null || dataAccountId === undefined || dataAccountId === "") {
       return;
     }
 
-    dispatch(fetchTradingUniverse(accountId));
-    dispatch(fetchBrokerAccount(accountId));
-  }, [dispatch, selectedAccount?.id]);
+    runRequest(
+      "account-data-load",
+      "fetchPositions",
+      fetchPositions,
+      dataAccountId,
+    );
+    runRequest(
+      "account-data-load",
+      "fetchTrades",
+      fetchTrades,
+      dataAccountId,
+    );
+    runRequest(
+      "account-data-load",
+      "fetchTradingUniverse",
+      fetchTradingUniverse,
+      dataAccountId,
+    );
+    runRequest(
+      "account-data-load",
+      "fetchBrokerAccount",
+      fetchBrokerAccount,
+      dataAccountId,
+    );
+  }, [runRequest, dataAccountId]);
 
   // --------------------------------------------------
   // PERIODIC DASHBOARD REFRESH
@@ -173,13 +308,16 @@ const Dashboard = () => {
 
   useEffect(() => {
     const refresh = window.setInterval(() => {
-      dispatch(fetchPositions());
-      dispatch(fetchTrades());
-      dispatch(fetchEngineStatus());
+      if (dataAccountId !== null && dataAccountId !== undefined && dataAccountId !== "") {
+        runRequest("poll-30s", "fetchPositions", fetchPositions, dataAccountId);
+        runRequest("poll-30s", "fetchTrades", fetchTrades, dataAccountId);
+      }
+
+      runRequest("poll-30s", "fetchEngineStatus", fetchEngineStatus);
     }, 30000);
 
     return () => window.clearInterval(refresh);
-  }, [dispatch]);
+  }, [runRequest, dataAccountId]);
 
   // --------------------------------------------------
   // MANUAL REFRESH
@@ -190,14 +328,28 @@ const Dashboard = () => {
   // --------------------------------------------------
 
   const handleRefresh = () => {
-    dispatch(fetchAccounts());
-    dispatch(fetchPositions());
-    dispatch(fetchTrades());
-    dispatch(fetchEngineStatus());
+    runRequest("manual-refresh", "fetchAccounts", fetchAccounts);
+    runRequest("manual-refresh", "fetchEngineStatus", fetchEngineStatus);
 
-    if (selectedAccount?.id) {
-      dispatch(fetchTradingUniverse(selectedAccount.id));
-      dispatch(fetchBrokerAccount(selectedAccount.id));
+    if (dataAccountId !== null && dataAccountId !== undefined && dataAccountId !== "") {
+      runRequest("manual-refresh", "fetchPositions", fetchPositions, dataAccountId);
+      runRequest("manual-refresh", "fetchTrades", fetchTrades, dataAccountId);
+      runRequest(
+        "manual-refresh",
+        "fetchTradingUniverse",
+        fetchTradingUniverse,
+        dataAccountId,
+      );
+      runRequest(
+        "manual-refresh",
+        "fetchBrokerAccount",
+        fetchBrokerAccount,
+        dataAccountId,
+      );
+    } else {
+      console.warn(
+        "[AQE Request] Skipping positions/trades refresh because no account ID is available.",
+      );
     }
   };
 
@@ -210,7 +362,12 @@ const Dashboard = () => {
       return;
     }
 
-    await dispatch(startEngine(selectedAccount.id));
+    await runRequest(
+      "engine-control:start",
+      "startEngine",
+      startEngine,
+      selectedAccount.id,
+    );
   };
 
   const handleStopEngine = async () => {
@@ -218,7 +375,7 @@ const Dashboard = () => {
       return;
     }
 
-    await dispatch(stopEngine());
+    await runRequest("engine-control:stop", "stopEngine", stopEngine);
   };
 
   const handlePauseEngine = async () => {
@@ -226,7 +383,7 @@ const Dashboard = () => {
       return;
     }
 
-    await dispatch(pauseEngine());
+    await runRequest("engine-control:pause", "pauseEngine", pauseEngine);
   };
 
   const handleResumeEngine = async () => {
@@ -234,7 +391,7 @@ const Dashboard = () => {
       return;
     }
 
-    await dispatch(resumeEngine());
+    await runRequest("engine-control:resume", "resumeEngine", resumeEngine);
   };
 
   // --------------------------------------------------
@@ -466,13 +623,16 @@ const Dashboard = () => {
   // FLOATING PROFIT
   // --------------------------------------------------
 
+  // Only open positions contribute to floating P/L. Keep this
+  // declaration after openPositions so it cannot be accessed in
+  // the temporal dead zone during render.
   const floatingProfit = useMemo(
     () =>
-      livePositions.reduce(
+      openPositions.reduce(
         (sum, position) => sum + Number(position.liveFloatingProfit || 0),
         0,
       ),
-    [livePositions],
+    [openPositions],
   );
 
   // --------------------------------------------------

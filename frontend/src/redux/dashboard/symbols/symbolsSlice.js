@@ -9,19 +9,15 @@ import {
 
 const initialState = {
   symbolsByAccount: {},
-
   selectedSymbols: [],
-
   selectedAccountId: null,
 
   loading: false,
+  accountSymbolsLoading: {},
 
   syncing: false,
-
   selecting: false,
-
   error: null,
-
   syncResult: null,
 };
 
@@ -70,27 +66,42 @@ const symbolsSlice = createSlice({
         state.syncing = false;
         state.error = action.payload;
       })
-
       // --------------------------------------------------
       // FETCH ACCOUNT SYMBOLS
       // --------------------------------------------------
 
-      .addCase(fetchAccountSymbols.pending, (state) => {
+      .addCase(fetchAccountSymbols.pending, (state, action) => {
+        const accountId = String(action.meta.arg);
+
+        state.accountSymbolsLoading[accountId] = true;
         state.loading = true;
         state.error = null;
       })
 
       .addCase(fetchAccountSymbols.fulfilled, (state, action) => {
-        state.loading = false;
         const accountId = String(action.meta.arg);
+
+        state.accountSymbolsLoading[accountId] = false;
+        state.loading = Object.values(state.accountSymbolsLoading).some(
+          Boolean,
+        );
+
         state.symbolsByAccount[accountId] = normalizeItems(action.payload);
       })
 
       .addCase(fetchAccountSymbols.rejected, (state, action) => {
-        state.loading = false;
-        state.error = action.payload;
+        const accountId = String(action.meta.arg);
+
+        state.accountSymbolsLoading[accountId] = false;
+        state.loading = Object.values(state.accountSymbolsLoading).some(
+          Boolean,
+        );
+
+        state.error = action.payload || "Failed to load account symbols.";
       })
 
+
+      
       // --------------------------------------------------
       // FETCH TRADING UNIVERSE
       // --------------------------------------------------
@@ -132,10 +143,7 @@ const symbolsSlice = createSlice({
           symbols[index] = updatedSymbol;
         }
 
-        if (
-          updatedSymbol.enabled &&
-          state.selectedAccountId === accountId
-        ) {
+        if (updatedSymbol.enabled && state.selectedAccountId === accountId) {
           const alreadySelected = state.selectedSymbols.some(
             (symbol) => symbol.id === updatedSymbol.id,
           );

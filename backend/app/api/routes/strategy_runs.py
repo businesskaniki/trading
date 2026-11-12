@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status,Query
 
 from app.api.dependencies import (
     get_current_user,
@@ -68,15 +68,22 @@ async def create_strategy_run(
     response_model=list[StrategyRunResponse],
 )
 async def list_strategy_runs(
+    account_id: UUID = Query(...),
     current_user=Depends(get_current_user),
     service=Depends(get_strategy_run_service),
 ):
-    """
-    List all strategy runs belonging to the authenticated user.
-    """
-    return await service.get_strategy_runs(
-        user_id=current_user.id,
-    )
+    """List strategy runs for one account owned by the user."""
+
+    try:
+        return await service.get_strategy_runs(
+            user_id=current_user.id,
+            account_id=account_id,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Trading account not found.",
+        ) from exc
 
 
 # ==========================================================

@@ -395,10 +395,19 @@ class BollingerReversionStrategy(BaseStrategy):
                 )
 
                 if historical_mode:
-                    # The simulation itself supplies time-ordered candles.
-                    # Do not risk importing future market data from an
-                    # unbounded get_candles() call.
-                    continue
+                    mode_value = getattr(
+                        self.config.mode,
+                        "value",
+                        self.config.mode,
+                    )
+                    normalized_mode = str(mode_value).strip().upper().rsplit(".", 1)[-1]
+
+                    if normalized_mode == "REPLAY":
+                        # Replay mode warms up from its chronological feed.
+                        continue
+
+                    # BACKTEST uses a view that exposes only candles strictly
+                    # before the configured test start during initialization.
 
                 candles = await self.context.get_candles(
                     symbol=symbol,

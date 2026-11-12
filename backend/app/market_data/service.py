@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Any
@@ -161,7 +162,9 @@ class MarketDataService:
             return await self.bridge.subscribe_symbol(symbol)
 
         except MT5BridgeError as exc:
-            raise MarketDataError(f"Failed to subscribe to {symbol}: {exc}") from exc
+            raise MarketDataError(
+                f"Failed to subscribe to {symbol}: {exc}"
+            ) from exc
 
     async def unsubscribe(
         self,
@@ -191,14 +194,14 @@ class MarketDataService:
 
             if not isinstance(response, dict):
                 raise MarketDataError(
-                    "MT5 bridge returned an invalid " "subscriptions response."
+                    "MT5 bridge returned an invalid subscriptions response."
                 )
 
             return response
 
         except MT5BridgeError as exc:
             raise MarketDataError(
-                "Failed to retrieve market-data subscriptions: " f"{exc}"
+                f"Failed to retrieve market-data subscriptions: {exc}"
             ) from exc
 
     # ------------------------------------------------------------------
@@ -211,9 +214,19 @@ class MarketDataService:
         timeframe: str = "M15",
         count: int = 200,
         publish_event: bool = False,
+        canonical_symbol: str | None = None,
     ) -> list[MarketCandle]:
         """
         Retrieve and normalize historical candles.
+
+        `symbol` is the exact broker symbol used to retrieve data
+        from MT5, for example USDPLN.s.
+
+        `canonical_symbol` is the AQE symbol assigned to normalized
+        candles, for example USDPLN.
+
+        When canonical_symbol is omitted, the broker symbol is also
+        used as the normalized symbol, preserving existing behavior.
 
         Historical candles are not published individually by default.
 
@@ -221,37 +234,50 @@ class MarketDataService:
         component when candles represent newly completed market data.
         """
 
-        symbol = self._validate_symbol(symbol)
+        broker_symbol = self._validate_symbol(symbol)
+
+        normalized_symbol = self._validate_symbol(
+            canonical_symbol
+            if canonical_symbol is not None
+            else broker_symbol
+        )
+
+        if not isinstance(timeframe, str):
+            raise MarketDataError("Timeframe must be a string.")
 
         timeframe = timeframe.strip().upper()
 
         if not timeframe:
             raise MarketDataError("Timeframe cannot be empty.")
 
-        if count <= 0:
-            raise MarketDataError("Candle count must be greater than zero.")
+        if isinstance(count, bool) or not isinstance(count, int) or count <= 0:
+            raise MarketDataError("Candle count must be a positive integer.")
 
         try:
+            # Always request candles using the exact MT5 broker symbol.
             data = await self.bridge.get_candles(
-                symbol=symbol,
+                symbol=broker_symbol,
                 timeframe=timeframe,
                 count=count,
             )
 
+            # Normalize and store them under the canonical AQE symbol.
             candles = self.normalizer.candles(
                 data=data,
-                symbol=symbol,
+                symbol=normalized_symbol,
                 timeframe=timeframe,
             )
 
         except MT5BridgeError as exc:
             raise MarketDataError(
-                f"Failed to retrieve candles for {symbol}: {exc}"
+                f"Failed to retrieve candles for broker symbol "
+                f"{broker_symbol}: {exc}"
             ) from exc
 
         except MarketDataNormalizationError as exc:
             raise MarketDataError(
-                f"Failed to normalize candles for {symbol}: {exc}"
+                f"Failed to normalize candles for canonical symbol "
+                f"{normalized_symbol}: {exc}"
             ) from exc
 
         if publish_event:
@@ -286,7 +312,7 @@ class MarketDataService:
         symbol: str,
     ) -> str:
         """
-        Validate a broker symbol while preserving its exact casing.
+        Validate a symbol while preserving its exact casing.
         """
 
         if not isinstance(symbol, str):

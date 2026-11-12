@@ -225,6 +225,7 @@ class PositionRepository:
         result = await self.db.execute(
             select(Position)
             .options(
+                selectinload(Position.account),
                 selectinload(Position.symbol),
                 selectinload(Position.order),
             )

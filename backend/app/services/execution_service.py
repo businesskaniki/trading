@@ -8,6 +8,7 @@ from app.broker.broker_manager import BrokerManager
 from app.broker.exceptions import (
     BrokerOrderError,
     BrokerPositionError,
+    MT5BridgeUnavailableError
 )
 from app.schemas.execution import (
     ExecutionOrder,
@@ -329,11 +330,16 @@ class ExecutionService:
         try:
             return await self.broker.get_positions()
 
+        except MT5BridgeUnavailableError:
+            raise
+
         except BrokerPositionError:
             raise
 
         except Exception as exc:
-            raise BrokerPositionError(f"Failed to retrieve positions: {exc}") from exc
+            raise BrokerPositionError(
+                f"Failed to retrieve positions: {exc}"
+            ) from exc
 
     async def get_position(
         self,

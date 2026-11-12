@@ -4,8 +4,15 @@ const strategyRunsAPI = {
   /**
    * Get all strategy runs belonging to the authenticated user.
    */
-  getAll: async () => {
-    const response = await api.get("/strategy-runs");
+  getAll: async (accountId) => {
+    if (!accountId) {
+      throw new Error("Select a trading account first.");
+    }
+
+    const response = await api.get("/strategy-runs", {
+      params: { account_id: accountId },
+    });
+
     return response.data;
   },
 
@@ -17,9 +24,7 @@ const strategyRunsAPI = {
       throw new Error("A strategy run ID is required.");
     }
 
-    const response = await api.get(
-      `/strategy-runs/${strategyRunId}`,
-    );
+    const response = await api.get(`/strategy-runs/${strategyRunId}`);
 
     return response.data;
   },

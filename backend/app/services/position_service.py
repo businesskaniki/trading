@@ -105,6 +105,34 @@ class PositionService:
             position for position in positions if position.account.user_id == user_id
         ]
 
+    
+    async def get_open_positions_for_user(
+        self,
+        user_id: UUID,
+        account_id: UUID | None = None,
+    ):
+        """Return only open positions owned by this user.
+
+        When account_id is supplied, restrict results to that account.
+        Closed positions remain available through get_positions().
+        """
+        if account_id is not None:
+            positions = (
+                await self.repository.get_open_positions_by_account(
+                    account_id
+                )
+            )
+        else:
+            positions = await self.repository.get_open_positions()
+
+        return [
+            position
+            for position in positions
+            if position.account is not None
+            and position.account.user_id == user_id
+        ]
+
+
     async def get_open_positions(self):
         return await self.repository.get_open_positions()
 

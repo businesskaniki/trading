@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import logging
 
@@ -220,12 +220,13 @@ class PositionSyncService:
 
             return account
 
-        get_account = getattr(self.execution_service, "get_account", None)
+        broker = getattr(self.execution_service, "broker", None)
+        get_account = getattr(broker, "get_account", None)
 
         if not callable(get_account):
             raise ValueError(
                 "Cannot identify the connected broker account: "
-                "ExecutionService.get_account() is unavailable."
+                "ExecutionService broker does not expose get_account()."
             )
 
         try:
@@ -236,6 +237,27 @@ class PositionSyncService:
             ) from exc
 
         broker_account = self._to_mapping(broker_account)
+
+        logger.warning(
+            "Position sync account response diagnostic: "
+            "type=%s keys=%s nested_account_type=%s",
+            type(broker_account).__name__,
+            sorted(broker_account.keys())
+            if isinstance(broker_account, dict)
+            else [],
+            type(broker_account.get("account")).__name__
+            if isinstance(broker_account, dict)
+            else "not-a-dict",
+        )
+        logger.warning(
+            "Position sync account response diagnostic: "
+            "type=%s keys=%s nested_account_type=%s",
+            type(broker_account).__name__,
+            sorted(broker_account.keys()) if isinstance(broker_account, dict) else [],
+            type(broker_account.get("account")).__name__
+            if isinstance(broker_account, dict)
+            else "not-a-dict",
+        )
 
         if not broker_account:
             raise ValueError(
@@ -1060,3 +1082,4 @@ class PositionSyncService:
             return vars(value)
 
         return {}
+

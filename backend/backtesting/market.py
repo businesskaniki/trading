@@ -122,6 +122,12 @@ class BacktestCandle:
 
         return value.astimezone(timezone.utc)
 
+    @property
+    def datetime(self) -> datetime:
+        """Compatibility alias for strategy implementations using candle.datetime."""
+
+        return self.timestamp
+
 
 @dataclass(frozen=True, slots=True)
 class BacktestMarket:

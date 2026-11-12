@@ -39,7 +39,7 @@ const Accounts = () => {
   const dispatch = useDispatch();
 
   const {
-    accounts,
+    accounts = [],
     loading,
     creating,
     updating,
@@ -48,6 +48,28 @@ const Accounts = () => {
     deleting,
     error,
   } = useSelector((state) => state.accounts);
+
+  /*
+   * Global Redux flags prevent other account operations while a
+   * connection operation is running.
+   *
+   * connectionOperation identifies the particular account whose
+   * Connect or Disconnect operation is currently in progress.
+   */
+  const [connectionOperation, setConnectionOperation] = useState(null);
+
+  /*
+   * A ref provides an immediate synchronous lock. This prevents two
+   * rapid clicks from dispatching duplicate connection requests before
+   * React has completed the next render.
+   */
+  const connectionOperationRef = useRef(false);
+
+  const connectionBusy =
+    Boolean(connectionOperation) || connecting || disconnecting;
+
+  // Show the loading screen only when there is no account data yet.
+  const isInitialLoading = loading && accounts.length === 0;
 
   const [isCreateOpen, setIsCreateOpen] = useState(false);
   const [editingAccount, setEditingAccount] = useState(null);
@@ -59,99 +81,24 @@ const Accounts = () => {
   const [statusFilter, setStatusFilter] = useState("ALL");
 
   // ---------------------------------------------------------
-  // AUTO RECONNECT STATE
-  // ---------------------------------------------------------
-
-  // Accounts currently being reconnected automatically.
-  //
-  // This prevents multiple connect requests from being
-  // created for the same account while the previous request
-  // is still running.
-  const autoReconnectInFlight = useRef(new Set());
-
-  // Accounts intentionally disconnected by the user.
-  //
-  // These accounts must not immediately reconnect themselves.
-  const manuallyDisconnectedAccounts = useRef(new Set());
-
-  // ---------------------------------------------------------
   // FETCH ACCOUNTS
   // ---------------------------------------------------------
 
   useEffect(() => {
     dispatch(fetchAccounts());
-
-    const refreshTimer = window.setInterval(() => {
-      dispatch(fetchAccounts());
-    }, 10000);
-
-    return () => {
-      window.clearInterval(refreshTimer);
-    };
   }, [dispatch]);
 
   // ---------------------------------------------------------
-  // AUTOMATIC RECONNECT
-  //
-  // When an ACTIVE account reports DISCONNECTED,
-  // automatically attempt to connect it again.
-  //
-  // Important:
-  //
-  // - inactive accounts are never auto-connected
-  // - intentionally disconnected accounts are left alone
-  // - duplicate reconnect requests are prevented
+  // ACCOUNT-SPECIFIC CONNECTION STATUS
   // ---------------------------------------------------------
 
-  useEffect(() => {
-    if (!accounts.length) {
-      return;
-    }
+  const isConnectingAccount = (accountId) =>
+    connectionOperation?.type === "CONNECT" &&
+    String(connectionOperation.accountId) === String(accountId);
 
-    const reconnectDisconnectedAccounts = async () => {
-      for (const account of accounts) {
-        if (!account?.id) {
-          continue;
-        }
-
-        // Only active trading accounts should reconnect.
-        if (!account.active) {
-          continue;
-        }
-
-        const status = String(account.status || "DISCONNECTED").toUpperCase();
-
-        // Automatic reconnect only applies to DISCONNECTED.
-        if (status !== "DISCONNECTED") {
-          continue;
-        }
-
-        // Respect an intentional manual disconnect.
-        if (manuallyDisconnectedAccounts.current.has(account.id)) {
-          continue;
-        }
-
-        // Prevent duplicate reconnect requests.
-        if (autoReconnectInFlight.current.has(account.id)) {
-          continue;
-        }
-
-        autoReconnectInFlight.current.add(account.id);
-
-        try {
-          const result = await dispatch(connectTradingAccount(account.id));
-
-          if (connectTradingAccount.fulfilled.match(result)) {
-            dispatch(clearAccountOperationState());
-          }
-        } finally {
-          autoReconnectInFlight.current.delete(account.id);
-        }
-      }
-    };
-
-    reconnectDisconnectedAccounts();
-  }, [accounts, dispatch]);
+  const isDisconnectingAccount = (accountId) =>
+    connectionOperation?.type === "DISCONNECT" &&
+    String(connectionOperation.accountId) === String(accountId);
 
   // ---------------------------------------------------------
   // STATISTICS
@@ -225,7 +172,6 @@ const Accounts = () => {
 
     if (createTradingAccount.fulfilled.match(result)) {
       setIsCreateOpen(false);
-
       dispatch(clearAccountOperationState());
     }
   };
@@ -244,9 +190,37 @@ const Accounts = () => {
 
     if (updateTradingAccount.fulfilled.match(result)) {
       setEditingAccount(null);
-
       dispatch(clearAccountOperationState());
     }
+  };
+
+  // ---------------------------------------------------------
+  // CONNECTION OPERATION LOCK
+  // ---------------------------------------------------------
+
+  const beginConnectionOperation = (accountId, type) => {
+    if (
+      !accountId ||
+      connectionOperationRef.current ||
+      connecting ||
+      disconnecting
+    ) {
+      return false;
+    }
+
+    connectionOperationRef.current = true;
+
+    setConnectionOperation({
+      accountId: String(accountId),
+      type,
+    });
+
+    return true;
+  };
+
+  const endConnectionOperation = () => {
+    connectionOperationRef.current = false;
+    setConnectionOperation(null);
   };
 
   // ---------------------------------------------------------
@@ -254,31 +228,30 @@ const Accounts = () => {
   // ---------------------------------------------------------
 
   const handleConnectAccount = async (account) => {
-    if (!account?.id) {
+    if (!account?.id || !account.active) {
       return;
     }
 
-    if (connecting || disconnecting) {
+    /*
+     * Acquire the lock before dispatching. Only one connection
+     * operation can start at a time.
+     */
+    if (!beginConnectionOperation(account.id, "CONNECT")) {
       return;
     }
 
-    if (!account.active) {
-      return;
-    }
+    try {
+      const result = await dispatch(connectTradingAccount(account.id));
 
-    // -------------------------------------------------------
-    // The user explicitly requested a connection.
-    //
-    // Remove any previous intentional-disconnect marker so
-    // future unexpected disconnections can reconnect.
-    // -------------------------------------------------------
+      if (connectTradingAccount.fulfilled.match(result)) {
+        dispatch(clearAccountOperationState());
+      }
 
-    manuallyDisconnectedAccounts.current.delete(account.id);
-
-    const result = await dispatch(connectTradingAccount(account.id));
-
-    if (connectTradingAccount.fulfilled.match(result)) {
-      dispatch(clearAccountOperationState());
+      // The Redux thunk handles and stores rejected-request errors.
+    } catch (connectError) {
+      console.error(`Failed to connect account ${account.id}:`, connectError);
+    } finally {
+      endConnectionOperation();
     }
   };
 
@@ -291,32 +264,23 @@ const Accounts = () => {
       return;
     }
 
-    if (connecting || disconnecting) {
+    if (!beginConnectionOperation(account.id, "DISCONNECT")) {
       return;
     }
 
-    // -------------------------------------------------------
-    // Record this as an intentional user disconnect.
-    //
-    // This prevents the automatic reconnect effect from
-    // immediately reconnecting the account.
-    // -------------------------------------------------------
+    try {
+      const result = await dispatch(disconnectTradingAccount(account.id));
 
-    manuallyDisconnectedAccounts.current.add(account.id);
-
-    const result = await dispatch(disconnectTradingAccount(account.id));
-
-    if (disconnectTradingAccount.fulfilled.match(result)) {
-      dispatch(clearAccountOperationState());
-    } else {
-      // -----------------------------------------------------
-      // Disconnect failed.
-      //
-      // The user did not successfully disconnect the account,
-      // so automatic reconnect behavior should remain active.
-      // -----------------------------------------------------
-
-      manuallyDisconnectedAccounts.current.delete(account.id);
+      if (disconnectTradingAccount.fulfilled.match(result)) {
+        dispatch(clearAccountOperationState());
+      }
+    } catch (disconnectError) {
+      console.error(
+        `Failed to disconnect account ${account.id}:`,
+        disconnectError,
+      );
+    } finally {
+      endConnectionOperation();
     }
   };
 
@@ -332,17 +296,7 @@ const Accounts = () => {
     const result = await dispatch(removeTradingAccount(accountToDelete.id));
 
     if (removeTradingAccount.fulfilled.match(result)) {
-      // -----------------------------------------------------
-      // Remove any reconnect state associated with the
-      // deleted account.
-      // -----------------------------------------------------
-
-      autoReconnectInFlight.current.delete(accountToDelete.id);
-
-      manuallyDisconnectedAccounts.current.delete(accountToDelete.id);
-
       setAccountToDelete(null);
-
       dispatch(clearAccountOperationState());
     }
   };
@@ -420,7 +374,7 @@ const Accounts = () => {
           type="button"
           className="accounts-primary-button"
           onClick={() => setIsCreateOpen(true)}
-          disabled={creating}
+          disabled={creating || connectionBusy}
           title="Add trading account"
         >
           <FaPlus />
@@ -496,9 +450,7 @@ const Accounts = () => {
             onChange={(event) => setEnvironmentFilter(event.target.value)}
           >
             <option value="ALL">All Accounts</option>
-
             <option value="LIVE">Live</option>
-
             <option value="DEMO">Demo</option>
           </select>
 
@@ -507,9 +459,7 @@ const Accounts = () => {
             onChange={(event) => setStatusFilter(event.target.value)}
           >
             <option value="ALL">All Status</option>
-
             <option value="ACTIVE">Active</option>
-
             <option value="INACTIVE">Inactive</option>
           </select>
 
@@ -518,7 +468,7 @@ const Accounts = () => {
             className="accounts-refresh"
             title="Refresh accounts"
             onClick={handleRefresh}
-            disabled={loading}
+            disabled={loading || connectionBusy}
           >
             <FaSyncAlt className={loading ? "accounts-spin" : ""} />
           </button>
@@ -531,7 +481,6 @@ const Accounts = () => {
         <div className="accounts-card-header">
           <div>
             <span>ACCOUNT REGISTRY</span>
-
             <h2>Trading Accounts</h2>
           </div>
 
@@ -557,9 +506,9 @@ const Accounts = () => {
             </thead>
 
             <tbody>
-              {loading ? (
+              {isInitialLoading ? (
                 <tr>
-                  <td colSpan="8" className="accounts-empty">
+                  <td colSpan={8} className="accounts-empty">
                     <FaSyncAlt className="accounts-spin" />
 
                     <strong>Loading trading accounts...</strong>
@@ -569,7 +518,7 @@ const Accounts = () => {
                 </tr>
               ) : filteredAccounts.length === 0 ? (
                 <tr>
-                  <td colSpan="8" className="accounts-empty">
+                  <td colSpan={8} className="accounts-empty">
                     <FaWallet />
 
                     <strong>
@@ -588,6 +537,7 @@ const Accounts = () => {
                       <button
                         type="button"
                         onClick={() => setIsCreateOpen(true)}
+                        disabled={connectionBusy}
                       >
                         <FaPlus />
                         Add Account
@@ -596,171 +546,195 @@ const Accounts = () => {
                   </td>
                 </tr>
               ) : (
-                filteredAccounts.map((account) => (
-                  <tr key={account.id}>
-                    {/* ACCOUNT */}
+                filteredAccounts.map((account) => {
+                  const accountConnecting = isConnectingAccount(account.id);
+                  const accountDisconnecting = isDisconnectingAccount(
+                    account.id,
+                  );
 
-                    <td>
-                      <div className="account-table-name">
-                        <div className="account-table-icon">
-                          <FaWallet />
+                  return (
+                    <tr key={account.id}>
+                      {/* ACCOUNT */}
+
+                      <td>
+                        <div className="account-table-name">
+                          <div className="account-table-icon">
+                            <FaWallet />
+                          </div>
+
+                          <div>
+                            <strong>
+                              {account.account_name || "Trading Account"}
+                            </strong>
+
+                            <span>#{account.login ?? "—"}</span>
+                          </div>
                         </div>
+                      </td>
 
-                        <div>
-                          <strong>
-                            {account.account_name || "Trading Account"}
-                          </strong>
+                      {/* BROKER */}
 
-                          <span>#{account.login ?? "—"}</span>
+                      <td>
+                        <div className="account-table-broker">
+                          <strong>{account.broker || "—"}</strong>
                         </div>
-                      </div>
-                    </td>
+                      </td>
 
-                    {/* BROKER */}
+                      {/* SERVER */}
 
-                    <td>
-                      <div className="account-table-broker">
-                        <strong>{account.broker || "—"}</strong>
-                      </div>
-                    </td>
+                      <td>
+                        <div className="account-table-server">
+                          <span>{account.server || "—"}</span>
+                        </div>
+                      </td>
 
-                    {/* SERVER */}
+                      {/* ENVIRONMENT */}
 
-                    <td>
-                      <div className="account-table-server">
-                        <span>{account.server || "—"}</span>
-                      </div>
-                    </td>
-
-                    {/* ENVIRONMENT */}
-
-                    <td>
-                      <span
-                        className={
-                          account.is_demo
-                            ? "account-environment demo"
-                            : "account-environment live"
-                        }
-                      >
-                        {account.is_demo ? "DEMO" : "LIVE"}
-                      </span>
-                    </td>
-
-                    {/* BALANCE */}
-
-                    <td>
-                      <strong>
-                        {formatMoney(account.balance, account.currency)}
-                      </strong>
-                    </td>
-
-                    {/* EQUITY */}
-
-                    <td>
-                      <strong>
-                        {formatMoney(account.equity, account.currency)}
-                      </strong>
-                    </td>
-
-                    {/* STATUS */}
-
-                    <td>
-                      <div className="account-status-cell">
+                      <td>
                         <span
                           className={
-                            account.active
-                              ? "account-status active"
-                              : "account-status inactive"
+                            account.is_demo
+                              ? "account-environment demo"
+                              : "account-environment live"
                           }
                         >
-                          <span className="account-status-dot" />
-
-                          {account.active ? "Active" : "Inactive"}
+                          {account.is_demo ? "DEMO" : "LIVE"}
                         </span>
+                      </td>
 
-                        <span
-                          className={`account-connection-status ${
-                            account.status?.toLowerCase() || "disconnected"
-                          }`}
-                        >
-                          {account.status || "DISCONNECTED"}
-                        </span>
-                      </div>
-                    </td>
+                      {/* BALANCE */}
 
-                    {/* ACTIONS */}
+                      <td>
+                        <strong>
+                          {formatMoney(account.balance, account.currency)}
+                        </strong>
+                      </td>
 
-                    <td>
-                      <div className="account-actions">
-                        <button
-                          type="button"
-                          className="account-action-view"
-                          title="View account"
-                          onClick={() => setViewingAccount(account)}
-                          disabled={connecting || disconnecting}
-                        >
-                          <FaEye />
-                        </button>
+                      {/* EQUITY */}
 
-                        <button
-                          type="button"
-                          className="account-action-edit"
-                          title="Edit account"
-                          onClick={() => setEditingAccount(account)}
-                          disabled={connecting || disconnecting}
-                        >
-                          <FaEdit />
-                        </button>
+                      <td>
+                        <strong>
+                          {formatMoney(account.equity, account.currency)}
+                        </strong>
+                      </td>
 
-                        {account.status === "CONNECTED" ? (
-                          <button
-                            type="button"
-                            className="account-action-connect"
-                            title="Disconnect account"
-                            onClick={() => handleDisconnectAccount(account)}
-                            disabled={disconnecting || connecting}
-                          >
-                            {disconnecting ? (
-                              <FaSyncAlt className="accounts-spin" />
-                            ) : (
-                              <FaCheckCircle />
-                            )}
-                          </button>
-                        ) : (
-                          <button
-                            type="button"
-                            className="account-action-connect"
-                            title={
+                      {/* STATUS */}
+
+                      <td>
+                        <div className="account-status-cell">
+                          <span
+                            className={
                               account.active
-                                ? "Connect account"
-                                : "Activate account before connecting"
-                            }
-                            onClick={() => handleConnectAccount(account)}
-                            disabled={
-                              connecting || disconnecting || !account.active
+                                ? "account-status active"
+                                : "account-status inactive"
                             }
                           >
-                            {connecting ? (
-                              <FaSyncAlt className="accounts-spin" />
-                            ) : (
-                              <FaGlobe />
-                            )}
-                          </button>
-                        )}
+                            <span className="account-status-dot" />
+                            {account.active ? "Active" : "Inactive"}
+                          </span>
 
-                        <button
-                          type="button"
-                          className="account-action-delete"
-                          title="Delete account"
-                          onClick={() => setAccountToDelete(account)}
-                          disabled={deleting || connecting || disconnecting}
-                        >
-                          <FaTrash />
-                        </button>
-                      </div>
-                    </td>
-                  </tr>
-                ))
+                          <span
+                            className={`account-connection-status ${
+                              account.status?.toLowerCase() || "disconnected"
+                            }`}
+                          >
+                            {account.status || "DISCONNECTED"}
+                          </span>
+
+                          {accountConnecting && (
+                            <span className="account-connection-status">
+                              Connecting...
+                            </span>
+                          )}
+
+                          {accountDisconnecting && (
+                            <span className="account-connection-status">
+                              Disconnecting...
+                            </span>
+                          )}
+                        </div>
+                      </td>
+
+                      {/* ACTIONS */}
+
+                      <td>
+                        <div className="account-actions">
+                          <button
+                            type="button"
+                            className="account-action-view"
+                            title="View account"
+                            onClick={() => setViewingAccount(account)}
+                            disabled={connectionBusy}
+                          >
+                            <FaEye />
+                          </button>
+
+                          <button
+                            type="button"
+                            className="account-action-edit"
+                            title="Edit account"
+                            onClick={() => setEditingAccount(account)}
+                            disabled={connectionBusy}
+                          >
+                            <FaEdit />
+                          </button>
+
+                          {account.status === "CONNECTED" ? (
+                            <button
+                              type="button"
+                              className="account-action-connect"
+                              title={
+                                accountDisconnecting
+                                  ? "Disconnecting account"
+                                  : "Disconnect account"
+                              }
+                              onClick={() => handleDisconnectAccount(account)}
+                              disabled={connectionBusy}
+                            >
+                              {accountDisconnecting ? (
+                                <FaSyncAlt className="accounts-spin" />
+                              ) : (
+                                <FaCheckCircle />
+                              )}
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="account-action-connect"
+                              title={
+                                !account.active
+                                  ? "Activate account before connecting"
+                                  : accountConnecting
+                                    ? "Connecting account"
+                                    : connectionBusy
+                                      ? "Another account connection operation is in progress"
+                                      : "Connect account"
+                              }
+                              onClick={() => handleConnectAccount(account)}
+                              disabled={connectionBusy || !account.active}
+                            >
+                              {accountConnecting ? (
+                                <FaSyncAlt className="accounts-spin" />
+                              ) : (
+                                <FaGlobe />
+                              )}
+                            </button>
+                          )}
+
+                          <button
+                            type="button"
+                            className="account-action-delete"
+                            title="Delete account"
+                            onClick={() => setAccountToDelete(account)}
+                            disabled={deleting || connectionBusy}
+                          >
+                            <FaTrash />
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  );
+                })
               )}
             </tbody>
           </table>
@@ -772,7 +746,7 @@ const Accounts = () => {
       <AccountForm
         isOpen={isCreateOpen || Boolean(editingAccount)}
         onClose={() => {
-          if (!creating && !updating) {
+          if (!creating && !updating && !connectionBusy) {
             setIsCreateOpen(false);
             setEditingAccount(null);
           }
@@ -788,7 +762,7 @@ const Accounts = () => {
         <div
           className="account-detail-overlay"
           onMouseDown={(event) => {
-            if (event.target === event.currentTarget) {
+            if (event.target === event.currentTarget && !connectionBusy) {
               setViewingAccount(null);
             }
           }}
@@ -799,6 +773,7 @@ const Accounts = () => {
               className="account-detail-close"
               onClick={() => setViewingAccount(null)}
               aria-label="Close"
+              disabled={connectionBusy}
             >
               ×
             </button>
@@ -815,19 +790,16 @@ const Accounts = () => {
             <div className="account-detail-grid">
               <div>
                 <span>Server</span>
-
                 <strong>{viewingAccount.server || "-"}</strong>
               </div>
 
               <div>
                 <span>Environment</span>
-
                 <strong>{viewingAccount.is_demo ? "DEMO" : "LIVE"}</strong>
               </div>
 
               <div>
                 <span>Balance</span>
-
                 <strong>
                   {formatMoney(viewingAccount.balance, viewingAccount.currency)}
                 </strong>
@@ -835,7 +807,6 @@ const Accounts = () => {
 
               <div>
                 <span>Equity</span>
-
                 <strong>
                   {formatMoney(viewingAccount.equity, viewingAccount.currency)}
                 </strong>
@@ -843,7 +814,6 @@ const Accounts = () => {
 
               <div>
                 <span>Margin</span>
-
                 <strong>
                   {formatMoney(viewingAccount.margin, viewingAccount.currency)}
                 </strong>
@@ -851,19 +821,16 @@ const Accounts = () => {
 
               <div>
                 <span>Connection</span>
-
                 <strong>{viewingAccount.status || "DISCONNECTED"}</strong>
               </div>
 
               <div>
                 <span>Currency</span>
-
                 <strong>{viewingAccount.currency || "-"}</strong>
               </div>
 
               <div>
                 <span>Leverage</span>
-
                 <strong>
                   {viewingAccount.leverage
                     ? `1:${viewingAccount.leverage}`
@@ -873,7 +840,6 @@ const Accounts = () => {
 
               <div>
                 <span>AQE Status</span>
-
                 <strong>{viewingAccount.active ? "ACTIVE" : "INACTIVE"}</strong>
               </div>
             </div>

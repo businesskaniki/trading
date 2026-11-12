@@ -50,7 +50,7 @@ class RedisConfig:
     )
 
     socket_timeout: float = float(
-        os.getenv("REDIS_SOCKET_TIMEOUT", "5.0")
+        os.getenv("REDIS_SOCKET_TIMEOUT", "15.0")
     )
 
     health_check_interval: int = int(

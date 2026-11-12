@@ -1,4 +1,3 @@
-```css
 /* =========================================================
    AQE — Backtesting Page
    ========================================================= */
@@ -969,4 +968,508 @@
     padding: 35px 20px;
   }
 }
-```
+/* =========================================================
+   AQE — Backtesting UI refinements (integrated overrides)
+   Includes bulk selection, checkboxes, notices, modal, and responsive polish.
+   ========================================================= */
+
+/* Keep sizing consistent across custom controls. */
+.backtesting-page,
+.backtesting-page * {
+  box-sizing: border-box;
+}
+
+/* =========================================================
+   Sidebar header / selection toolbar
+   ========================================================= */
+
+.backtesting-sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.backtesting-sidebar-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.backtesting-sidebar-header .backtesting-section-label {
+  margin: 0;
+  color: #8b9bb0;
+  font-size: 10px;
+}
+
+.backtesting-sidebar-header strong {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 27px;
+  height: 25px;
+  padding: 0 8px;
+  border: 1px solid #2a3a50;
+  border-radius: 7px;
+  background: #111d2c;
+  color: #dce6f3;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.backtesting-sidebar-header > svg {
+  flex-shrink: 0;
+  color: #60738d;
+}
+
+.backtesting-bulk-toolbar {
+  gap: 11px !important;
+  padding: 13px 14px !important;
+  border-bottom: 1px solid #202c3e !important;
+  background: #0f1723;
+}
+
+.backtesting-bulk-toolbar > label {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-height: 26px;
+  margin: 0;
+  color: #aebbc9;
+  font-size: 12px;
+  font-weight: 550;
+  line-height: 1.4;
+  user-select: none;
+}
+
+.backtesting-bulk-toolbar > label:has(input:disabled) {
+  color: #68778b;
+}
+
+.backtesting-bulk-toolbar .backtesting-button {
+  min-height: 37px;
+  padding: 0 12px;
+  font-size: 12px;
+}
+
+/* =========================================================
+   Consistent custom checkboxes
+   ========================================================= */
+
+.backtesting-bulk-toolbar input[type="checkbox"],
+.backtesting-list-row input[type="checkbox"] {
+  appearance: none;
+  -webkit-appearance: none;
+  display: inline-grid;
+  place-content: center;
+  flex: 0 0 17px;
+  width: 17px;
+  height: 17px;
+  min-width: 17px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid #42536a;
+  border-radius: 4px;
+  outline: none;
+  background: #0b121d;
+  box-shadow: inset 0 1px 1px rgba(0, 0, 0, 0.2);
+  accent-color: #4da3ff;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    border-color 0.15s ease,
+    box-shadow 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.backtesting-bulk-toolbar input[type="checkbox"]::after,
+.backtesting-list-row input[type="checkbox"]::after {
+  content: "";
+  width: 8px;
+  height: 4px;
+  border: 2px solid #ffffff;
+  border-top: 0;
+  border-right: 0;
+  opacity: 0;
+  transform: translateY(-1px) rotate(-45deg) scale(0.65);
+  transition:
+    opacity 0.12s ease,
+    transform 0.12s ease;
+}
+
+.backtesting-bulk-toolbar input[type="checkbox"]:checked,
+.backtesting-list-row input[type="checkbox"]:checked {
+  border-color: #3479c5;
+  background: #2874d4;
+  box-shadow: 0 0 0 2px rgba(52, 121, 197, 0.12);
+}
+
+.backtesting-bulk-toolbar input[type="checkbox"]:checked::after,
+.backtesting-list-row input[type="checkbox"]:checked::after {
+  opacity: 1;
+  transform: translateY(-1px) rotate(-45deg) scale(1);
+}
+
+.backtesting-bulk-toolbar input[type="checkbox"]:hover:not(:disabled),
+.backtesting-list-row input[type="checkbox"]:hover:not(:disabled) {
+  border-color: #65b4ff;
+}
+
+.backtesting-bulk-toolbar input[type="checkbox"]:focus-visible,
+.backtesting-list-row input[type="checkbox"]:focus-visible,
+.backtesting-form .backtesting-checkbox input[type="checkbox"]:focus-visible {
+  outline: 2px solid #65b4ff;
+  outline-offset: 3px;
+}
+
+.backtesting-bulk-toolbar input[type="checkbox"]:disabled,
+.backtesting-list-row input[type="checkbox"]:disabled {
+  border-color: #2c3747;
+  background: #151d29;
+  box-shadow: none;
+  cursor: not-allowed;
+  opacity: 0.52;
+}
+
+/* Preserve compact native sizing for the form's close-positions checkbox. */
+.backtesting-form .backtesting-checkbox input[type="checkbox"] {
+  appearance: auto;
+  -webkit-appearance: checkbox;
+  flex: 0 0 16px;
+  width: 16px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0;
+  border: initial;
+  border-radius: 0;
+  background: initial;
+  box-shadow: none;
+  accent-color: #3479c5;
+}
+
+/* =========================================================
+   Backtest rows with selection controls
+   ========================================================= */
+
+.backtesting-list-row {
+  display: flex;
+  align-items: stretch;
+  gap: 7px !important;
+  min-width: 0;
+  padding: 2px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  transition:
+    background 0.16s ease,
+    border-color 0.16s ease;
+}
+
+.backtesting-list-row + .backtesting-list-row {
+  margin-top: 4px;
+}
+
+.backtesting-list-row:hover {
+  border-color: #202e41;
+  background: rgba(17, 26, 39, 0.42);
+}
+
+.backtesting-list-row > label {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 25px;
+  min-width: 25px;
+  padding: 0 3px !important;
+  border-radius: 6px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.backtesting-list-row > label:hover:has(input:not(:disabled)) {
+  background: #172337;
+}
+
+.backtesting-list-row > label:has(input:disabled) {
+  cursor: not-allowed !important;
+}
+
+.backtesting-list-row .backtesting-list-item {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  border-radius: 8px;
+}
+
+.backtesting-list-row .backtesting-list-item:disabled {
+  cursor: wait;
+  opacity: 0.72;
+}
+
+.backtesting-list-row .backtesting-list-item:focus-visible {
+  outline: 2px solid #4da3ff;
+  outline-offset: 2px;
+}
+
+.backtesting-list-row .backtesting-list-item-meta {
+  justify-content: space-between;
+}
+
+/* =========================================================
+   Form checkbox compatibility
+   ========================================================= */
+
+.backtesting-checkbox {
+  margin: 0;
+}
+
+.backtesting-form .backtesting-checkbox input[type="checkbox"] {
+  margin: 0;
+  cursor: pointer;
+}
+
+.backtesting-form .backtesting-checkbox input[type="checkbox"]:disabled {
+  cursor: not-allowed;
+}
+
+/* =========================================================
+   Error / success notices
+   ========================================================= */
+
+.backtesting-error {
+  align-items: flex-start;
+}
+
+.backtesting-error > span {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.backtesting-error > button {
+  flex: 0 0 auto;
+  margin-left: auto;
+  padding: 4px 7px;
+  border: 1px solid #63313b;
+  border-radius: 6px;
+  background: #2a171e;
+  color: #f49aa4;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.backtesting-error > button:hover {
+  border-color: #914653;
+  background: #351b23;
+}
+
+.backtesting-page > .backtesting-result-placeholder[role="status"] {
+  align-items: center;
+  gap: 12px;
+  margin: 0 0 18px;
+  border-color: #235a3f;
+  background: #10241d;
+}
+
+.backtesting-page > .backtesting-result-placeholder[role="status"] .backtesting-result-icon {
+  background: #173629;
+  color: #64d89a;
+}
+
+.backtesting-page > .backtesting-result-placeholder[role="status"] > div:nth-child(2) {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.backtesting-page > .backtesting-result-placeholder[role="status"] button {
+  flex: 0 0 auto;
+  padding: 6px 9px;
+  border: 1px solid #2b6548;
+  border-radius: 7px;
+  background: #153426;
+  color: #8ce0b3;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.backtesting-page > .backtesting-result-placeholder[role="status"] button:hover {
+  background: #1a4431;
+}
+
+/* =========================================================
+   Custom deletion confirmation modal
+   ========================================================= */
+
+.backtesting-confirm-backdrop {
+  z-index: 2000;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  background: rgba(3, 8, 16, 0.78) !important;
+  backdrop-filter: blur(7px) saturate(115%) !important;
+  -webkit-backdrop-filter: blur(7px) saturate(115%);
+  animation: backtesting-backdrop-in 0.16s ease-out;
+}
+
+.backtesting-confirm-modal {
+  width: min(100%, 440px) !important;
+  max-height: min(90vh, 680px);
+  overflow-y: auto;
+  border: 1px solid #2a394d !important;
+  border-radius: 16px !important;
+  padding: 24px !important;
+  background: #0e1622 !important;
+  color: #f3f6fb !important;
+  box-shadow:
+    0 28px 90px rgba(0, 0, 0, 0.55),
+    0 0 0 1px rgba(148, 163, 184, 0.035) !important;
+  animation: backtesting-modal-in 0.2s ease-out;
+}
+
+.backtesting-confirm-modal h2 {
+  color: #f3f6fb !important;
+  letter-spacing: -0.02em;
+}
+
+.backtesting-confirm-modal p {
+  color: #9aa9bb !important;
+}
+
+.backtesting-confirm-modal .backtesting-button {
+  min-height: 39px;
+  border-radius: 8px;
+}
+
+.backtesting-confirm-modal .backtesting-button.secondary {
+  background: #151f2d;
+  border-color: #34445a;
+  color: #d4deea;
+}
+
+.backtesting-confirm-modal .backtesting-button.secondary:hover:not(:disabled) {
+  background: #1b2a3d;
+  border-color: #465b75;
+}
+
+.backtesting-confirm-modal .backtesting-button:not(.secondary) {
+  transition:
+    transform 0.16s ease,
+    background 0.16s ease,
+    border-color 0.16s ease,
+    opacity 0.16s ease;
+}
+
+.backtesting-confirm-modal .backtesting-button:disabled {
+  cursor: wait;
+  opacity: 0.6;
+}
+
+.backtesting-confirm-modal button:focus-visible {
+  outline: 2px solid #65b4ff;
+  outline-offset: 3px;
+}
+
+@keyframes backtesting-backdrop-in {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes backtesting-modal-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* =========================================================
+   Accessibility / reduced motion
+   ========================================================= */
+
+.backtesting-page button:focus-visible,
+.backtesting-page select:focus-visible,
+.backtesting-page input:not([type="checkbox"]):focus-visible {
+  outline: 2px solid #4da3ff;
+  outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .backtesting-page *,
+  .backtesting-page *::before,
+  .backtesting-page *::after,
+  .backtesting-confirm-backdrop,
+  .backtesting-confirm-modal {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
+
+/* =========================================================
+   Responsive adjustments for the new controls
+   ========================================================= */
+
+@media (max-width: 850px) {
+  .backtesting-sidebar-header {
+    padding: 14px 15px;
+  }
+
+  .backtesting-bulk-toolbar {
+    padding: 11px 12px !important;
+  }
+
+  .backtesting-list-row {
+    gap: 5px !important;
+  }
+}
+
+@media (max-width: 600px) {
+  .backtesting-bulk-toolbar > label {
+    font-size: 11px;
+  }
+
+  .backtesting-list-row > label {
+    flex-basis: 23px;
+    min-width: 23px;
+  }
+
+  .backtesting-list-row .backtesting-list-item {
+    padding: 11px 9px;
+  }
+
+  .backtesting-list-item-top {
+    gap: 6px;
+  }
+
+  .backtesting-status {
+    min-height: 20px;
+    padding: 0 6px;
+    font-size: 8px;
+  }
+
+  .backtesting-page > .backtesting-result-placeholder[role="status"] {
+    align-items: flex-start;
+    margin-bottom: 14px;
+    padding: 13px;
+  }
+
+  .backtesting-confirm-modal {
+    border-radius: 14px !important;
+    padding: 19px !important;
+  }
+
+  .backtesting-confirm-modal > div:last-child {
+    flex-wrap: wrap;
+  }
+
+  .backtesting-confirm-modal > div:last-child .backtesting-button {
+    flex: 1 1 120px;
+  }
+}

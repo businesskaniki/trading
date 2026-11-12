@@ -27,14 +27,22 @@ const SymbolsPage = () => {
   // ACCOUNTS
   // ====================================================================
 
-  const { accounts, selectedAccount } = useSelector((state) => state.accounts);
+  const { accounts = [], selectedAccount } = useSelector(
+    (state) => state.accounts,
+  );
 
   // ====================================================================
   // SYMBOLS
   // ====================================================================
 
-  const { symbolsByAccount, loading, syncing, selecting, error, syncResult } =
-    useSelector((state) => state.symbols);
+  const {
+    symbolsByAccount = {},
+    accountSymbolsLoading = {},
+    syncing,
+    selecting,
+    error,
+    syncResult,
+  } = useSelector((state) => state.symbols);
 
   // ====================================================================
   // LOCAL UI STATE
@@ -49,12 +57,33 @@ const SymbolsPage = () => {
   // CURRENT ACCOUNT
   // ====================================================================
 
-  const accountId = selectedAccount?.id || null;
+  const accountId = selectedAccount?.id ?? null;
 
-  const symbols = useMemo(
-    () => symbolsByAccount[String(accountId)] || [],
-    [symbolsByAccount, accountId],
+  const accountKey = accountId == null ? null : String(accountId);
+
+  const accountLoading = Boolean(
+    accountKey && accountSymbolsLoading[accountKey],
   );
+
+  const hasCachedSymbols =
+    accountKey !== null &&
+    Object.prototype.hasOwnProperty.call(symbolsByAccount, accountKey);
+
+  const symbols = useMemo(() => {
+    if (!accountKey) {
+      return [];
+    }
+
+    const accountSymbols = symbolsByAccount[accountKey];
+
+    return Array.isArray(accountSymbols) ? accountSymbols : [];
+  }, [symbolsByAccount, accountKey]);
+
+  /*
+   * Only show a loading placeholder when there are no existing
+   * symbols to display. Cached rows remain visible during refreshes.
+   */
+  const showSymbolsLoading = accountLoading && symbols.length === 0;
 
   // ====================================================================
   // VIRTUAL TABLE
@@ -71,20 +100,26 @@ const SymbolsPage = () => {
   }, [dispatch]);
 
   // ====================================================================
-  // LOAD SYMBOLS WHEN ACCOUNT CHANGES
+  // RESET FILTERS WHEN THE ACCOUNT CHANGES
   // ====================================================================
 
   useEffect(() => {
-    if (!accountId) {
-      return;
-    }
-
     setSearchTerm("");
     setAssetFilter("ALL");
     setSelectionFilter("ALL");
+  }, [accountId]);
+
+  // ====================================================================
+  // LOAD SYMBOLS ONLY WHEN THEY ARE NOT CACHED
+  // ====================================================================
+
+  useEffect(() => {
+    if (!accountId || hasCachedSymbols) {
+      return;
+    }
 
     dispatch(fetchAccountSymbols(accountId));
-  }, [dispatch, accountId]);
+  }, [dispatch, accountId, hasCachedSymbols]);
 
   // ====================================================================
   // ASSET CLASSES
@@ -146,26 +181,14 @@ const SymbolsPage = () => {
 
       const isSelected = Boolean(symbol.enabled);
 
-      // --------------------------------------------------------------
-      // SEARCH
-      // --------------------------------------------------------------
-
       const matchesSearch =
         !query ||
         name.includes(query) ||
         brokerSymbol.includes(query) ||
         description.includes(query);
 
-      // --------------------------------------------------------------
-      // ASSET CLASS
-      // --------------------------------------------------------------
-
       const matchesAssetClass =
         assetFilter === "ALL" || symbolAssetClass === assetFilter;
-
-      // --------------------------------------------------------------
-      // SELECTION STATUS
-      // --------------------------------------------------------------
 
       const matchesSelection =
         selectionFilter === "ALL" ||
@@ -183,23 +206,8 @@ const SymbolsPage = () => {
   const rowVirtualizer = useVirtualizer({
     count: filteredSymbols.length,
     getScrollElement: () => tableWrapperRef.current,
-
-    /*
-     * Most symbol rows have a very similar height.
-     * Keeping this estimate stable makes scrolling extremely cheap.
-     */
     estimateSize: () => 72,
-
-    /*
-     * Render a few additional rows above/below the viewport so that
-     * fast scrolling does not expose an empty area.
-     */
     overscan: 8,
-
-    /*
-     * Measuring actual rows lets TanStack correct the initial estimate
-     * if the CSS causes a row to be taller or shorter.
-     */
     measureElement: (element) => element?.getBoundingClientRect().height ?? 72,
   });
 
@@ -216,14 +224,16 @@ const SymbolsPage = () => {
     ? Math.max(0, totalVirtualHeight - lastVirtualRow.end)
     : 0;
 
-  // Reset scroll position whenever the visible dataset changes.
+  // ====================================================================
+  // RESET TABLE SCROLL POSITION
+  // ====================================================================
+
   useEffect(() => {
     if (!tableWrapperRef.current) {
       return;
     }
 
     tableWrapperRef.current.scrollTop = 0;
-
     rowVirtualizer.scrollToIndex(0);
   }, [accountId, searchTerm, assetFilter, selectionFilter, rowVirtualizer]);
 
@@ -238,6 +248,10 @@ const SymbolsPage = () => {
       return;
     }
 
+    if (String(nextAccountId) === String(accountId)) {
+      return;
+    }
+
     dispatch(selectAccount(nextAccountId));
   };
 
@@ -246,14 +260,24 @@ const SymbolsPage = () => {
   // ====================================================================
 
   const handleSync = async () => {
-    if (!accountId || syncing) {
+    if (!accountId || syncing || accountLoading) {
       return;
     }
 
-    const result = await dispatch(syncSymbols(accountId));
+    dispatch(clearSymbolsError());
 
-    if (syncSymbols.fulfilled.match(result)) {
-      await dispatch(fetchAccountSymbols(accountId));
+    try {
+      const result = await dispatch(syncSymbols(accountId));
+
+      if (syncSymbols.fulfilled.match(result)) {
+        /*
+         * Synchronization can add instruments or update metadata.
+         * Reload the account catalogue after a successful sync.
+         */
+        await dispatch(fetchAccountSymbols(accountId)).unwrap();
+      }
+    } catch (syncError) {
+      console.error("Failed to synchronize MT5 symbols:", syncError);
     }
   };
 
@@ -266,11 +290,15 @@ const SymbolsPage = () => {
       return;
     }
 
-    if (!changes.length) {
+    if (!Array.isArray(changes) || changes.length === 0) {
       setModalOpen(false);
       return;
     }
 
+    /*
+     * Preserve the existing API contract. Each changed symbol is
+     * updated through the account-specific selection endpoint.
+     */
     for (const change of changes) {
       const result = await dispatch(
         setSymbolSelection({
@@ -285,9 +313,16 @@ const SymbolsPage = () => {
       }
     }
 
-    await dispatch(fetchAccountSymbols(accountId));
+    /*
+     * Refresh the local account catalogue after all updates.
+     */
+    try {
+      await dispatch(fetchAccountSymbols(accountId)).unwrap();
 
-    setModalOpen(false);
+      setModalOpen(false);
+    } catch (refreshError) {
+      console.error("Failed to reload account symbols:", refreshError);
+    }
   };
 
   // ====================================================================
@@ -295,7 +330,7 @@ const SymbolsPage = () => {
   // ====================================================================
 
   const handleToggleSelection = async (accountSymbol) => {
-    if (!accountId || selecting) {
+    if (!accountId || selecting || !accountSymbol?.id) {
       return;
     }
 
@@ -313,10 +348,11 @@ const SymbolsPage = () => {
   // ====================================================================
 
   const handleRefresh = () => {
-    if (!accountId || loading) {
+    if (!accountId || accountLoading) {
       return;
     }
 
+    dispatch(clearSymbolsError());
     dispatch(fetchAccountSymbols(accountId));
   };
 
@@ -370,9 +406,7 @@ const SymbolsPage = () => {
 
   return (
     <main className="symbols-page">
-      {/* ================================================================
-          HEADER
-      ================================================================ */}
+      {/* HEADER */}
 
       <section className="symbols-header">
         <div>
@@ -391,7 +425,7 @@ const SymbolsPage = () => {
             type="button"
             className="symbol-button symbol-button--muted"
             onClick={handleSync}
-            disabled={syncing || loading || !selectedAccount}
+            disabled={syncing || accountLoading || !selectedAccount}
             title="Synchronize symbols from MT5"
           >
             <FaSyncAlt className={syncing ? "symbols-spin" : ""} />
@@ -403,7 +437,7 @@ const SymbolsPage = () => {
             type="button"
             className="symbol-button symbol-button--primary"
             onClick={() => setModalOpen(true)}
-            disabled={loading || symbols.length === 0}
+            disabled={showSymbolsLoading || !accountId || symbols.length === 0}
           >
             <FaCheckCircle />
             Select Symbols
@@ -411,9 +445,7 @@ const SymbolsPage = () => {
         </div>
       </section>
 
-      {/* ================================================================
-          ACCOUNT SELECTOR
-      ================================================================ */}
+      {/* ACCOUNT SELECTOR */}
 
       <section className="symbols-account-bar">
         <div className="symbols-account-selector">
@@ -423,7 +455,7 @@ const SymbolsPage = () => {
             id="symbols-account"
             value={selectedAccount?.id || ""}
             onChange={handleAccountChange}
-            disabled={loading || syncing}
+            disabled={syncing}
           >
             <option value="" disabled>
               Select trading account
@@ -464,9 +496,7 @@ const SymbolsPage = () => {
         )}
       </section>
 
-      {/* ================================================================
-          ERROR
-      ================================================================ */}
+      {/* ERROR */}
 
       {error && (
         <div className="symbols-error">
@@ -486,9 +516,7 @@ const SymbolsPage = () => {
         </div>
       )}
 
-      {/* ================================================================
-          SYNC SUCCESS
-      ================================================================ */}
+      {/* SYNC SUCCESS */}
 
       {syncResult && (
         <div className="symbols-success">
@@ -501,9 +529,7 @@ const SymbolsPage = () => {
         </div>
       )}
 
-      {/* ================================================================
-          STATISTICS
-      ================================================================ */}
+      {/* STATISTICS */}
 
       <section className="symbols-stats">
         <div className="symbol-stat">
@@ -543,9 +569,7 @@ const SymbolsPage = () => {
         </div>
       </section>
 
-      {/* ================================================================
-          SEARCH / FILTER
-      ================================================================ */}
+      {/* SEARCH / FILTER */}
 
       <section className="symbols-toolbar">
         <div className="symbols-toolbar__left">
@@ -557,20 +581,16 @@ const SymbolsPage = () => {
               value={searchTerm}
               onChange={(event) => setSearchTerm(event.target.value)}
               placeholder="Search symbols..."
-              disabled={loading || !accountId}
+              disabled={showSymbolsLoading || !accountId}
             />
           </div>
         </div>
 
         <div className="symbols-filters">
-          {/* ------------------------------------------------------------
-              ASSET CLASS
-          ------------------------------------------------------------ */}
-
           <select
             value={assetFilter}
             onChange={(event) => setAssetFilter(event.target.value)}
-            disabled={loading || !accountId}
+            disabled={showSymbolsLoading || !accountId}
           >
             <option value="ALL">All asset classes</option>
 
@@ -581,14 +601,10 @@ const SymbolsPage = () => {
             ))}
           </select>
 
-          {/* ------------------------------------------------------------
-              SELECTION STATUS
-          ------------------------------------------------------------ */}
-
           <select
             value={selectionFilter}
             onChange={(event) => setSelectionFilter(event.target.value)}
-            disabled={loading || !accountId}
+            disabled={showSymbolsLoading || !accountId}
           >
             <option value="ALL">All symbols</option>
 
@@ -597,10 +613,6 @@ const SymbolsPage = () => {
             <option value="UNSELECTED">Unselected ({unselectedCount})</option>
           </select>
 
-          {/* ------------------------------------------------------------
-              RESET
-          ------------------------------------------------------------ */}
-
           {(searchTerm ||
             assetFilter !== "ALL" ||
             selectionFilter !== "ALL") && (
@@ -608,31 +620,25 @@ const SymbolsPage = () => {
               type="button"
               className="symbols-filter-reset"
               onClick={handleResetFilters}
-              disabled={loading}
+              disabled={showSymbolsLoading}
             >
               Reset
             </button>
           )}
 
-          {/* ------------------------------------------------------------
-              REFRESH
-          ------------------------------------------------------------ */}
-
           <button
             type="button"
             className="symbols-refresh"
             onClick={handleRefresh}
-            disabled={loading || !accountId}
+            disabled={!accountId || accountLoading}
             title="Refresh symbols"
           >
-            <FaSyncAlt className={loading ? "symbols-spin" : ""} />
+            <FaSyncAlt className={accountLoading ? "symbols-spin" : ""} />
           </button>
         </div>
       </section>
 
-      {/* ================================================================
-          ACTIVE FILTER SUMMARY
-      ================================================================ */}
+      {/* ACTIVE FILTER SUMMARY */}
 
       <div className="symbols-view-summary">
         <div>
@@ -653,9 +659,7 @@ const SymbolsPage = () => {
         </span>
       </div>
 
-      {/* ================================================================
-          SYMBOL TABLE
-      ================================================================ */}
+      {/* SYMBOL TABLE */}
 
       <section className="symbols-card symbols-card--table">
         <header className="symbols-card__header">
@@ -693,13 +697,11 @@ const SymbolsPage = () => {
             </thead>
 
             <tbody>
-              {/* --------------------------------------------------------
-                  LOADING
-              -------------------------------------------------------- */}
+              {/* LOADING */}
 
-              {loading && (
+              {showSymbolsLoading && (
                 <tr>
-                  <td colSpan="7" className="symbols-empty">
+                  <td colSpan={7} className="symbols-empty">
                     <FaSyncAlt className="symbols-spin" />
 
                     <strong>Loading symbols...</strong>
@@ -709,13 +711,11 @@ const SymbolsPage = () => {
                 </tr>
               )}
 
-              {/* --------------------------------------------------------
-                  EMPTY / NO MATCHES
-              -------------------------------------------------------- */}
+              {/* EMPTY / NO MATCHES */}
 
-              {!loading && filteredSymbols.length === 0 && (
+              {!showSymbolsLoading && filteredSymbols.length === 0 && (
                 <tr>
-                  <td colSpan="7" className="symbols-empty">
+                  <td colSpan={7} className="symbols-empty">
                     <FaCoins />
 
                     <strong>
@@ -740,12 +740,12 @@ const SymbolsPage = () => {
                       </button>
                     )}
 
-                    {!symbols.length && (
+                    {symbols.length === 0 && (
                       <button
                         type="button"
                         className="symbol-button symbol-button--primary"
                         onClick={handleSync}
-                        disabled={syncing}
+                        disabled={syncing || accountLoading || !accountId}
                       >
                         <FaSyncAlt className={syncing ? "symbols-spin" : ""} />
 
@@ -756,18 +756,14 @@ const SymbolsPage = () => {
                 </tr>
               )}
 
-              {/* --------------------------------------------------------
-                  VIRTUALIZED TABLE
-              -------------------------------------------------------- */}
+              {/* VIRTUALIZED TABLE */}
 
-              {!loading && filteredSymbols.length > 0 && (
+              {!showSymbolsLoading && filteredSymbols.length > 0 && (
                 <>
-                  {/* Top spacer */}
-
                   {topSpacerHeight > 0 && (
                     <tr aria-hidden="true" className="symbols-virtual-spacer">
                       <td
-                        colSpan="7"
+                        colSpan={7}
                         style={{
                           height: topSpacerHeight,
                           padding: 0,
@@ -776,8 +772,6 @@ const SymbolsPage = () => {
                       />
                     </tr>
                   )}
-
-                  {/* Visible rows only */}
 
                   {virtualRows.map((virtualRow) => {
                     const accountSymbol = filteredSymbols[virtualRow.index];
@@ -803,10 +797,6 @@ const SymbolsPage = () => {
                         data-index={virtualRow.index}
                         className={enabled ? "symbol-row--selected" : ""}
                       >
-                        {/* ------------------------------------------------
-                                SYMBOL
-                            ------------------------------------------------ */}
-
                         <td>
                           <div className="symbol-name">
                             <div className="symbol-icon">
@@ -823,25 +813,13 @@ const SymbolsPage = () => {
                           </div>
                         </td>
 
-                        {/* ------------------------------------------------
-                                BROKER SYMBOL
-                            ------------------------------------------------ */}
-
                         <td>
                           <strong>{accountSymbol.broker_symbol || "—"}</strong>
                         </td>
 
-                        {/* ------------------------------------------------
-                                ASSET CLASS
-                            ------------------------------------------------ */}
-
                         <td>
                           <span className="symbol-asset">{assetClass}</span>
                         </td>
-
-                        {/* ------------------------------------------------
-                                PRECISION
-                            ------------------------------------------------ */}
 
                         <td>
                           <strong>{accountSymbol.digits ?? "—"}</strong>
@@ -849,15 +827,7 @@ const SymbolsPage = () => {
                           <span className="symbol-subvalue">digits</span>
                         </td>
 
-                        {/* ------------------------------------------------
-                                CONTRACT
-                            ------------------------------------------------ */}
-
                         <td>{accountSymbol.contract_size ?? "—"}</td>
-
-                        {/* ------------------------------------------------
-                                VOLUME
-                            ------------------------------------------------ */}
 
                         <td>
                           {accountSymbol.min_volume ?? "—"} -{" "}
@@ -866,10 +836,6 @@ const SymbolsPage = () => {
                             step {accountSymbol.volume_step ?? "—"}
                           </span>
                         </td>
-
-                        {/* ------------------------------------------------
-                                SELECTION
-                            ------------------------------------------------ */}
 
                         <td>
                           <button
@@ -892,12 +858,10 @@ const SymbolsPage = () => {
                     );
                   })}
 
-                  {/* Bottom spacer */}
-
                   {bottomSpacerHeight > 0 && (
                     <tr aria-hidden="true" className="symbols-virtual-spacer">
                       <td
-                        colSpan="7"
+                        colSpan={7}
                         style={{
                           height: bottomSpacerHeight,
                           padding: 0,
@@ -913,9 +877,7 @@ const SymbolsPage = () => {
         </div>
       </section>
 
-      {/* ================================================================
-          SYMBOL SELECTION MODAL
-      ================================================================ */}
+      {/* SYMBOL SELECTION MODAL */}
 
       <SymbolForm
         isOpen={modalOpen}

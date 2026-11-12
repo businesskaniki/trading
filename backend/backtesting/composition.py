@@ -598,6 +598,7 @@ class BacktestComposition:
         market_data_view = BacktestMarketDataView(
             market_data,
             current_time=None,
+            warmup_end=resolved_config.historical_range[0],
         )
 
         created_strategy_ids: list[str] = []

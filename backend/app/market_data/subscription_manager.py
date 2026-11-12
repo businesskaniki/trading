@@ -60,29 +60,75 @@ class MarketDataSubscriptionManager:
     # ======================================================================
 
     async def get_desired_subscriptions(self) -> set[str]:
-        """Read the desired market-data subscription state from PostgreSQL.
+        """Return subscriptions required by the actual connected MT5 account.
 
-        A broker symbol is considered desired when at least one
-        AccountSymbol has enabled=True.
+        The MT5 Bridge maintains one terminal session. Only enabled symbols
+        belonging to the saved account matching the bridge's current login
+        and server are considered desired.
+
+        If the bridge explicitly reports that it is disconnected, the
+        desired subscription set is empty. Existing saved symbol selections
+        are not modified.
         """
+
+        # The live terminal identity is authoritative. Do not infer it from
+        # the frontend's selected account or potentially stale DB status.
+        bridge_status = await self.bridge_service.status()
+
+        if not bridge_status.get("connected", False):
+            logger.info(
+                "MT5 Bridge is disconnected; no market-data subscriptions "
+                "are currently required."
+            )
+            return set()
+
+        bridge_login = bridge_status.get("login")
+        bridge_server = bridge_status.get("server")
+
+        if bridge_login is None or not isinstance(bridge_server, str):
+            raise MT5BridgeError(
+                "MT5 Bridge reports a connected session but did not provide "
+                "a valid login and server. Subscription reconciliation "
+                "was aborted to avoid using the wrong account."
+            )
+
+        try:
+            bridge_login = int(bridge_login)
+        except (TypeError, ValueError) as exc:
+            raise MT5BridgeError(
+                "MT5 Bridge returned an invalid connected-account login."
+            ) from exc
+
+        bridge_server = bridge_server.strip()
+
+        if not bridge_server:
+            raise MT5BridgeError(
+                "MT5 Bridge returned an empty connected-account server."
+            )
 
         async with self.session_factory() as session:
             repository = AccountSymbolRepository(session)
 
-            account_symbols = await repository.list_all_enabled()
+            account_symbols = await repository.list_enabled_for_broker_account(
+                login=bridge_login,
+                server=bridge_server,
+            )
 
         desired: set[str] = set()
 
         for account_symbol in account_symbols:
             broker_symbol = account_symbol.broker_symbol
 
-            if not broker_symbol:
-                continue
+            if isinstance(broker_symbol, str) and broker_symbol.strip():
+                desired.add(broker_symbol.strip())
 
-            broker_symbol = broker_symbol.strip()
-
-            if broker_symbol:
-                desired.add(broker_symbol)
+        logger.info(
+            "Desired market-data subscriptions resolved for connected "
+            "MT5 account login=%s server=%s: %d symbols",
+            bridge_login,
+            bridge_server,
+            len(desired),
+        )
 
         return desired
 
