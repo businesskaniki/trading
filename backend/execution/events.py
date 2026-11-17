@@ -6,6 +6,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+from app.events.base import Event
 from app.schemas.execution import ExecutionResult, ExecutionStatus
 from risk.models import RiskDecision
 
@@ -15,7 +16,7 @@ def _utc_now() -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionSubmittedEvent:
+class ExecutionSubmittedEvent(Event):
     """
     Published immediately before an approved execution order is submitted
     to the broker.
@@ -47,9 +48,6 @@ class ExecutionSubmittedEvent:
     stop_loss: Decimal | None
     take_profit: Decimal | None
 
-    occurred_at: datetime = field(default_factory=_utc_now)
-    event_id: UUID = field(default_factory=uuid4)
-
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -62,7 +60,8 @@ class ExecutionSubmittedEvent:
     ) -> ExecutionSubmittedEvent:
         if decision.account_id is None:
             raise ValueError(
-                "ExecutionSubmittedEvent requires a RiskDecision " "with an account_id."
+                "ExecutionSubmittedEvent requires a RiskDecision "
+                "with an account_id."
             )
 
         if decision.position_size is None:
@@ -72,6 +71,8 @@ class ExecutionSubmittedEvent:
             )
 
         return cls(
+            event_id=uuid4(),
+            occurred_at=_utc_now(),
             decision_id=decision.decision_id,
             signal_id=decision.signal_id,
             account_id=decision.account_id,
@@ -113,7 +114,7 @@ class ExecutionSubmittedEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionCompletedEvent:
+class ExecutionCompletedEvent(Event):
     """
     Published after the broker returns a confirmed successful execution
     result.
@@ -149,9 +150,6 @@ class ExecutionCompletedEvent:
 
     message: str | None
 
-    occurred_at: datetime = field(default_factory=_utc_now)
-    event_id: UUID = field(default_factory=uuid4)
-
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -172,10 +170,13 @@ class ExecutionCompletedEvent:
 
         if decision.account_id is None:
             raise ValueError(
-                "ExecutionCompletedEvent requires a RiskDecision " "with an account_id."
+                "ExecutionCompletedEvent requires a RiskDecision "
+                "with an account_id."
             )
 
         return cls(
+            event_id=uuid4(),
+            occurred_at=_utc_now(),
             decision_id=decision.decision_id,
             signal_id=decision.signal_id,
             account_id=decision.account_id,
@@ -225,7 +226,7 @@ class ExecutionCompletedEvent:
 
 
 @dataclass(frozen=True, slots=True)
-class ExecutionFailedEvent:
+class ExecutionFailedEvent(Event):
     """
     Published when an approved execution does not produce a confirmed
     successful execution result.
@@ -266,9 +267,6 @@ class ExecutionFailedEvent:
     error_type: str
     error_message: str
 
-    occurred_at: datetime = field(default_factory=_utc_now)
-    event_id: UUID = field(default_factory=uuid4)
-
     metadata: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -282,10 +280,13 @@ class ExecutionFailedEvent:
     ) -> ExecutionFailedEvent:
         if decision.account_id is None:
             raise ValueError(
-                "ExecutionFailedEvent requires a RiskDecision " "with an account_id."
+                "ExecutionFailedEvent requires a RiskDecision "
+                "with an account_id."
             )
 
         return cls(
+            event_id=uuid4(),
+            occurred_at=_utc_now(),
             decision_id=decision.decision_id,
             signal_id=decision.signal_id,
             account_id=decision.account_id,

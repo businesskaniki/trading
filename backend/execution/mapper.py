@@ -203,26 +203,25 @@ class RiskDecisionMapper:
     def _resolve_price(
         decision: RiskDecision,
         order_type: ExecutionOrderType,
-    ) -> Decimal | None:
+    ) -> Decimal:
         """
-        Resolve the price required by the execution contract.
+        Resolve the approved reference price for execution.
 
         MARKET:
-            Returns None so the broker adapter can obtain a fresh
-            executable market price.
+            Carries the Risk Engine's approved reference price into
+            the broker adapter. MT5 execution mode determines whether
+            this price is applied or ignored.
 
         LIMIT/STOP:
-            Uses the Risk Engine's approved entry_price.
+            Uses the Risk Engine's approved entry_price as the
+            pending-order price.
 
         The mapper never calculates or changes the price.
         """
 
-        if order_type is ExecutionOrderType.MARKET:
-            return None
-
         if decision.entry_price is None:
             raise ExecutionValidationError(
-                f"{order_type.value} order requires entry_price."
+                f"{order_type.value} order requires a resolved entry_price."
             )
 
         if decision.entry_price <= Decimal("0"):

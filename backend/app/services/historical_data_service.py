@@ -22,6 +22,48 @@ from app.market_data.session_calendar import (
 logger = logging.getLogger(__name__)
 
 
+def _get_bridge_unavailable_reason(exc: BaseException) -> str | None:
+    """Identify expected MT5 bridge connectivity failures."""
+
+    messages = []
+    exception_types = set()
+    current = exc
+    visited = set()
+
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+
+        exception_types.add(type(current).__name__.lower())
+        messages.append(str(current).lower())
+
+        current = current.__cause__ or current.__context__
+
+    message = " ".join(messages)
+
+    if (
+        "no ipc connection" in message
+        or "ipc connection unavailable" in message
+        or "mt5 connection unavailable" in message
+    ):
+        return "MT5 terminal disconnected or IPC connection unavailable."
+
+    if (
+        "readtimeout" in exception_types
+        or "connecttimeout" in exception_types
+        or "timed out" in message
+    ):
+        return "MT5 bridge request timed out. Check bridge and terminal connectivity."
+
+    if (
+        "connecterror" in exception_types
+        or "connection refused" in message
+        or "failed to establish a connection" in message
+    ):
+        return "MT5 bridge unreachable. Check whether the bridge service is running."
+
+    return None
+
+
 class HistoricalDataService:
     """
     Service responsible for synchronizing and retrieving historical
@@ -794,7 +836,6 @@ class HistoricalDataService:
             "no_market_data",
         }
 
-
     @staticmethod
     def _is_closure_only_window(
         start: datetime,
@@ -1039,13 +1080,25 @@ class HistoricalDataService:
             }
 
         except Exception as exc:
-            logger.exception(
-                "Historical synchronization failed | "
-                "symbol=%s | broker_symbol=%s | timeframe=%s",
-                symbol.name,
-                account_symbol.broker_symbol,
-                timeframe,
-            )
+            unavailable_reason = _get_bridge_unavailable_reason(exc)
+
+            if unavailable_reason:
+                logger.warning(
+                    "MT5 BRIDGE UNAVAILABLE | "
+                    "symbol=%s | broker_symbol=%s | timeframe=%s | reason=%s",
+                    symbol.name,
+                    account_symbol.broker_symbol,
+                    timeframe,
+                    unavailable_reason,
+                )
+            else:
+                logger.exception(
+                    "Historical synchronization failed | "
+                    "symbol=%s | broker_symbol=%s | timeframe=%s",
+                    symbol.name,
+                    account_symbol.broker_symbol,
+                    timeframe,
+                )
 
             return {
                 "status": "failed",
@@ -1064,7 +1117,7 @@ class HistoricalDataService:
                 "latest_timestamp": None,
                 "start": None,
                 "end": None,
-                "error": str(exc),
+                "error": unavailable_reason or str(exc),
             }
 
     # ==================================================================
@@ -1534,3 +1587,5 @@ class HistoricalBackfillError(RuntimeError):
     ):
         super().__init__(message)
         self.results = results or []
+
+        

@@ -39,18 +39,13 @@ class AccountRiskSnapshot(BaseModel):
         """Return the current monetary drawdown."""
         if self.peak_equity is None:
             return Decimal("0")
-
-        return max(
-            Decimal("0"),
-            self.peak_equity - self.equity,
-        )
+        return max(Decimal("0"), self.peak_equity - self.equity)
 
     @property
     def drawdown_ratio(self) -> Decimal:
         """Return the current drawdown as a fraction of peak equity."""
         if self.peak_equity is None or self.peak_equity <= 0:
             return Decimal("0")
-
         return self.drawdown_amount / self.peak_equity
 
 
@@ -75,12 +70,9 @@ class PositionRiskSnapshot(BaseModel):
     @field_validator("symbol")
     @classmethod
     def normalize_symbol(cls, value: str) -> str:
-        """Normalize position symbol."""
         value = value.strip().upper()
-
         if not value:
             raise ValueError("symbol cannot be empty")
-
         return value
 
 
@@ -96,43 +88,30 @@ class SymbolRiskConstraints(BaseModel):
     volume_min: Decimal = Field(gt=Decimal("0"))
     volume_max: Decimal = Field(gt=Decimal("0"))
     volume_step: Decimal = Field(gt=Decimal("0"))
-    margin_rate: Decimal = Field(default=Decimal("1"), gt=Decimal("0"))
+
+    # Formula margin is optional because live MT5 margin is obtained from
+    # order_calc_margin(). When a formula rate is supplied it must be > 0.
+    margin_rate: Decimal | None = Field(default=Decimal("1"), gt=Decimal("0"))
 
     @field_validator("symbol")
     @classmethod
     def normalize_symbol(cls, value: str) -> str:
-        """Normalize symbol."""
         value = value.strip().upper()
-
         if not value:
             raise ValueError("symbol cannot be empty")
-
         return value
 
     @field_validator("volume_max")
     @classmethod
-    def validate_volume_range(
-        cls,
-        value: Decimal,
-        info,
-    ) -> Decimal:
-        """Ensure maximum volume is not below minimum volume."""
-
+    def validate_volume_range(cls, value: Decimal, info) -> Decimal:
         volume_min = info.data.get("volume_min")
-
         if volume_min is not None and value < volume_min:
             raise ValueError("volume_max cannot be less than volume_min")
-
         return value
 
 
 class MarketPricing(BaseModel):
-    """
-    Current market pricing used by the Risk Engine.
-
-    Bid is used as the executable reference price for short entries.
-    Ask is used as the executable reference price for long entries.
-    """
+    """Current market pricing used by the Risk Engine."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -141,24 +120,65 @@ class MarketPricing(BaseModel):
 
     @field_validator("ask")
     @classmethod
-    def validate_spread(
-        cls,
-        value: Decimal,
-        info,
-    ) -> Decimal:
-        """Ensure ask is not below bid."""
-
+    def validate_spread(cls, value: Decimal, info) -> Decimal:
         bid = info.data.get("bid")
-
         if bid is not None and value < bid:
             raise ValueError("ask cannot be less than bid")
-
         return value
 
     @property
     def mid(self) -> Decimal:
-        """Return the bid/ask midpoint."""
         return (self.bid + self.ask) / Decimal("2")
+
+
+class BrokerMarginAssessment(BaseModel):
+    """Validated broker-calculated margin for one proposed trade.
+
+    ``broker_symbol``, direction, volume and entry_price form the assessment
+    identity. MarginRiskRule verifies that all four match the prepared trade
+    before consuming ``required_margin``.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    broker_symbol: str
+    direction: SignalDirection
+    volume: Decimal = Field(gt=Decimal("0"))
+    entry_price: Decimal = Field(gt=Decimal("0"))
+    required_margin: Decimal = Field(ge=Decimal("0"))
+    currency: str | None = None
+    provider: str = "MT5"
+
+    @field_validator("broker_symbol")
+    @classmethod
+    def normalize_broker_symbol(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("broker_symbol cannot be empty")
+        return value
+
+    @field_validator("volume", "entry_price", "required_margin")
+    @classmethod
+    def validate_finite_decimals(cls, value: Decimal) -> Decimal:
+        if not value.is_finite():
+            raise ValueError("margin assessment values must be finite")
+        return value
+
+    @field_validator("currency")
+    @classmethod
+    def normalize_currency(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("provider cannot be empty")
+        return normalized
 
 
 class RiskContext(BaseModel):
@@ -167,61 +187,52 @@ class RiskContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     account: AccountRiskSnapshot
-
-    positions: list[PositionRiskSnapshot] = Field(
-        default_factory=list,
-    )
-
-    # Constraints for the symbol currently being evaluated.
-    #
-    # These are used by position sizing and other rules that operate
-    # directly on the proposed trade.
+    positions: list[PositionRiskSnapshot] = Field(default_factory=list)
     symbol_constraints: SymbolRiskConstraints
-
-    # Constraints for every symbol represented by the current
-    # portfolio positions, plus the current signal symbol.
-    #
-    # Exposure calculations require the correct contract specification
-    # for each individual position rather than reusing the signal
-    # symbol's constraints for the entire portfolio.
-    constraints_by_symbol: dict[str, SymbolRiskConstraints] = Field(
-        default_factory=dict,
-    )
-
+    constraints_by_symbol: dict[str, SymbolRiskConstraints] = Field(default_factory=dict)
     market: MarketPricing
     config: RiskConfig
     signal: TradingSignal
 
-    # Populated by RiskEngine after calculating the proposed order size.
-    proposed_position_size: Decimal | None = Field(
-        default=None,
-        gt=Decimal("0"),
-    )
+    # Broker-specific identity is retained separately from the canonical
+    # AQE symbol stored in SymbolRiskConstraints.symbol and TradingSignal.
+    broker_symbol: str | None = None
+
+    # Set by RiskEngine.prepare() so policy rules consume precisely the
+    # normalized Decimal price used for position sizing.
+    resolved_entry_price: Decimal | None = Field(default=None, gt=Decimal("0"))
+
+    # Present only after the live pipeline has queried the MT5 bridge.
+    broker_margin_assessment: BrokerMarginAssessment | None = None
+
+    # Populated by RiskEngine.prepare() after final position sizing.
+    proposed_position_size: Decimal | None = Field(default=None, gt=Decimal("0"))
+
+    @field_validator("broker_symbol")
+    @classmethod
+    def normalize_broker_symbol(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if not value:
+            raise ValueError("broker_symbol cannot be empty")
+        return value
 
     @property
     def open_position_count(self) -> int:
-        """Return the number of currently open positions."""
         return len(self.positions)
 
     @property
     def symbol_position_count(self) -> int:
-        """Return the number of positions currently open for the signal symbol."""
-
         signal_symbol = self.signal.symbol.strip().upper()
-
         return sum(position.symbol == signal_symbol for position in self.positions)
 
     @property
     def portfolio_risk(self) -> Decimal:
-        """Return total current monetary risk."""
-        return sum(
-            (position.risk_amount for position in self.positions),
-            Decimal("0"),
-        )
+        return sum((position.risk_amount for position in self.positions), Decimal("0"))
 
     @property
     def strategy_risk(self) -> Decimal:
-        """Return current monetary risk for the signal strategy."""
         return sum(
             (
                 position.risk_amount
@@ -233,25 +244,17 @@ class RiskContext(BaseModel):
 
     @property
     def entry_price(self) -> Decimal:
-        """
-        Resolve the price used for the proposed trade.
-
-        An explicitly supplied signal entry price takes precedence.
-        Otherwise:
-
-        LONG  -> ASK
-        SHORT -> BID
-        """
+        """Return the explicitly resolved price, or resolve from signal/market."""
+        if self.resolved_entry_price is not None:
+            return self.resolved_entry_price
 
         if self.signal.entry_price is not None:
             if self.signal.entry_price <= Decimal("0"):
                 raise ValueError("Signal entry price must be greater than zero.")
-
-            return self.signal.entry_price
+            return Decimal(str(self.signal.entry_price))
 
         if self.signal.direction == SignalDirection.LONG:
             return self.market.ask
-
         return self.market.bid
 
 
@@ -270,45 +273,21 @@ class RiskDecision(BaseModel):
     direction: SignalDirection
     signal_type: SignalType
     order_type: OrderType
-    timestamp: datetime = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
-    )
-    risk_amount: Decimal = Field(
-        default=Decimal("0"),
-        ge=Decimal("0"),
-    )
-    position_size: Decimal | None = Field(
-        default=None,
-        ge=Decimal("0"),
-    )
-    entry_price: Decimal | None = Field(
-        default=None,
-        gt=Decimal("0"),
-    )
-    stop_loss: Decimal | None = Field(
-        default=None,
-        gt=Decimal("0"),
-    )
-    take_profit: Decimal | None = Field(
-        default=None,
-        gt=Decimal("0"),
-    )
-    risk_reward_ratio: Decimal | None = Field(
-        default=None,
-        ge=Decimal("0"),
-    )
+    timestamp: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    risk_amount: Decimal = Field(default=Decimal("0"), ge=Decimal("0"))
+    position_size: Decimal | None = Field(default=None, ge=Decimal("0"))
+    entry_price: Decimal | None = Field(default=None, gt=Decimal("0"))
+    stop_loss: Decimal | None = Field(default=None, gt=Decimal("0"))
+    take_profit: Decimal | None = Field(default=None, gt=Decimal("0"))
+    risk_reward_ratio: Decimal | None = Field(default=None, ge=Decimal("0"))
     rejection_reason: RiskRejectionReason | None = None
     message: str | None = None
-    metadata: dict[str, Any] = Field(
-        default_factory=dict,
-    )
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
     @property
     def approved(self) -> bool:
-        """Return whether the decision approved the trade."""
         return self.status == RiskDecisionStatus.APPROVED
 
     @property
     def rejected(self) -> bool:
-        """Return whether the decision rejected the trade."""
         return self.status == RiskDecisionStatus.REJECTED

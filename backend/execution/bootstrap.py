@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 
 from dataclasses import dataclass
+from decimal import Decimal
 from uuid import UUID
 
 from app.broker.broker_manager import BrokerManager
@@ -116,8 +117,14 @@ class ExecutionRuntimeFactory:
         self,
         *,
         session_factory=SessionLocal,
+        paper_margin_rate: Decimal = Decimal("1"),
     ) -> None:
         self.session_factory = session_factory
+        self.paper_margin_rate = Decimal(str(paper_margin_rate))
+        if not self.paper_margin_rate.is_finite() or self.paper_margin_rate <= Decimal(
+            "0"
+        ):
+            raise ValueError("paper_margin_rate must be finite and greater than zero.")
 
     # ==================================================================
     # PUBLIC API
@@ -166,6 +173,32 @@ class ExecutionRuntimeFactory:
             bridge_url=runtime_account.bridge_url,
             account_id=runtime_account.account_id,
         )
+
+        # --------------------------------------------------------------
+        # 3a. Resolve broker margin provider.
+        #
+        # MT5 accounts must be able to calculate margin before an
+        # order is approved. Refuse to compose a live MT5 runtime
+        # whose adapter cannot expose calculate_margin(), rather
+        # than silently approving trades without a margin check.
+        #
+        # Non-MT5 (PAPER/backtest) brokers fall back to the
+        # conservative configured paper_margin_rate supplied to the
+        # LiveContextFactory below.
+        # --------------------------------------------------------------
+
+        margin_provider = getattr(broker_adapter, "calculate_margin", None)
+        broker_name = (
+            str(getattr(runtime_account.broker, "value", runtime_account.broker))
+            .strip()
+            .lower()
+        )
+
+        if broker_name == "mt5" and not callable(margin_provider):
+            raise RuntimeError(
+                "MT5 broker adapter does not expose calculate_margin(); "
+                "refusing to compose a live runtime without broker margin checks."
+            )
 
         broker_manager = BrokerManager(
             adapter=broker_adapter,
@@ -315,6 +348,11 @@ class ExecutionRuntimeFactory:
         # PositionReconciliationService is injected so the risk-context
         # factory uses validated, persisted AQE positions rather than
         # independently retrieving positions from MT5.
+        #
+        # margin_rate is supplied only when the broker adapter does
+        # not expose calculate_margin(). For MT5, margin_rate=None
+        # signals that margin must be resolved at trade time via the
+        # broker, not from a fixed formula rate.
         # --------------------------------------------------------------
 
         async def resolve_account_id(
@@ -341,6 +379,7 @@ class ExecutionRuntimeFactory:
             session_factory=self.session_factory,
             broker_manager=broker_manager,
             account_id_resolver=resolve_account_id,
+            margin_rate=(None if callable(margin_provider) else self.paper_margin_rate),
         )
 
         risk_context_provider = live_context_factory.create()
@@ -404,6 +443,12 @@ class ExecutionRuntimeFactory:
         # BrokerManager
         #
         # This is the single live/paper signal execution path.
+        #
+        # margin_provider is forwarded to the pipeline only when the
+        # broker adapter exposes calculate_margin(). For MT5, the
+        # pipeline uses the broker margin endpoint before approving
+        # a trade. For PAPER/backtest, margin_provider=None keeps
+        # the fixed paper_margin_rate simulation path.
         # --------------------------------------------------------------
 
         signal_pipeline = SignalRiskExecutionPipeline(
@@ -411,6 +456,7 @@ class ExecutionRuntimeFactory:
             risk_engine=risk_engine,
             context_provider=risk_context_provider,
             execution_engine=execution_engine,
+            margin_provider=(margin_provider if callable(margin_provider) else None),
         )
 
         # --------------------------------------------------------------
@@ -492,13 +538,20 @@ async def build_execution_runtime(
     account_id: UUID,
     *,
     session_factory=SessionLocal,
+    paper_margin_rate: Decimal = Decimal("1"),
 ) -> ExecutionRuntime:
     """
     Compose an AQE execution runtime without starting its components.
+
+    The default paper_margin_rate of 1.0 is a conservative
+    100%-notional PAPER assumption, not a claimed MT5 leverage figure.
+    Supply a smaller positive rate explicitly when the PAPER simulation
+    should model leverage.
     """
 
     factory = ExecutionRuntimeFactory(
         session_factory=session_factory,
+        paper_margin_rate=paper_margin_rate,
     )
 
     return await factory.create(account_id)

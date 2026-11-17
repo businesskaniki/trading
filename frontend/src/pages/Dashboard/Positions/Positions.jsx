@@ -16,11 +16,17 @@ import { openTickStream } from "../../../api/tickStream";
 
 import "../../../css/positions.css";
 
+// Stable references so default values do not create new arrays/objects
+// on every render (which would retrigger memos and effects).
+const EMPTY_ARRAY = [];
+const EMPTY_OBJECT = {};
+
 /**
  * Resolve the account-specific symbol mapping for a position.
  */
 const resolveAccountSymbol = (position, symbolsByAccount) => {
-  const accountSymbols = symbolsByAccount[String(position.account_id)] || [];
+  const accountSymbols =
+    symbolsByAccount[String(position.account_id)] || EMPTY_ARRAY;
 
   const positionSymbolId = position.symbol_id;
 
@@ -65,13 +71,15 @@ const Positions = () => {
   const dispatch = useDispatch();
 
   const {
-    positions: reduxPositions = [],
+    positions: reduxPositions = EMPTY_ARRAY,
     loading,
     syncing,
     error,
   } = useSelector((state) => state.positions);
 
-  const accounts = useSelector((state) => state.accounts?.accounts || []);
+  const accounts = useSelector(
+    (state) => state.accounts?.accounts || EMPTY_ARRAY,
+  );
 
   // The selected account is the source of truth for this page.
   const selectedAccountId = useSelector(
@@ -79,7 +87,7 @@ const Positions = () => {
   );
 
   const symbolsByAccount = useSelector(
-    (state) => state.symbols?.symbolsByAccount || {},
+    (state) => state.symbols?.symbolsByAccount || EMPTY_OBJECT,
   );
 
   const [query, setQuery] = useState("");
@@ -93,7 +101,7 @@ const Positions = () => {
    * when the selected account changes.
    */
   const {
-    positions: livePositions = [],
+    positions: livePositions = EMPTY_ARRAY,
     status: liveStatus,
     error: liveError,
     lastUpdatedAt,
@@ -111,10 +119,10 @@ const Positions = () => {
    */
   const positions = useMemo(() => {
     if (!selectedAccountId) {
-      return [];
+      return EMPTY_ARRAY;
     }
 
-    const source = Array.isArray(livePositions) ? livePositions : [];
+    const source = Array.isArray(livePositions) ? livePositions : EMPTY_ARRAY;
 
     return source.filter((position) =>
       belongsToAccount(position, selectedAccountId),
@@ -132,9 +140,6 @@ const Positions = () => {
   /*
    * Whenever the selected account changes, retrieve only that
    * account's positions and symbol mapping.
-   *
-   * This also runs after the initial account list establishes a
-   * selection.
    */
   useEffect(() => {
     if (!selectedAccountId) {
@@ -154,45 +159,39 @@ const Positions = () => {
   }, [selectedAccountId]);
 
   /*
-   * Stable list of normalized symbols represented by the
-   * selected account's open positions.
-   */
-
-  /*
    * Build stable subscriptions from the selected account's positions.
    * Each subscription is identified by account_id + canonical symbol_id.
+   * Serialized to a string so the effect below only re-runs when the
+   * actual set of subscriptions changes.
    */
   const tickSubscriptionsKey = useMemo(() => {
-    const subscriptions = positions
-      .map((position) => {
-        const accountSymbol = resolveAccountSymbol(position, symbolsByAccount);
-
-        const canonicalSymbol = resolveCanonicalSymbol(
-          position,
-          symbolsByAccount,
-        );
-
-        const accountId = position.account_id;
-        const symbolId = accountSymbol?.symbol_id ?? position.symbol_id;
-
-        if (accountId == null || symbolId == null || !canonicalSymbol) {
-          return null;
-        }
-
-        return {
-          accountId: String(accountId),
-          symbolId: String(symbolId),
-          canonicalSymbol,
-        };
-      })
-      .filter(Boolean);
-
     const unique = new Map();
 
-    for (const subscription of subscriptions) {
-      const key = `${subscription.accountId}:${subscription.symbolId}`;
+    for (const position of positions) {
+      const accountSymbol = resolveAccountSymbol(position, symbolsByAccount);
 
-      unique.set(key, subscription);
+      const canonicalSymbol = resolveCanonicalSymbol(
+        position,
+        symbolsByAccount,
+      );
+
+      const accountId = position.account_id;
+      const symbolId = accountSymbol?.symbol_id ?? position.symbol_id;
+
+      if (accountId == null || symbolId == null || !canonicalSymbol) {
+        continue;
+      }
+
+      const subscription = {
+        accountId: String(accountId),
+        symbolId: String(symbolId),
+        canonicalSymbol,
+      };
+
+      unique.set(
+        `${subscription.accountId}:${subscription.symbolId}`,
+        subscription,
+      );
     }
 
     return JSON.stringify(
@@ -213,6 +212,9 @@ const Positions = () => {
    *
    * The backend resolves the broker symbol for MT5 and uses
    * the canonical symbol for the local tick hub.
+   *
+   * Long positions are marked against bid; short positions
+   * are marked against ask (see the table rendering below).
    */
   useEffect(() => {
     const subscriptions = JSON.parse(tickSubscriptionsKey);
@@ -248,9 +250,9 @@ const Positions = () => {
             const previousQuote = previous[symbolKey];
 
             const nextBid = validBid ? bid : (previousQuote?.bid ?? null);
-
             const nextAsk = validAsk ? ask : (previousQuote?.ask ?? null);
 
+            // Avoid unnecessary renders if the quote has not changed.
             if (
               previousQuote &&
               previousQuote.bid === nextBid &&
@@ -278,79 +280,9 @@ const Positions = () => {
     );
 
     return () => {
-      streams.forEach((stream) => stream.close());
+      streams.forEach((stream) => stream?.close?.());
     };
   }, [tickSubscriptionsKey]);
-
-  /*
-   * Subscribe to market ticks for the selected account's
-   * open-position symbols.
-   *
-   * Long positions are marked against bid; short positions
-   * are marked against ask.
-   */
-  useEffect(() => {
-    const symbols = tickSymbolsKey.split("|").filter(Boolean);
-
-    if (symbols.length === 0) {
-      return undefined;
-    }
-
-    const streams = symbols.map((symbol) =>
-      openTickStream(
-        symbol,
-        (message) => {
-          const tick = message?.tick;
-
-          if (!tick) {
-            return;
-          }
-
-          const symbolKey = String(message.symbol || symbol)
-            .trim()
-            .toUpperCase();
-
-          const bid = Number(tick.bid);
-          const ask = Number(tick.ask);
-
-          const validBid = Number.isFinite(bid) && bid > 0;
-          const validAsk = Number.isFinite(ask) && ask > 0;
-
-          setLiveTicks((previous) => {
-            const previousQuote = previous[symbolKey];
-
-            const nextBid = validBid ? bid : (previousQuote?.bid ?? null);
-
-            const nextAsk = validAsk ? ask : (previousQuote?.ask ?? null);
-
-            // Avoid unnecessary renders if the quote has not changed.
-            if (
-              previousQuote &&
-              previousQuote.bid === nextBid &&
-              previousQuote.ask === nextAsk
-            ) {
-              return previous;
-            }
-
-            return {
-              ...previous,
-              [symbolKey]: {
-                bid: nextBid,
-                ask: nextAsk,
-              },
-            };
-          });
-        },
-        (streamError) => {
-          console.warn(`Live tick stream failed for ${symbol}:`, streamError);
-        },
-      ),
-    );
-
-    return () => {
-      streams.forEach((stream) => stream.close());
-    };
-  }, [tickSymbolsKey]);
 
   /*
    * Resolve an account name for display.

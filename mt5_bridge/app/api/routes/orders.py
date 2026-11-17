@@ -5,7 +5,12 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException, status
 
+from app.schemas.margin import (
+    MarginCalculationRequest,
+    MarginCalculationResponse,
+)
 from app.schemas.order import OrderRequest, OrderResponse
+from app.services.margin_calculation_service import MarginCalculationService
 from app.services.order_service import OrderService
 
 logger = logging.getLogger(__name__)
@@ -16,6 +21,7 @@ router = APIRouter(
 )
 
 service = OrderService()
+margin_calculation_service = MarginCalculationService()
 
 
 @router.post(
@@ -129,5 +135,39 @@ def create_pending_order(
             detail=(
                 "Unable to obtain a classified result for the pending order. "
                 "Check the order and broker history before retrying."
+            ),
+        ) from exc
+
+
+@router.post(
+    "/margin",
+    response_model=MarginCalculationResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Calculate required margin without submitting an order",
+    description=(
+        "Calls MT5 order_calc_margin for a proposed BUY/SELL. "
+        "This endpoint does not call order_check or order_send."
+    ),
+)
+def calculate_order_margin(
+    request: MarginCalculationRequest,
+) -> MarginCalculationResponse:
+    """Return MT5's margin estimate for the proposed trade."""
+    try:
+        return margin_calculation_service.calculate(request)
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.exception(
+            "MT5 margin calculation failed: symbol=%s side=%s volume=%s",
+            request.symbol,
+            request.side,
+            request.volume,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=(
+                "MT5 could not calculate the required margin. "
+                "The trade must not be approved or submitted."
             ),
         ) from exc

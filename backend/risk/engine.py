@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from decimal import Decimal, ROUND_FLOOR
 from typing import Any
 
@@ -19,7 +20,12 @@ from .calculators.position_size import (
 from .calculators.risk_amount import calculate_risk_amount
 from .enums import RiskDecisionStatus, RiskRejectionReason
 from .exceptions import RiskCalculationError
-from .models import RiskContext, RiskDecision, SymbolRiskConstraints
+from .models import (
+    BrokerMarginAssessment,
+    RiskContext,
+    RiskDecision,
+    SymbolRiskConstraints,
+)
 from .rules import (
     AccountRiskRule,
     DrawdownRiskRule,
@@ -28,6 +34,21 @@ from .rules import (
     PositionRiskRule,
     RiskRule,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedRiskTrade:
+    """Fully sized and normalized trade awaiting final policy evaluation."""
+
+    context: RiskContext
+    risk_amount: Decimal
+    max_risk_amount: Decimal
+    initial_position_size: Decimal
+    position_size_after_config_caps: Decimal
+    position_size: Decimal
+    entry_price: Decimal
+    stop_loss: Decimal | None
+    take_profit: Decimal | None
 
 
 class RiskEngine:
@@ -48,10 +69,21 @@ class RiskEngine:
     @property
     def rules(self) -> tuple[RiskRule, ...]:
         """Return the configured risk rules."""
-
         return tuple(self._rules)
 
     def evaluate(self, context: RiskContext) -> RiskDecision:
+        """Synchronous compatibility API used by backtests and PAPER runs.
+
+        Formula-based margin evaluation remains available through this API.
+        Live broker integrations use prepare() -> broker margin calculation
+        -> finalize() so MT5's own margin requirement is used.
+        """
+        prepared = self.prepare(context)
+        if isinstance(prepared, RiskDecision):
+            return prepared
+        return self.finalize(prepared)
+
+    def prepare(self, context: RiskContext) -> PreparedRiskTrade | RiskDecision:
         """
         Evaluate a trading signal.
 
@@ -59,18 +91,12 @@ class RiskEngine:
         The Risk Engine establishes the Decimal boundary before performing
         any monetary or price arithmetic.
 
-        The engine:
-
-        1. validates the signal and market context;
-        2. calculates the target monetary risk;
-        3. calculates a stop-loss-based position size;
-        4. applies broker and configured position-size limits;
-        5. constrains that size against portfolio, symbol, and strategy
-           exposure limits;
-        6. evaluates the resulting trade against the configured risk rules;
-        7. calculates actual monetary risk from the final position size;
-        8. validates portfolio risk and risk/reward;
-        9. returns an auditable RiskDecision.
+        This phase validates the signal and market context, calculates target
+        monetary risk, determines a stop-loss-based position size, applies
+        broker/configuration limits, and constrains the result against
+        portfolio, symbol, and strategy exposure limits. It returns a
+        PreparedRiskTrade or an early rejection; policy-rule evaluation is
+        deferred to finalize().
 
         Exposure constraints act as position-size ceilings. This means the
         risk engine can reduce an oversized risk-based position to the
@@ -81,8 +107,8 @@ class RiskEngine:
         The ExposureRiskRule remains active as a final safety check after
         exposure-constrained sizing.
 
-        Strategy metadata is preserved unchanged in the resulting
-        RiskDecision and augmented with ``risk_engine_diagnostics``.
+        Strategy metadata remains untouched. This phase stops after final
+        position sizing and does not execute policy rules.
         """
 
         self._validate_context(context)
@@ -134,6 +160,15 @@ class RiskEngine:
                 context,
                 RiskRejectionReason.INVALID_SIGNAL,
                 f"Invalid entry price: {exc}",
+                stop_loss=normalized_stop_loss,
+                take_profit=normalized_take_profit,
+            )
+
+        if not entry_price.is_finite() or entry_price <= Decimal("0"):
+            return self._reject(
+                context,
+                RiskRejectionReason.INVALID_SIGNAL,
+                f"Entry price must be finite and greater than zero: {entry_price}.",
                 stop_loss=normalized_stop_loss,
                 take_profit=normalized_take_profit,
             )
@@ -397,10 +432,60 @@ class RiskEngine:
                 # Every downstream risk rule must receive the normalized
                 # Decimal value so monetary arithmetic never performs
                 # Decimal × float operations.
-                "entry_price": entry_price,
+                "resolved_entry_price": entry_price,
                 "proposed_position_size": position_size,
             },
         )
+
+        return PreparedRiskTrade(
+            context=evaluation_context,
+            risk_amount=risk_amount,
+            max_risk_amount=max_risk_amount,
+            initial_position_size=initial_position_size,
+            position_size_after_config_caps=position_size_after_config_caps,
+            position_size=position_size,
+            entry_price=entry_price,
+            stop_loss=normalized_stop_loss,
+            take_profit=normalized_take_profit,
+        )
+
+
+    def finalize(
+        self,
+        prepared: PreparedRiskTrade,
+        *,
+        margin_assessment: BrokerMarginAssessment | None = None,
+    ) -> RiskDecision:
+        """Run policy rules and final checks for a prepared trade.
+
+        A broker assessment, when supplied, is attached to the evaluation
+        context and consumed by MarginRiskRule. When omitted, that rule uses
+        the configured formula margin_rate. A context without either source
+        fails closed.
+        """
+        if not isinstance(prepared, PreparedRiskTrade):
+            raise TypeError("prepared must be a PreparedRiskTrade.")
+
+        context = prepared.context
+        if margin_assessment is not None:
+            context = context.model_copy(
+                update={"broker_margin_assessment": margin_assessment},
+            )
+
+        evaluation_context = context
+        signal = context.signal
+        symbol = signal.symbol.strip().upper()
+        account = context.account
+        config = context.config
+        constraints = context.symbol_constraints
+        risk_amount = prepared.risk_amount
+        max_risk_amount = prepared.max_risk_amount
+        initial_position_size = prepared.initial_position_size
+        position_size_after_config_caps = prepared.position_size_after_config_caps
+        position_size = prepared.position_size
+        entry_price = prepared.entry_price
+        normalized_stop_loss = prepared.stop_loss
+        normalized_take_profit = prepared.take_profit
 
         # --------------------------------------------------------------
         # Policy rules
@@ -554,7 +639,7 @@ class RiskEngine:
             take_profit=normalized_take_profit,
             risk_reward_ratio=risk_reward_ratio,
             metadata=self._build_decision_metadata(
-                context,
+                evaluation_context,
                 target_risk_amount=risk_amount,
                 max_risk_amount=max_risk_amount,
                 initial_position_size=initial_position_size,
@@ -1024,6 +1109,22 @@ class RiskEngine:
             "portfolio_risk_after": portfolio_risk_after,
             "max_portfolio_risk_amount": max_portfolio_risk_amount,
         }
+
+        margin_assessment = context.broker_margin_assessment
+        if margin_assessment is not None:
+            diagnostics["broker_margin_assessment"] = {
+                "broker_symbol": margin_assessment.broker_symbol,
+                "direction": getattr(
+                    margin_assessment.direction,
+                    "value",
+                    str(margin_assessment.direction),
+                ),
+                "volume": margin_assessment.volume,
+                "entry_price": margin_assessment.entry_price,
+                "required_margin": margin_assessment.required_margin,
+                "currency": margin_assessment.currency,
+                "provider": margin_assessment.provider,
+            }
 
         metadata["risk_engine_diagnostics"] = {
             key: cls._serialize_metadata_value(value)

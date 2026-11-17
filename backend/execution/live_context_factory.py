@@ -95,7 +95,7 @@ class LiveContextFactory:
             ]
             | None
         ) = None,
-        margin_rate: Decimal = Decimal("0"),
+        margin_rate: Decimal | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._broker_manager = broker_manager
@@ -109,8 +109,15 @@ class LiveContextFactory:
         self._risk_config = risk_config or RiskConfig()
         self._risk_config_provider = risk_config_provider
 
-        if margin_rate < Decimal("0"):
-            raise ValueError("margin_rate cannot be negative.")
+        if margin_rate is not None:
+            if (
+                not margin_rate.is_finite()
+                or margin_rate <= Decimal("0")
+            ):
+                raise ValueError(
+                    "margin_rate must be a finite positive Decimal "
+                    "when supplied."
+                )
 
         self._margin_rate = margin_rate
 
@@ -970,7 +977,7 @@ def create_live_context_provider(
         ]
         | None
     ) = None,
-    margin_rate: Decimal = Decimal("0"),
+    margin_rate: Decimal | None = None,
 ) -> LiveRiskContextProvider:
     """
     Create the application's concrete Live Risk Context Provider.

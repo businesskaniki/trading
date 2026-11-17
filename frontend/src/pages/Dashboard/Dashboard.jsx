@@ -43,30 +43,31 @@ const Dashboard = () => {
   // DASHBOARD STATE
   // --------------------------------------------------
 
-  const {
-    positions = [],
-    trades = [],
-    loading,
-    error,
-    brokerAccount,
-    lastUpdated,
-  } = useSelector((state) => state.dashboard);
+  const dashboardState = useSelector((state) => state.dashboard || {});
+
+  const positions = Array.isArray(dashboardState.positions)
+    ? dashboardState.positions
+    : [];
+  const trades = Array.isArray(dashboardState.trades)
+    ? dashboardState.trades
+    : [];
+  const loading = dashboardState.loading;
+  const error = dashboardState.error;
+  const brokerAccount = dashboardState.brokerAccount;
+  const lastUpdated = dashboardState.lastUpdated;
 
   // --------------------------------------------------
   // ACCOUNTS STATE
   // --------------------------------------------------
 
-  const accountsState = useSelector((state) => state.accounts);
+  const accountsState = useSelector((state) => state.accounts || {});
 
   const selectedAccount = accountsState?.selectedAccount || null;
 
-  // Accounts are owned by accountsSlice.
-  // Do not maintain a second account source in dashboardSlice.
-  const accountList = accountsState?.accounts || [];
+  const accountList = Array.isArray(accountsState?.accounts)
+    ? accountsState.accounts
+    : [];
 
-  // Prefer the explicitly selected account; otherwise use the first
-  // active account, falling back to the first available account.
-  // Positions and trades endpoints require this ID as account_id.
   const dataAccountId =
     selectedAccount?.id ??
     accountList.find((account) => account?.active !== false)?.id ??
@@ -77,35 +78,22 @@ const Dashboard = () => {
   // SYMBOL STATE
   // --------------------------------------------------
 
-  const selectedSymbols = useSelector(
-    (state) => state.symbols?.selectedSymbols || [],
+  const selectedSymbols = useSelector((state) =>
+    Array.isArray(state.symbols?.selectedSymbols)
+      ? state.symbols.selectedSymbols
+      : [],
   );
 
-  const accountSymbols = useSelector(
-    (state) =>
-      state.symbols?.symbolsByAccount?.[String(dataAccountId)] || [],
-  );
+  const accountSymbols = useSelector((state) => {
+    const symbols = state.symbols?.symbolsByAccount?.[String(dataAccountId)];
+    return Array.isArray(symbols) ? symbols : [];
+  });
 
   // --------------------------------------------------
   // ENGINE STATE
   // --------------------------------------------------
 
-  const engine = useSelector(
-    (state) =>
-      state.engine || {
-        status: "STOPPED",
-        mode: null,
-        account: null,
-        market_data: null,
-        strategies: null,
-        pipeline: null,
-        execution: null,
-        loading: false,
-        actionLoading: false,
-        error: null,
-        lastUpdated: null,
-      },
-  );
+  const engine = useSelector((state) => state.engine || {});
 
   const engineStatus = engine.status || "STOPPED";
 
@@ -119,6 +107,59 @@ const Dashboard = () => {
   const engineAccount = engine.account || null;
 
   // --------------------------------------------------
+  // LIVE PIPELINE STATE
+  // --------------------------------------------------
+  //
+  // Expected backend response:
+  //
+  // pipeline: {
+  //   configured: true,
+  //   running: true,
+  //   details: {
+  //     started: true,
+  //     stats: {
+  //       received: 0,
+  //       risk_evaluations: 0,
+  //       approved: 0,
+  //       ...
+  //     }
+  //   }
+  // }
+  // --------------------------------------------------
+
+  const pipelineContainer =
+    engine.pipeline && typeof engine.pipeline === "object"
+      ? engine.pipeline
+      : {};
+
+  const pipelineDetails = pipelineContainer.details || null;
+
+  const rawPipelineStats =
+    pipelineDetails?.stats ?? pipelineContainer.stats ?? null;
+
+  const pipelineStats =
+    rawPipelineStats && typeof rawPipelineStats === "object"
+      ? rawPipelineStats
+      : null;
+
+  const lastContextFailure =
+    pipelineStats?.last_context_failure &&
+    typeof pipelineStats.last_context_failure === "object"
+      ? pipelineStats.last_context_failure
+      : null;
+
+  const pipelineConfigured = pipelineContainer.configured === true;
+
+  const pipelineRunning =
+    pipelineContainer.running === true || pipelineDetails?.started === true;
+
+  const pipelineStatusLabel = pipelineRunning
+    ? "LISTENING"
+    : pipelineConfigured
+      ? "INACTIVE"
+      : "NOT CONFIGURED";
+
+  // --------------------------------------------------
   // LOCAL STATE
   // --------------------------------------------------
 
@@ -127,16 +168,13 @@ const Dashboard = () => {
   // --------------------------------------------------
   // REQUEST DIAGNOSTICS + IN-FLIGHT DEDUPLICATION
   // --------------------------------------------------
-  // Each dispatched async thunk is logged with its trigger,
-  // argument, Redux requestId, duration and resolved error.
-  // Identical requests are shared while one is still pending.
-  // --------------------------------------------------
 
   const inFlightRequestsRef = useRef(new Map());
 
   const runRequest = useCallback(
     (trigger, label, thunkCreator, arg) => {
       const thunkType = thunkCreator.typePrefix || thunkCreator.name || label;
+
       let serializedArg = "<no-arg>";
 
       if (arg !== undefined) {
@@ -158,10 +196,12 @@ const Dashboard = () => {
           arg: arg === undefined ? null : arg,
           key,
         });
+
         return existingRequest;
       }
 
       const startedAt = performance.now();
+
       console.info("[AQE Request] START", {
         trigger,
         thunk: label,
@@ -171,6 +211,7 @@ const Dashboard = () => {
       });
 
       let dispatched;
+
       try {
         dispatched = dispatch(
           arg === undefined ? thunkCreator() : thunkCreator(arg),
@@ -184,15 +225,19 @@ const Dashboard = () => {
           durationMs: Math.round(performance.now() - startedAt),
           error,
         });
+
         throw error;
       }
 
       let trackedPromise;
+
       trackedPromise = Promise.resolve(dispatched)
         .then((action) => {
           const durationMs = Math.round(performance.now() - startedAt);
           const meta = action?.meta || {};
-          const failed = meta.requestStatus === "rejected" || Boolean(action?.error);
+
+          const failed =
+            meta.requestStatus === "rejected" || Boolean(action?.error);
 
           const details = {
             trigger,
@@ -223,6 +268,7 @@ const Dashboard = () => {
             durationMs: Math.round(performance.now() - startedAt),
             error,
           });
+
           throw error;
         })
         .finally(() => {
@@ -232,6 +278,7 @@ const Dashboard = () => {
         });
 
       inFlightRequestsRef.current.set(key, trackedPromise);
+
       return trackedPromise;
     },
     [dispatch],
@@ -239,15 +286,6 @@ const Dashboard = () => {
 
   // --------------------------------------------------
   // INITIAL DASHBOARD LOAD
-  // --------------------------------------------------
-  //
-  // These requests are independent and start concurrently:
-  //
-  //   - accounts
-  //   - engine status
-  //
-  // Positions and trades require account_id, so they are
-  // loaded only after an account ID is available below.
   // --------------------------------------------------
 
   useEffect(() => {
@@ -258,13 +296,13 @@ const Dashboard = () => {
   // --------------------------------------------------
   // LOAD SELECTED ACCOUNT DATA
   // --------------------------------------------------
-  //
-  // Once an account ID is available, load all account-scoped data
-  // concurrently. Positions and trades must receive account_id.
-  // --------------------------------------------------
 
   useEffect(() => {
-    if (dataAccountId === null || dataAccountId === undefined || dataAccountId === "") {
+    if (
+      dataAccountId === null ||
+      dataAccountId === undefined ||
+      dataAccountId === ""
+    ) {
       return;
     }
 
@@ -274,18 +312,16 @@ const Dashboard = () => {
       fetchPositions,
       dataAccountId,
     );
-    runRequest(
-      "account-data-load",
-      "fetchTrades",
-      fetchTrades,
-      dataAccountId,
-    );
+
+    runRequest("account-data-load", "fetchTrades", fetchTrades, dataAccountId);
+
     runRequest(
       "account-data-load",
       "fetchTradingUniverse",
       fetchTradingUniverse,
       dataAccountId,
     );
+
     runRequest(
       "account-data-load",
       "fetchBrokerAccount",
@@ -297,19 +333,16 @@ const Dashboard = () => {
   // --------------------------------------------------
   // PERIODIC DASHBOARD REFRESH
   // --------------------------------------------------
-  //
-  // Only refresh data that changes continuously during
-  // normal Dashboard operation.
-  //
-  // Accounts, trading universe and broker account are
-  // intentionally excluded. They are refreshed when the
-  // selected account changes or during manual refresh.
-  // --------------------------------------------------
 
   useEffect(() => {
     const refresh = window.setInterval(() => {
-      if (dataAccountId !== null && dataAccountId !== undefined && dataAccountId !== "") {
+      if (
+        dataAccountId !== null &&
+        dataAccountId !== undefined &&
+        dataAccountId !== ""
+      ) {
         runRequest("poll-30s", "fetchPositions", fetchPositions, dataAccountId);
+
         runRequest("poll-30s", "fetchTrades", fetchTrades, dataAccountId);
       }
 
@@ -322,24 +355,32 @@ const Dashboard = () => {
   // --------------------------------------------------
   // MANUAL REFRESH
   // --------------------------------------------------
-  //
-  // Manual refresh reloads all currently relevant
-  // Dashboard data.
-  // --------------------------------------------------
 
   const handleRefresh = () => {
     runRequest("manual-refresh", "fetchAccounts", fetchAccounts);
     runRequest("manual-refresh", "fetchEngineStatus", fetchEngineStatus);
 
-    if (dataAccountId !== null && dataAccountId !== undefined && dataAccountId !== "") {
-      runRequest("manual-refresh", "fetchPositions", fetchPositions, dataAccountId);
+    if (
+      dataAccountId !== null &&
+      dataAccountId !== undefined &&
+      dataAccountId !== ""
+    ) {
+      runRequest(
+        "manual-refresh",
+        "fetchPositions",
+        fetchPositions,
+        dataAccountId,
+      );
+
       runRequest("manual-refresh", "fetchTrades", fetchTrades, dataAccountId);
+
       runRequest(
         "manual-refresh",
         "fetchTradingUniverse",
         fetchTradingUniverse,
         dataAccountId,
       );
+
       runRequest(
         "manual-refresh",
         "fetchBrokerAccount",
@@ -368,6 +409,12 @@ const Dashboard = () => {
       startEngine,
       selectedAccount.id,
     );
+
+    runRequest(
+      "engine-control:start-status",
+      "fetchEngineStatus",
+      fetchEngineStatus,
+    );
   };
 
   const handleStopEngine = async () => {
@@ -376,6 +423,12 @@ const Dashboard = () => {
     }
 
     await runRequest("engine-control:stop", "stopEngine", stopEngine);
+
+    runRequest(
+      "engine-control:stop-status",
+      "fetchEngineStatus",
+      fetchEngineStatus,
+    );
   };
 
   const handlePauseEngine = async () => {
@@ -384,6 +437,12 @@ const Dashboard = () => {
     }
 
     await runRequest("engine-control:pause", "pauseEngine", pauseEngine);
+
+    runRequest(
+      "engine-control:pause-status",
+      "fetchEngineStatus",
+      fetchEngineStatus,
+    );
   };
 
   const handleResumeEngine = async () => {
@@ -392,6 +451,12 @@ const Dashboard = () => {
     }
 
     await runRequest("engine-control:resume", "resumeEngine", resumeEngine);
+
+    runRequest(
+      "engine-control:resume-status",
+      "fetchEngineStatus",
+      fetchEngineStatus,
+    );
   };
 
   // --------------------------------------------------
@@ -423,6 +488,32 @@ const Dashboard = () => {
       maximumFractionDigits: 2,
     }).format(number);
   };
+
+  // --------------------------------------------------
+  // LIVE PIPELINE METRICS
+  // --------------------------------------------------
+
+  const pipelineMetrics = [
+    { key: "received", label: "Signals Received" },
+    { key: "context_failures", label: "Context Failures" },
+    { key: "risk_evaluations", label: "Risk Evaluations" },
+    { key: "approved", label: "Risk Approved" },
+    { key: "risk_rejections", label: "Risk Rejected" },
+    { key: "execution_successes", label: "Successful Executions" },
+    { key: "execution_placements", label: "Orders Placed" },
+    { key: "execution_partial_fills", label: "Partial Fills" },
+    { key: "execution_unresolved", label: "Unresolved Executions" },
+    { key: "execution_not_submitted", label: "Not Submitted" },
+    { key: "execution_rejections", label: "Execution Rejections" },
+    { key: "execution_failures", label: "Execution Failures" },
+  ].map((metric) => ({
+    ...metric,
+    value:
+      pipelineStats?.[metric.key] !== undefined &&
+      pipelineStats?.[metric.key] !== null
+        ? formatNumber(pipelineStats[metric.key])
+        : "—",
+  }));
 
   // --------------------------------------------------
   // ACTIVE ACCOUNT
@@ -519,16 +610,16 @@ const Dashboard = () => {
   // MARGIN
   // --------------------------------------------------
 
-  const margin = Number(activeAccount?.margin || brokerAccount?.margin || 0);
+  const margin = Number(activeAccount?.margin ?? brokerAccount?.margin ?? 0);
 
   const freeMargin = Number(
-    activeAccount?.free_margin ||
-      brokerAccount?.free_margin ||
+    activeAccount?.free_margin ??
+      brokerAccount?.free_margin ??
       Math.max(totalEquity - margin, 0),
   );
 
   const marginLevel = Number(
-    activeAccount?.margin_level || brokerAccount?.margin_level || 0,
+    activeAccount?.margin_level ?? brokerAccount?.margin_level ?? 0,
   );
 
   // --------------------------------------------------
@@ -576,24 +667,24 @@ const Dashboard = () => {
           position.symbol;
 
         const currentPrice = Number(
-          position.current_price || position.price_current || 0,
+          position.current_price ?? position.price_current ?? 0,
         );
 
         const entryPrice = Number(
-          position.entry_price ||
-            position.open_price ||
-            position.price_open ||
+          position.entry_price ??
+            position.open_price ??
+            position.price_open ??
             0,
         );
 
         const volume = Number(
-          position.current_volume || position.volume || position.lots || 0,
+          position.current_volume ?? position.volume ?? position.lots ?? 0,
         );
 
         const floatingProfit = Number(
-          position.floating_profit ||
-            position.unrealized_pnl ||
-            position.profit ||
+          position.floating_profit ??
+            position.unrealized_pnl ??
+            position.profit ??
             0,
         );
 
@@ -623,9 +714,6 @@ const Dashboard = () => {
   // FLOATING PROFIT
   // --------------------------------------------------
 
-  // Only open positions contribute to floating P/L. Keep this
-  // declaration after openPositions so it cannot be accessed in
-  // the temporal dead zone during render.
   const floatingProfit = useMemo(
     () =>
       openPositions.reduce(
@@ -645,7 +733,7 @@ const Dashboard = () => {
         (trade) =>
           trade.result === "WIN" ||
           trade.result === "win" ||
-          Number(trade.profit || trade.realized_profit || 0) > 0,
+          Number(trade.profit ?? trade.realized_profit ?? 0) > 0,
       ).length,
     [trades],
   );
@@ -718,11 +806,6 @@ const Dashboard = () => {
 
   // --------------------------------------------------
   // AUTO-DISMISS ERRORS
-  // --------------------------------------------------
-  //
-  // Show the current error (dashboard or engine) and hide
-  // it after 5 seconds. If a new error arrives in the
-  // meantime, the timer restarts from zero.
   // --------------------------------------------------
 
   useEffect(() => {
@@ -810,7 +893,6 @@ const Dashboard = () => {
         <div className="engine-control__actions">
           <span className={engineStatusClass}>
             <span className="engine-status__dot" />
-
             {engineStatusLabel}
           </span>
 
@@ -913,13 +995,11 @@ const Dashboard = () => {
 
           <div className="engine-runtime__item">
             <span>Mode</span>
-
             <strong>{engineModeLabel}</strong>
           </div>
 
           <div className="engine-runtime__item">
             <span>Market Data</span>
-
             <strong>{engine.market_data ? "ACTIVE" : "—"}</strong>
           </div>
 
@@ -940,7 +1020,13 @@ const Dashboard = () => {
           <div className="engine-runtime__item">
             <span>Pipeline</span>
 
-            <strong>{engine.pipeline ? "ACTIVE" : "—"}</strong>
+            <strong>
+              {pipelineRunning
+                ? "ACTIVE"
+                : pipelineConfigured
+                  ? "INACTIVE"
+                  : "NOT CONFIGURED"}
+            </strong>
           </div>
 
           <div className="engine-runtime__item">
@@ -948,6 +1034,99 @@ const Dashboard = () => {
 
             <strong>{engine.execution ? "ACTIVE" : "—"}</strong>
           </div>
+        </section>
+      )}
+
+      {/* LIVE EXECUTION PIPELINE MONITOR */}
+      {(engineRunning ||
+        enginePaused ||
+        pipelineConfigured ||
+        pipelineDetails ||
+        pipelineStats) && (
+        <section className="dashboard-card engine-pipeline-monitor">
+          <div className="card-header">
+            <div>
+              <span>AUTOMATED TRADING</span>
+              <h2>Live Execution Monitor</h2>
+            </div>
+
+            <FaBolt />
+          </div>
+
+          <div className="pipeline-monitor-status">
+            <span
+              className={`pipeline-status-dot ${
+                pipelineRunning ? "pipeline-status-dot--active" : ""
+              }`}
+            />
+
+            <strong>{pipelineStatusLabel}</strong>
+
+            <span className="pipeline-monitor-description">
+              Strategy → Risk Engine → Execution → MT5
+            </span>
+          </div>
+
+          {pipelineStats ? (
+            <div className="pipeline-metrics-grid">
+              {pipelineMetrics.map((metric) => (
+                <div className="pipeline-metric" key={metric.key}>
+                  <span>{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="empty-state">
+              Pipeline statistics have not yet been returned by the engine.
+            </div>
+          )}
+
+          {lastContextFailure && (
+            <div className="pipeline-context-error">
+              <h3>Last Risk Context Failure</h3>
+
+              <div>
+                <span>Signal ID</span>
+                <strong>{lastContextFailure.signal_id || "—"}</strong>
+              </div>
+
+              <div>
+                <span>Strategy</span>
+                <strong>
+                  {lastContextFailure.strategy ||
+                    lastContextFailure.strategy_id ||
+                    "—"}
+                </strong>
+              </div>
+
+              <div>
+                <span>Symbol / Timeframe</span>
+                <strong>
+                  {[lastContextFailure.symbol, lastContextFailure.timeframe]
+                    .filter(Boolean)
+                    .join(" / ") || "—"}
+                </strong>
+              </div>
+
+              <div>
+                <span>Exception</span>
+                <strong>{lastContextFailure.exception_type || "—"}</strong>
+              </div>
+
+              <p>
+                {lastContextFailure.message ||
+                  "No exception message was supplied."}
+              </p>
+
+              {lastContextFailure.cause && (
+                <p>
+                  Underlying cause: {lastContextFailure.cause_type || "Error"}:{" "}
+                  {lastContextFailure.cause}
+                </p>
+              )}
+            </div>
+          )}
         </section>
       )}
 
@@ -969,7 +1148,6 @@ const Dashboard = () => {
 
           <div>
             <span>Balance</span>
-
             <strong>{formatMoney(totalBalance, accountCurrency)}</strong>
           </div>
         </article>
@@ -981,7 +1159,6 @@ const Dashboard = () => {
 
           <div>
             <span>Equity</span>
-
             <strong>{formatMoney(totalEquity, accountCurrency)}</strong>
           </div>
         </article>
@@ -1015,7 +1192,6 @@ const Dashboard = () => {
 
           <div>
             <span>Win Rate</span>
-
             <strong>{winRate.toFixed(1)}%</strong>
           </div>
         </article>
@@ -1028,7 +1204,6 @@ const Dashboard = () => {
           <div className="card-header">
             <div>
               <span>TRADING ACCOUNT</span>
-
               <h2>Active Account</h2>
             </div>
 
@@ -1063,31 +1238,26 @@ const Dashboard = () => {
               <div className="connected-account__details">
                 <div>
                   <span>Login</span>
-
                   <strong>{activeAccount.login || "—"}</strong>
                 </div>
 
                 <div>
                   <span>Server</span>
-
                   <strong>{activeAccount.server || "—"}</strong>
                 </div>
 
                 <div>
                   <span>Currency</span>
-
                   <strong>{activeAccount.currency || "USD"}</strong>
                 </div>
 
                 <div>
                   <span>Leverage</span>
-
                   <strong>1:{activeAccount.leverage || "—"}</strong>
                 </div>
 
                 <div>
                   <span>Balance</span>
-
                   <strong>
                     {formatMoney(activeAccount.balance, activeAccount.currency)}
                   </strong>
@@ -1095,7 +1265,6 @@ const Dashboard = () => {
 
                 <div>
                   <span>Equity</span>
-
                   <strong>
                     {formatMoney(activeAccount.equity, activeAccount.currency)}
                   </strong>
@@ -1112,7 +1281,6 @@ const Dashboard = () => {
           <div className="card-header">
             <div>
               <span>ACCOUNT RISK</span>
-
               <h2>Risk Overview</h2>
             </div>
 
@@ -1122,37 +1290,31 @@ const Dashboard = () => {
           <div className="risk-content">
             <div className="risk-item">
               <span>Open Positions</span>
-
               <strong>{openPositions.length}</strong>
             </div>
 
             <div className="risk-item">
               <span>Selected Symbols</span>
-
               <strong>{activeSymbols.length}</strong>
             </div>
 
             <div className="risk-item">
               <span>Connected Accounts</span>
-
               <strong>{connectedAccounts.length}</strong>
             </div>
 
             <div className="risk-item">
               <span>Free Margin</span>
-
               <strong>{formatMoney(freeMargin, accountCurrency)}</strong>
             </div>
 
             <div className="risk-item">
               <span>Margin Used</span>
-
               <strong>{formatMoney(margin, accountCurrency)}</strong>
             </div>
 
             <div className="risk-item">
               <span>Margin Level</span>
-
               <strong>
                 {marginLevel > 0 ? `${formatNumber(marginLevel)}%` : "—"}
               </strong>
@@ -1160,7 +1322,6 @@ const Dashboard = () => {
 
             <div className="risk-status">
               <span className="risk-dot" />
-
               <strong>Risk monitoring active</strong>
             </div>
           </div>
@@ -1172,7 +1333,6 @@ const Dashboard = () => {
         <div className="card-header">
           <div>
             <span>LIVE MARKET EXPOSURE</span>
-
             <h2>Open Positions</h2>
           </div>
 
@@ -1198,7 +1358,10 @@ const Dashboard = () => {
                 {openPositions.map((position) => {
                   const direction = position.direction || position.type || "—";
 
-                  const isBuy = direction === "BUY";
+                  const normalizedDirection = String(direction).toUpperCase();
+                  const isBuy =
+                    normalizedDirection === "BUY" ||
+                    normalizedDirection === "LONG";
 
                   return (
                     <tr key={position.id}>
@@ -1209,7 +1372,6 @@ const Dashboard = () => {
                       <td>
                         <span className={`direction ${isBuy ? "buy" : "sell"}`}>
                           {isBuy ? <FaArrowUp /> : <FaArrowDown />}
-
                           {direction}
                         </span>
                       </td>
@@ -1266,7 +1428,6 @@ const Dashboard = () => {
           <div className="card-header">
             <div>
               <span>EXECUTION HISTORY</span>
-
               <h2>Recent Trades</h2>
             </div>
 
@@ -1277,7 +1438,7 @@ const Dashboard = () => {
             <div className="trade-list">
               {trades.slice(0, 6).map((trade) => {
                 const profit = Number(
-                  trade.profit || trade.realized_profit || trade.pnl || 0,
+                  trade.profit ?? trade.realized_profit ?? trade.pnl ?? 0,
                 );
 
                 const symbol =
@@ -1290,7 +1451,6 @@ const Dashboard = () => {
                   <div className="trade-row" key={trade.id}>
                     <div>
                       <strong>{symbol}</strong>
-
                       <span>{trade.direction || trade.type || "TRADE"}</span>
                     </div>
 
@@ -1315,7 +1475,6 @@ const Dashboard = () => {
           <div className="card-header">
             <div>
               <span>BROKER CONNECTION</span>
-
               <h2>MT5 Account</h2>
             </div>
 
@@ -1364,7 +1523,6 @@ const Dashboard = () => {
 
               <div>
                 <span>Symbols</span>
-
                 <strong>{activeSymbols.length}</strong>
               </div>
 

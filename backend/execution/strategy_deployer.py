@@ -106,15 +106,9 @@ class StrategyDeploymentResult:
 
         return {
             "account_id": str(self.account_id),
-            "deployed_strategy_ids": list(
-                self.deployed_strategy_ids,
-            ),
-            "skipped_strategy_ids": list(
-                self.skipped_strategy_ids,
-            ),
-            "failed_strategy_ids": list(
-                self.failed_strategy_ids,
-            ),
+            "deployed_strategy_ids": list(self.deployed_strategy_ids),
+            "skipped_strategy_ids": list(self.skipped_strategy_ids),
+            "failed_strategy_ids": list(self.failed_strategy_ids),
             "deployed_count": self.deployed_count,
             "skipped_count": self.skipped_count,
             "failed_count": self.failed_count,
@@ -129,7 +123,7 @@ class LiveStrategyDeployer:
 
     - it belongs to the requested user;
     - it is enabled;
-    - its status is RUNNING;
+    - its status is CREATED or RUNNING;
     - its run type is LIVE or PAPER;
     - its account_id is present;
     - its account_id matches the active runtime account;
@@ -205,11 +199,10 @@ class LiveStrategyDeployer:
         failed: list[str] = []
 
         async with self.session_factory() as session:
-            repository = StrategyRunRepository(
-                session,
-            )
+            repository = StrategyRunRepository(session)
 
-            runs = await repository.get_all(
+            runs = await repository.get_enabled_for_account(
+                account_id=account_id,
                 user_id=user_id,
             )
 
@@ -260,9 +253,7 @@ class LiveStrategyDeployer:
                 )
 
             for run in candidate_runs:
-                strategy_id = str(
-                    run.id,
-                )
+                strategy_id = str(run.id)
 
                 try:
                     self._validate_account_assignment(
@@ -297,14 +288,10 @@ class LiveStrategyDeployer:
                         exc,
                     )
 
-                    skipped.append(
-                        strategy_id,
-                    )
+                    skipped.append(strategy_id)
                     continue
 
-                if strategy_manager.contains(
-                    strategy_id,
-                ):
+                if strategy_manager.contains(strategy_id):
                     logger.info(
                         "Strategy runtime already exists; "
                         "skipping deployment. "
@@ -315,9 +302,7 @@ class LiveStrategyDeployer:
                         run.strategy_name,
                     )
 
-                    skipped.append(
-                        strategy_id,
-                    )
+                    skipped.append(strategy_id)
                     continue
 
                 try:
@@ -334,9 +319,13 @@ class LiveStrategyDeployer:
                         instance.strategy_id,
                     )
 
-                    deployed.append(
-                        strategy_id,
+                    # Persist the successful runtime deployment.
+                    await repository.update(
+                        run,
+                        status=StrategyRunStatus.RUNNING,
                     )
+
+                    deployed.append(strategy_id)
 
                     logger.info(
                         "Strategy deployed successfully. "
@@ -355,9 +344,7 @@ class LiveStrategyDeployer:
                     )
 
                 except Exception:
-                    failed.append(
-                        strategy_id,
-                    )
+                    failed.append(strategy_id)
 
                     logger.exception(
                         "Failed to deploy strategy run. "
@@ -375,15 +362,9 @@ class LiveStrategyDeployer:
 
         result = StrategyDeploymentResult(
             account_id=account_id,
-            deployed_strategy_ids=tuple(
-                deployed,
-            ),
-            skipped_strategy_ids=tuple(
-                skipped,
-            ),
-            failed_strategy_ids=tuple(
-                failed,
-            ),
+            deployed_strategy_ids=tuple(deployed),
+            skipped_strategy_ids=tuple(skipped),
+            failed_strategy_ids=tuple(failed),
         )
 
         logger.info(
@@ -429,12 +410,10 @@ class LiveStrategyDeployer:
 
         if run.user_id != user_id:
             raise StrategyDeploymentError(
-                f"Strategy run '{run.id}' does not belong to " f"user '{user_id}'."
+                f"Strategy run '{run.id}' does not belong to user '{user_id}'."
             )
 
-        if not self._is_candidate(
-            run,
-        ):
+        if not self._is_candidate(run):
             raise StrategyDeploymentError(
                 f"Strategy run '{run.id}' is not deployable. "
                 f"enabled={run.enabled!r}, "
@@ -447,13 +426,9 @@ class LiveStrategyDeployer:
             account_id=account_id,
         )
 
-        strategy_id = str(
-            run.id,
-        )
+        strategy_id = str(run.id)
 
-        if strategy_manager.contains(
-            strategy_id,
-        ):
+        if strategy_manager.contains(strategy_id):
             raise StrategyDeploymentError(
                 f"Strategy runtime '{strategy_id}' already exists."
             )
@@ -466,7 +441,7 @@ class LiveStrategyDeployer:
 
             if not account_symbols:
                 raise StrategyDeploymentError(
-                    f"Account '{account_id}' has no enabled " "AccountSymbol mappings."
+                    f"Account '{account_id}' has no enabled AccountSymbol mappings."
                 )
 
             definition = await self._resolve_definition(
@@ -492,13 +467,9 @@ class LiveStrategyDeployer:
                 auto_start=False,
             )
 
-            await strategy_manager.activate(
-                instance.strategy_id,
-            )
+            await strategy_manager.activate(instance.strategy_id)
 
-            await strategy_manager.start_instance(
-                instance.strategy_id,
-            )
+            await strategy_manager.start_instance(instance.strategy_id)
 
         except Exception as exc:
             await self._cleanup_failed_instance(
@@ -507,7 +478,7 @@ class LiveStrategyDeployer:
             )
 
             raise StrategyDeploymentError(
-                f"Failed to deploy strategy run " f"'{strategy_id}'."
+                f"Failed to deploy strategy run '{strategy_id}'."
             ) from exc
 
         logger.info(
@@ -547,9 +518,7 @@ class LiveStrategyDeployer:
         infrastructure.
         """
 
-        resolver = AccountSymbolResolver(
-            session,
-        )
+        resolver = AccountSymbolResolver(session)
 
         try:
             symbols = await resolver.resolve_enabled_symbols(
@@ -562,13 +531,11 @@ class LiveStrategyDeployer:
                 f"account '{account_id}': {exc}"
             ) from exc
 
-        normalized = tuple(
+        return tuple(
             dict.fromkeys(
                 str(symbol).strip().upper() for symbol in symbols if str(symbol).strip()
             )
         )
-
-        return normalized
 
     # ==================================================================
     # VALIDATION
@@ -583,30 +550,19 @@ class LiveStrategyDeployer:
     ) -> None:
         """Validate deployment dependencies."""
 
-        if not isinstance(
-            account_id,
-            UUID,
-        ):
+        if not isinstance(account_id, UUID):
             raise StrategyDeploymentError("account_id must be a UUID.")
 
-        if not isinstance(
-            user_id,
-            UUID,
-        ):
+        if not isinstance(user_id, UUID):
             raise StrategyDeploymentError("user_id must be a UUID.")
 
-        if not isinstance(
-            strategy_manager,
-            StrategyManager,
-        ):
+        if not isinstance(strategy_manager, StrategyManager):
             raise StrategyDeploymentError(
                 "strategy_manager must be a StrategyManager instance."
             )
 
     @staticmethod
-    def _is_candidate(
-        run: StrategyRun,
-    ) -> bool:
+    def _is_candidate(run: StrategyRun) -> bool:
         """
         Return whether a StrategyRun should participate in deployment.
 
@@ -645,7 +601,7 @@ class LiveStrategyDeployer:
 
         if definition_id is None:
             raise StrategyDeploymentError(
-                f"Strategy run '{run.id}' does not reference " "a strategy definition."
+                f"Strategy run '{run.id}' does not reference a strategy definition."
             )
 
         result = await session.execute(
@@ -693,13 +649,11 @@ class LiveStrategyDeployer:
 
         if not definition.available:
             raise StrategyDeploymentError(
-                f"Strategy definition '{definition.name}' " f"is unavailable."
+                f"Strategy definition '{definition.name}' is unavailable."
             )
 
         try:
-            strategy_class = self.registry.get(
-                definition.name,
-            )
+            strategy_class = self.registry.get(definition.name)
 
         except Exception as exc:
             raise StrategyDeploymentError(
@@ -707,11 +661,7 @@ class LiveStrategyDeployer:
                 "registered in the AQE StrategyRegistry."
             ) from exc
 
-        current_definition = getattr(
-            strategy_class,
-            "definition",
-            None,
-        )
+        current_definition = getattr(strategy_class, "definition", None)
 
         if current_definition is None:
             raise StrategyDeploymentError(
@@ -865,19 +815,13 @@ class LiveStrategyDeployer:
                 f"Strategy run '{run.id}' has no timeframe configured."
             )
 
-        parameters = dict(
-            run.parameters or {},
-        )
+        parameters = dict(run.parameters or {})
 
-        mode = cls._resolve_mode(
-            run.run_type,
-        )
+        mode = cls._resolve_mode(run.run_type)
 
         metadata: dict[str, Any] = {
             "strategy_run_id": str(run.id),
-            "strategy_definition_id": str(
-                definition.id,
-            ),
+            "strategy_definition_id": str(definition.id),
             "strategy_version": definition.version,
             "run_name": run.run_name,
             "symbol_source": "account_symbols",
@@ -896,17 +840,13 @@ class LiveStrategyDeployer:
             enabled=True,
             account_id=account_id,
             symbols=list(normalized_symbols),
-            timeframes=[
-                run.timeframe.strip().upper(),
-            ],
+            timeframes=[run.timeframe.strip().upper()],
             parameters=parameters,
             metadata=metadata,
         )
 
     @staticmethod
-    def _resolve_mode(
-        run_type: StrategyRunType,
-    ) -> StrategyMode:
+    def _resolve_mode(run_type: StrategyRunType) -> StrategyMode:
         """Map persistent StrategyRunType to runtime StrategyMode."""
 
         if run_type == StrategyRunType.LIVE:
@@ -932,12 +872,8 @@ class LiveStrategyDeployer:
         """Remove a partially-created strategy runtime after failure."""
 
         try:
-            if strategy_manager.contains(
-                strategy_id,
-            ):
-                await strategy_manager.remove(
-                    strategy_id,
-                )
+            if strategy_manager.contains(strategy_id):
+                await strategy_manager.remove(strategy_id)
 
         except Exception:
             logger.exception(

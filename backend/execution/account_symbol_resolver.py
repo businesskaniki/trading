@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from uuid import UUID
@@ -45,6 +44,12 @@ class AccountSymbolResolver:
 
     Execution is permitted only when the required account-symbol
     mapping exists and is enabled.
+
+    Canonical AQE symbols are normalized to uppercase for consistent
+    internal matching.
+
+    Broker-facing symbols retain their exact configured spelling because
+    broker symbol names must not be modified during resolution.
     """
 
     def __init__(
@@ -72,7 +77,7 @@ class AccountSymbolResolver:
         Example:
 
             account_id + "XAUUSD"
-                -> "XAUUSD.s"
+                -> "XAUUSD.m"
 
         The mapping must:
 
@@ -80,6 +85,11 @@ class AccountSymbolResolver:
             2. reference the requested canonical AQE symbol;
             3. be enabled;
             4. contain a valid broker symbol.
+
+        Canonical AQE symbols are normalized for comparison.
+
+        Broker symbols are only stripped of surrounding whitespace.
+        Their original spelling and capitalization are preserved.
 
         Raises:
             AccountSymbolResolutionError:
@@ -90,7 +100,7 @@ class AccountSymbolResolver:
             account_id,
         )
 
-        canonical_symbol = self._normalize_symbol(
+        canonical_symbol = self._normalize_canonical_symbol(
             symbol,
         )
 
@@ -143,8 +153,12 @@ class AccountSymbolResolver:
 
         account_symbol = enabled_matches[0]
 
-        broker_symbol = self._normalize_symbol(
-            account_symbol.broker_symbol,
+        broker_symbol = self._normalize_broker_symbol(
+            getattr(
+                account_symbol,
+                "broker_symbol",
+                None,
+            )
         )
 
         if not broker_symbol:
@@ -217,7 +231,7 @@ class AccountSymbolResolver:
                     "valid canonical AQE symbol."
                 )
 
-            broker_symbol = self._normalize_symbol(
+            broker_symbol = self._normalize_broker_symbol(
                 getattr(
                     account_symbol,
                     "broker_symbol",
@@ -235,7 +249,7 @@ class AccountSymbolResolver:
             if canonical in resolved:
                 existing = resolved[canonical]
 
-                existing_broker_symbol = self._normalize_symbol(
+                existing_broker_symbol = self._normalize_broker_symbol(
                     getattr(
                         existing,
                         "broker_symbol",
@@ -293,7 +307,7 @@ class AccountSymbolResolver:
             None,
         )
 
-        return cls._normalize_symbol(
+        return cls._normalize_canonical_symbol(
             canonical_name,
         )
 
@@ -355,11 +369,13 @@ class AccountSymbolResolver:
         )
 
     @staticmethod
-    def _normalize_symbol(
+    def _normalize_canonical_symbol(
         symbol: str | None,
     ) -> str:
         """
-        Normalize a symbol name for comparison and runtime use.
+        Normalize a canonical AQE symbol for internal comparison.
+
+        Canonical AQE symbol names use uppercase normalization.
         """
 
         if symbol is None:
@@ -368,6 +384,24 @@ class AccountSymbolResolver:
         return str(
             symbol,
         ).strip().upper()
+
+    @staticmethod
+    def _normalize_broker_symbol(
+        symbol: str | None,
+    ) -> str:
+        """
+        Normalize a broker symbol without changing its capitalization.
+
+        The exact configured broker symbol must be preserved when
+        calling the broker API.
+        """
+
+        if symbol is None:
+            return ""
+
+        return str(
+            symbol,
+        ).strip()
 
 
 __all__ = [

@@ -864,11 +864,11 @@ class AQEEngine:
         pipeline = runtime.live_pipeline
 
         if pipeline is None:
-            logger.warning(
-                "No live signal pipeline configured. "
-                "Risk → Execution will not process strategy signals."
+            raise RuntimeError(
+                "Live signal pipeline is not configured. "
+                "Cannot start the engine without automatic "
+                "Risk → Execution processing."
             )
-            return
 
         try:
             await pipeline.start()
@@ -1185,6 +1185,11 @@ class AQEEngine:
             "pipeline": {
                 "configured": self.live_pipeline is not None,
                 "running": self._live_pipeline_running(),
+                "details": (
+                    self.live_pipeline.snapshot()
+                    if self.live_pipeline is not None
+                    else None
+                ),
             },
             "execution": {
                 "configured": self.execution_engine is not None,

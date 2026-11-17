@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 from typing import Any
 
@@ -20,6 +22,8 @@ from ..core import (
 )
 from ..core.exceptions import StrategyExecutionError
 from .signal_publisher import StrategySignalPublisher
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -411,6 +415,16 @@ class StrategyInstance:
                 event,
             )
 
+            if result is None or (isinstance(result, (list, tuple)) and not result):
+                logger.debug(
+                    "Strategy candle evaluated without an entry signal: "
+                    "strategy=%s strategy_id=%s symbol=%s timeframe=%s",
+                    self.strategy_name,
+                    self.strategy_id,
+                    event.symbol,
+                    event.timeframe,
+                )
+
             return await self._publish_signals(
                 result,
             )
@@ -575,6 +589,48 @@ class StrategyInstance:
             self._validate_signal(
                 signal,
             )
+
+            # ----------------------------------------------------------
+            # LIVE ENTRY DETECTION
+            # ----------------------------------------------------------
+            # Log only after the signal has passed StrategyRun
+            # validation. This confirms that the signal belongs to
+            # this configured strategy, symbol and timeframe.
+            #
+            # The signal is then handed to the existing publisher.
+            # Risk evaluation and order execution remain downstream.
+            # ----------------------------------------------------------
+
+            if self.mode in {
+                StrategyMode.LIVE,
+                StrategyMode.PAPER,
+            }:
+                logger.info(
+                    "Strategy entry detected: "
+                    "mode=%s strategy=%s strategy_id=%s "
+                    "symbol=%s timeframe=%s direction=%s "
+                    "signal_type=%s signal_id=%s",
+                    self.mode.value,
+                    self.strategy_name,
+                    self.strategy_id,
+                    signal.symbol,
+                    getattr(
+                        signal.timeframe,
+                        "value",
+                        signal.timeframe,
+                    ),
+                    getattr(
+                        signal.direction,
+                        "value",
+                        signal.direction,
+                    ),
+                    getattr(
+                        signal.signal_type,
+                        "value",
+                        signal.signal_type,
+                    ),
+                    signal.signal_id,
+                )
 
             event = await self.signal_publisher.publish(
                 signal,

@@ -1,3 +1,4 @@
+
 /* ==========================================================
    DASHBOARD
 ========================================================== */
@@ -343,6 +344,126 @@
 
 .engine-runtime__item strong::first-letter {
   color: #f8fafc;
+}
+
+/* ==========================================================
+   LIVE EXECUTION PIPELINE MONITOR
+========================================================== */
+
+.engine-pipeline-monitor {
+  margin-top: 0;
+  margin-bottom: 24px;
+  border-color: #1e293b;
+  background:
+    linear-gradient(
+      145deg,
+      rgba(17, 28, 47, 0.35),
+      rgba(13, 18, 28, 0.95)
+    ),
+    #0d121c;
+}
+
+.engine-pipeline-monitor .card-header {
+  min-height: 82px;
+}
+
+.engine-pipeline-monitor .card-header > svg {
+  color: #60a5fa;
+  font-size: 19px;
+}
+
+.pipeline-monitor-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  min-height: 55px;
+  margin: 0;
+  padding: 14px 20px;
+  border-bottom: 1px solid #172033;
+  background: rgba(10, 15, 24, 0.55);
+}
+
+.pipeline-monitor-status strong {
+  color: #cbd5e1;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.7px;
+}
+
+.pipeline-status-dot {
+  width: 9px;
+  height: 9px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background: #64748b;
+}
+
+.pipeline-status-dot--active {
+  background: #4ade80;
+  box-shadow: 0 0 9px rgba(74, 222, 128, 0.65);
+}
+
+.pipeline-monitor-description {
+  margin-left: auto;
+  color: #64748b;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.pipeline-metrics-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  padding: 20px;
+}
+
+.pipeline-metric {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+  min-height: 88px;
+  padding: 15px 16px;
+  border: 1px solid #1e293b;
+  border-radius: 9px;
+  background: rgba(10, 15, 24, 0.75);
+  transition:
+    border-color 0.2s ease,
+    background 0.2s ease,
+    transform 0.2s ease;
+}
+
+.pipeline-metric:hover {
+  transform: translateY(-2px);
+  border-color: #334155;
+  background: #101a29;
+}
+
+.pipeline-metric span {
+  display: block;
+  overflow: hidden;
+  color: #64748b;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.5;
+  letter-spacing: 0.7px;
+  text-overflow: ellipsis;
+  text-transform: uppercase;
+}
+
+.pipeline-metric strong {
+  display: block;
+  color: #f1f5f9;
+  font-size: 23px;
+  font-weight: 700;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+}
+
+.pipeline-monitor-empty {
+  padding: 30px 20px;
 }
 
 /* ==========================================================
@@ -1000,6 +1121,10 @@ tbody tr:hover {
   .engine-runtime {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
+
+  .pipeline-metrics-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
 }
 
 /* ==========================================================
@@ -1021,6 +1146,10 @@ tbody tr:hover {
   }
 
   .engine-runtime {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .pipeline-metrics-grid {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 }
@@ -1059,7 +1188,16 @@ tbody tr:hover {
   }
 
   .engine-runtime {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .pipeline-metrics-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .pipeline-monitor-description {
+    width: 100%;
+    margin-left: 19px;
   }
 
   .connected-account__identity {
@@ -1141,6 +1279,33 @@ tbody tr:hover {
     max-width: 100%;
   }
 
+  .engine-pipeline-monitor .card-header {
+    min-height: 70px;
+  }
+
+  .pipeline-monitor-status {
+    padding: 13px 16px;
+  }
+
+  .pipeline-metrics-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 9px;
+    padding: 14px;
+  }
+
+  .pipeline-metric {
+    min-height: 78px;
+    padding: 12px;
+  }
+
+  .pipeline-metric span {
+    font-size: 9px;
+  }
+
+  .pipeline-metric strong {
+    font-size: 20px;
+  }
+
   .card-header {
     padding: 17px;
   }
@@ -1204,8 +1369,66 @@ tbody tr:hover {
     padding: 14px 16px;
   }
 
+  .pipeline-metrics-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+    padding: 10px;
+  }
+
+  .pipeline-metric {
+    min-height: 72px;
+    padding: 10px;
+  }
+
+  .pipeline-metric span {
+    font-size: 8px;
+    letter-spacing: 0.4px;
+  }
+
+  .pipeline-metric strong {
+    font-size: 19px;
+  }
+
   .dashboard-footer {
     flex-direction: column;
     align-items: flex-start;
   }
+}
+
+.pipeline-context-error {
+  margin: 0 20px 20px;
+  padding: 16px;
+  border: 1px solid rgba(248, 113, 113, 0.3);
+  border-left: 3px solid #f87171;
+  border-radius: 8px;
+  background: rgba(127, 29, 29, 0.12);
+}
+
+.pipeline-context-error h3 {
+  margin: 0 0 14px;
+  color: #fca5a5;
+  font-size: 13px;
+}
+
+.pipeline-context-error div {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+  font-size: 12px;
+}
+
+.pipeline-context-error span {
+  color: #94a3b8;
+}
+
+.pipeline-context-error strong,
+.pipeline-context-error p {
+  color: #fca5a5;
+  overflow-wrap: anywhere;
+}
+
+.pipeline-context-error p {
+  font-size: 12px;
+  line-height: 1.6;
 }

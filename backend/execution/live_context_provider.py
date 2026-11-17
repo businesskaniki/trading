@@ -13,7 +13,11 @@ from risk.models import (
     RiskContext,
     SymbolRiskConstraints,
 )
-from strategies.core.signal import TradingSignal
+from app.core.constants import PositionDirection
+from strategies.core.signal import (
+    SignalDirection,
+    TradingSignal,
+)
 
 # ============================================================================
 # Live broker/account state contracts
@@ -75,7 +79,10 @@ class LiveSymbolState:
     # MT5's current bridge SymbolResponse does not expose a margin_rate.
     # Do not derive it from account leverage because leverage does not
     # necessarily represent the instrument's actual margin requirement.
-    margin_rate: Decimal = Decimal("0")
+    #
+    # None means this broker margin is obtained at trade time, not from
+    # a fixed formula rate (the MT5 path).
+    margin_rate: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +251,7 @@ class LiveRiskContextProvider:
         )
 
         return RiskContext(
+            broker_symbol=signal_symbol.symbol,
             account=self._build_account_snapshot(account),
             positions=self._build_position_snapshots(
                 positions=positions,
@@ -481,12 +489,35 @@ class LiveRiskContextProvider:
             if position.account_id != account_id:
                 continue
 
+            if position.direction in (
+                PositionDirection.BUY,
+                "BUY",
+                SignalDirection.LONG,
+                "long",
+            ):
+                direction = SignalDirection.LONG
+
+            elif position.direction in (
+                PositionDirection.SELL,
+                "SELL",
+                SignalDirection.SHORT,
+                "short",
+            ):
+                direction = SignalDirection.SHORT
+
+            else:
+                raise ValueError(
+                    "Unsupported live position direction: "
+                    f"{position.direction!r}. "
+                    "Expected BUY/SELL or long/short."
+                )
+
             snapshots.append(
                 PositionRiskSnapshot(
                     position_id=position.position_id,
                     account_id=position.account_id,
                     symbol=position.symbol.strip().upper(),
-                    direction=position.direction,
+                    direction=direction,
                     quantity=position.quantity,
                     entry_price=position.entry_price,
                     current_price=position.current_price,
@@ -553,10 +584,11 @@ class LiveRiskContextProvider:
                 f"Invalid volume step for {symbol.symbol}: " f"{symbol.volume_step}"
             )
 
-        if symbol.margin_rate < Decimal("0"):
-            raise ValueError(
-                f"Invalid margin rate for {symbol.symbol}: " f"{symbol.margin_rate}"
-            )
+        if symbol.margin_rate is not None:
+            if not symbol.margin_rate.is_finite() or symbol.margin_rate <= Decimal("0"):
+                raise ValueError(
+                    f"Invalid margin rate for {symbol.symbol}: " f"{symbol.margin_rate}"
+                )
 
         return SymbolRiskConstraints(
             symbol=canonical_symbol,

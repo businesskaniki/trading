@@ -124,7 +124,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # MT5 ORDER HISTORY STATES
-
     # ==========================================================
     #
     # These values correspond to the MetaTrader 5
@@ -133,7 +132,6 @@ class MT5Adapter(BrokerAdapter):
     # They are intentionally isolated here.
     #
     # The rest of AQE must NOT depend on MT5 numeric values.
-
     # ==========================================================
     ORDER_STATE_STARTED = 0
     ORDER_STATE_PLACED = 1
@@ -212,7 +210,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # CONNECTION
-
     # ==========================================================
 
     async def connect(
@@ -254,7 +251,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # ACCOUNT
-
     # ==========================================================
 
     async def get_account(self):
@@ -268,7 +264,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # SYMBOLS
-
     # ==========================================================
 
     async def get_symbols(self):
@@ -295,6 +290,101 @@ class MT5Adapter(BrokerAdapter):
             raise BrokerDataError(
                 f"Failed to retrieve MT5 symbol {symbol}: {exc}"
             ) from exc
+
+    async def calculate_margin(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        volume: Decimal,
+        price: Decimal,
+    ) -> dict[str, Any]:
+        """Ask the MT5 bridge for margin without submitting an order."""
+        normalized_symbol = str(symbol).strip()
+        normalized_side = str(getattr(side, "value", side)).strip().upper()
+
+        if not normalized_symbol:
+            raise BrokerDataError("Margin calculation symbol cannot be empty.")
+
+        if normalized_side not in {"BUY", "SELL"}:
+            raise BrokerDataError(
+                f"Unsupported margin calculation side: {normalized_side!r}."
+            )
+
+        try:
+            normalized_volume = Decimal(str(volume))
+            normalized_price = Decimal(str(price))
+        except (TypeError, ValueError, ArithmeticError) as exc:
+            raise BrokerDataError(
+                "Invalid margin calculation volume or price."
+            ) from exc
+
+        if (
+            not normalized_volume.is_finite()
+            or normalized_volume <= Decimal("0")
+            or not normalized_price.is_finite()
+            or normalized_price <= Decimal("0")
+        ):
+            raise BrokerDataError(
+                "Margin calculation volume and price must be finite and positive."
+            )
+
+        payload = {
+            "symbol": normalized_symbol,
+            "side": normalized_side,
+            "volume": float(normalized_volume),
+            "price": float(normalized_price),
+        }
+
+        try:
+            data = await self.client.post("/orders/margin", payload)
+        except RuntimeError as exc:
+            raise BrokerDataError(
+                f"MT5 margin calculation failed for {normalized_symbol}: {exc}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise BrokerDataError(
+                "MT5 Bridge returned an invalid margin calculation response."
+            )
+
+        returned_symbol = str(data.get("symbol", "")).strip()
+        returned_side = str(data.get("side", "")).strip().upper()
+
+        if returned_symbol.casefold() != normalized_symbol.casefold():
+            raise BrokerDataError(
+                "MT5 margin response symbol does not match the request."
+            )
+
+        if returned_side != normalized_side:
+            raise BrokerDataError(
+                "MT5 margin response side does not match the request."
+            )
+
+        try:
+            required_margin = Decimal(str(data["required_margin"]))
+        except (KeyError, TypeError, ValueError, ArithmeticError) as exc:
+            raise BrokerDataError(
+                "MT5 margin response is missing a valid required_margin."
+            ) from exc
+
+        if not required_margin.is_finite() or required_margin < Decimal("0"):
+            raise BrokerDataError(
+                f"MT5 returned invalid required_margin={required_margin!r}."
+            )
+
+        # Return the exact AQE request identity. The MT5 bridge echoes the
+        # numeric inputs after float conversion; keeping the original Decimal
+        # inputs here lets the Risk Engine verify the prepared trade identity.
+        return {
+            "symbol": normalized_symbol,
+            "side": normalized_side,
+            "volume": str(normalized_volume),
+            "price": str(normalized_price),
+            "required_margin": str(required_margin),
+            "currency": data.get("currency"),
+            "provider": data.get("provider", "MT5.order_calc_margin"),
+        }
 
     async def get_tick(
         self,
@@ -488,10 +578,31 @@ class MT5Adapter(BrokerAdapter):
         retcode = cls._optional_int(cls._first_value(response, ("state", "retcode")))
         request_id = cls._optional_int(response.get("request_id"))
         retcode_external = cls._optional_int(response.get("retcode_external"))
-        raw_status = response.get("status")
+
+        # The MT5 Bridge contract uses `outcome` as its primary
+        # execution-result field. `status` and string-valued `state`
+        # are retained as backward-compatible alternatives.
+        raw_status = response.get("outcome")
+
+        if raw_status is None:
+            raw_status = response.get("status")
+
         if raw_status is None and isinstance(response.get("state"), str):
             raw_status = response.get("state")
-        status_text = str(raw_status).strip().upper() if raw_status is not None else ""
+
+        # Support enum instances as well as JSON-serialized strings.
+        raw_status = getattr(
+            raw_status,
+            "value",
+            raw_status,
+        )
+
+        status_text = (
+            str(raw_status).strip().upper()
+            if raw_status is not None
+            else ""
+        )
+
         # A NOT_SUBMITTED response is accepted only when the bridge explicitly
         # reports that the broker boundary was not crossed.
         if (
@@ -606,7 +717,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # ORDERS
-
     # ==========================================================
 
     async def place_order(
@@ -705,7 +815,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # POSITIONS
-
     # ==========================================================
 
     async def get_positions(self):
@@ -777,7 +886,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # HISTORY
-
     # ==========================================================
 
     async def get_order_history(
@@ -843,7 +951,6 @@ class MT5Adapter(BrokerAdapter):
 
     # ==========================================================
     # HISTORY NORMALIZATION
-
     # ==========================================================
 
     @classmethod
