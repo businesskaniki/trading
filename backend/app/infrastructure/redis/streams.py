@@ -27,7 +27,7 @@ class RedisStream:
 
     Responsibilities:
         - consumer-group management
-        - publishing messages
+        - publishing messagesJ
         - reading messages
         - acknowledging messages
         - inspecting pending messages

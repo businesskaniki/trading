@@ -379,6 +379,7 @@ class ExecutionRuntimeFactory:
             session_factory=self.session_factory,
             broker_manager=broker_manager,
             account_id_resolver=resolve_account_id,
+            position_reconciliation_service=position_reconciliation_service,
             margin_rate=(None if callable(margin_provider) else self.paper_margin_rate),
         )
 

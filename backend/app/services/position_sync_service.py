@@ -9,6 +9,7 @@ from uuid import UUID
 
 from sqlalchemy import select
 
+from app.broker.exceptions import BrokerPositionError
 from app.core.constants import (
     PositionDirection,
     PositionStatus,
@@ -81,7 +82,20 @@ class PositionSyncService:
         account = await self._resolve_connected_account(user_id=user_id)
 
         broker_positions = await self.execution_service.get_positions()
-        broker_positions = broker_positions or []
+
+        # An empty list is a valid snapshot (no open positions). None or a
+        # non-sequence is NOT: treating it as empty would make the
+        # reconciliation step close every open AQE position.
+        if broker_positions is None:
+            raise BrokerPositionError(
+                "MT5 returned None instead of a valid position snapshot."
+            )
+
+        if not isinstance(broker_positions, (list, tuple)):
+            raise BrokerPositionError(
+                "MT5 returned an invalid position snapshot: "
+                f"{type(broker_positions).__name__}"
+            )
 
         logger.info(
             "Position sync started. account_id=%s broker_positions=%s",
@@ -242,21 +256,23 @@ class PositionSyncService:
             "Position sync account response diagnostic: "
             "type=%s keys=%s nested_account_type=%s",
             type(broker_account).__name__,
-            sorted(broker_account.keys())
-            if isinstance(broker_account, dict)
-            else [],
-            type(broker_account.get("account")).__name__
-            if isinstance(broker_account, dict)
-            else "not-a-dict",
+            sorted(broker_account.keys()) if isinstance(broker_account, dict) else [],
+            (
+                type(broker_account.get("account")).__name__
+                if isinstance(broker_account, dict)
+                else "not-a-dict"
+            ),
         )
         logger.warning(
             "Position sync account response diagnostic: "
             "type=%s keys=%s nested_account_type=%s",
             type(broker_account).__name__,
             sorted(broker_account.keys()) if isinstance(broker_account, dict) else [],
-            type(broker_account.get("account")).__name__
-            if isinstance(broker_account, dict)
-            else "not-a-dict",
+            (
+                type(broker_account.get("account")).__name__
+                if isinstance(broker_account, dict)
+                else "not-a-dict"
+            ),
         )
 
         if not broker_account:
@@ -1082,4 +1098,3 @@ class PositionSyncService:
             return vars(value)
 
         return {}
-

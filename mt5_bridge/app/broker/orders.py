@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 
 from typing import Any
@@ -32,49 +33,41 @@ class OrderBroker:
     def send(
         request: dict[str, Any],
     ) -> Any:
-        """
-        Submit an MT5 trade request.
-        """
-
+        """Submit an MT5 trade request."""
         return mt5.order_send(request)
 
     @staticmethod
     def check(
         request: dict[str, Any],
     ) -> Any:
-        """
-        Validate an MT5 trade request without submitting it.
-        """
-
+        """Validate an MT5 trade request without submitting it."""
         return mt5.order_check(request)
 
     @staticmethod
     def orders() -> Any:
-        """
-        Retrieve all currently active/pending MT5 orders.
-        """
-
+        """Retrieve all currently active/pending MT5 orders."""
         return mt5.orders_get()
 
     @staticmethod
     def order(
         ticket: int,
     ) -> Any:
-        """
-        Retrieve an active/pending MT5 order by broker order ticket.
-        """
-
+        """Retrieve an active/pending MT5 order by broker order ticket."""
         return mt5.orders_get(ticket=ticket)
 
     @staticmethod
     def symbol_info(
         symbol: str,
     ) -> Any:
-        """
-        Retrieve MT5 symbol metadata.
-        """
-
+        """Retrieve MT5 symbol metadata."""
         return mt5.symbol_info(symbol)
+
+    @staticmethod
+    def symbol_info_tick(
+        symbol: str,
+    ) -> Any:
+        """Retrieve the latest MT5 Bid/Ask tick for a symbol."""
+        return mt5.symbol_info_tick(symbol)
 
     @staticmethod
     def symbol_select(
@@ -85,7 +78,6 @@ class OrderBroker:
         Enable or disable a symbol in the MT5 terminal's
         Market Watch.
         """
-
         return bool(
             mt5.symbol_select(
                 symbol,
@@ -95,10 +87,7 @@ class OrderBroker:
 
     @staticmethod
     def last_error() -> Any:
-        """
-        Return the latest MT5 terminal error.
-        """
-
+        """Return the latest MT5 terminal error."""
         return mt5.last_error()
 
     def pending(
@@ -119,7 +108,6 @@ class OrderBroker:
         Pending orders use ORDER_FILLING_RETURN according to
         the MT5 execution model.
         """
-
         order_filling_return = getattr(
             mt5,
             "ORDER_FILLING_RETURN",

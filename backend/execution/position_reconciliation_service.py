@@ -245,6 +245,14 @@ class PositionReconciliationService:
     # RECONCILIATION
     # ==================================================================
 
+    async def reconcile_now(self) -> dict[str, Any]:
+        """
+        Run an immediate, serialized broker-to-database position sync.
+
+        Uses the same lock as the background reconciliation loop.
+        """
+        return await self._reconcile_once()
+
     async def _reconcile_once(self) -> dict[str, Any]:
         """
         Execute one complete broker → AQE position synchronization cycle.

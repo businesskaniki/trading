@@ -24,6 +24,7 @@ from .live_context_provider import (
     LiveRiskContextProvider,
     LiveSymbolState,
 )
+from .position_reconciliation_service import PositionReconciliationService
 
 AccountIdResolver = Callable[
     [TradingSignal],
@@ -31,6 +32,10 @@ AccountIdResolver = Callable[
 ]
 
 SessionFactory = async_sessionmaker[AsyncSession]
+
+
+class UncorrelatedBrokerPositionError(ValueError):
+    """Broker exposure has no matching persisted AQE position."""
 
 
 class LiveContextFactory:
@@ -87,6 +92,7 @@ class LiveContextFactory:
         session_factory: SessionFactory,
         broker_manager: BrokerManager,
         account_id_resolver: AccountIdResolver,
+        position_reconciliation_service: PositionReconciliationService,
         risk_config: RiskConfig | None = None,
         risk_config_provider: (
             Callable[
@@ -100,6 +106,7 @@ class LiveContextFactory:
         self._session_factory = session_factory
         self._broker_manager = broker_manager
         self._account_id_resolver = account_id_resolver
+        self._position_reconciliation_service = position_reconciliation_service
 
         if risk_config is not None and risk_config_provider is not None:
             raise ValueError(
@@ -110,13 +117,9 @@ class LiveContextFactory:
         self._risk_config_provider = risk_config_provider
 
         if margin_rate is not None:
-            if (
-                not margin_rate.is_finite()
-                or margin_rate <= Decimal("0")
-            ):
+            if not margin_rate.is_finite() or margin_rate <= Decimal("0"):
                 raise ValueError(
-                    "margin_rate must be a finite positive Decimal "
-                    "when supplied."
+                    "margin_rate must be a finite positive Decimal " "when supplied."
                 )
 
         self._margin_rate = margin_rate
@@ -266,6 +269,8 @@ class LiveContextFactory:
     async def _get_positions(
         self,
         account_id: UUID,
+        *,
+        _allow_reconciliation_retry: bool = True,
     ) -> list[LivePositionState]:
         """
         Load the broker's current open positions and correlate them with AQE.
@@ -291,8 +296,8 @@ class LiveContextFactory:
         An open broker position that cannot be correlated to an AQE Position
         is treated as a reconciliation failure rather than silently ignored.
 
-        Silently ignoring an externally-created or otherwise-unreconciled
-        live position could cause RiskEngine to underestimate exposure.
+        Silently ignoring an unreconciled live position could cause the
+        Risk Engine to underestimate exposure.
         """
 
         broker_positions = await self._broker_manager.get_positions()
@@ -349,12 +354,23 @@ class LiveContextFactory:
             if not isinstance(broker_position, dict):
                 raise ValueError("Broker returned an invalid position object.")
 
-            aqe_position = self._correlate_broker_position(
-                broker_position=broker_position,
-                by_ticket=by_ticket,
-                by_broker_position_id=by_broker_position_id,
-                account_id=account_id,
-            )
+            try:
+                aqe_position = self._correlate_broker_position(
+                    broker_position=broker_position,
+                    by_ticket=by_ticket,
+                    by_broker_position_id=by_broker_position_id,
+                    account_id=account_id,
+                )
+            except UncorrelatedBrokerPositionError:
+                if not _allow_reconciliation_retry:
+                    raise
+
+                await self._position_reconciliation_service.reconcile_now()
+
+                return await self._get_positions(
+                    account_id,
+                    _allow_reconciliation_retry=False,
+                )
 
             if aqe_position.id in matched_aqe_ids:
                 raise ValueError(
@@ -438,7 +454,7 @@ class LiveContextFactory:
         position = position_by_identifier or position_by_ticket
 
         if position is None:
-            raise ValueError(
+            raise UncorrelatedBrokerPositionError(
                 "Current broker position is not correlated with an AQE "
                 f"open position. account_id={account_id} "
                 f"ticket={ticket!r} identifier={identifier!r} "
@@ -969,6 +985,7 @@ def create_live_context_provider(
     session_factory: SessionFactory,
     broker_manager: BrokerManager,
     account_id_resolver: AccountIdResolver,
+    position_reconciliation_service: PositionReconciliationService,
     risk_config: RiskConfig | None = None,
     risk_config_provider: (
         Callable[
@@ -987,6 +1004,7 @@ def create_live_context_provider(
         session_factory=session_factory,
         broker_manager=broker_manager,
         account_id_resolver=account_id_resolver,
+        position_reconciliation_service=position_reconciliation_service,
         risk_config=risk_config,
         risk_config_provider=risk_config_provider,
         margin_rate=margin_rate,
@@ -997,5 +1015,6 @@ def create_live_context_provider(
 
 __all__ = [
     "LiveContextFactory",
+    "UncorrelatedBrokerPositionError",
     "create_live_context_provider",
 ]

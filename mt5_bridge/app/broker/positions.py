@@ -16,9 +16,23 @@ class PositionBroker:
     def positions():
         """
         Return all currently open MT5 positions.
+
+        MT5 returns:
+            - A tuple (possibly empty) when retrieval succeeds.
+            - None when retrieval fails.
+
+        Never allow a retrieval failure to masquerade as an
+        authoritative empty position snapshot.
         """
 
-        return mt5.positions_get()
+        positions = mt5.positions_get()
+
+        if positions is None:
+            raise RuntimeError(
+                "Failed to retrieve MT5 positions. " f"MT5 error: {mt5.last_error()}"
+            )
+
+        return positions
 
     @staticmethod
     def position(ticket: int):

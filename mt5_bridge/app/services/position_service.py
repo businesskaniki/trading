@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 from typing import Any
@@ -24,13 +23,7 @@ class PositionService:
     def list_positions(self) -> list[dict[str, Any]]:
         positions = self.broker.positions()
 
-        if positions is None:
-            return []
-
-        return [
-            self._normalize_position(position)
-            for position in positions
-        ]
+        return [self._normalize_position(position) for position in positions]
 
     def get_position(
         self,
@@ -52,10 +45,7 @@ class PositionService:
         if positions is None:
             return []
 
-        return [
-            self._normalize_position(position)
-            for position in positions
-        ]
+        return [self._normalize_position(position) for position in positions]
 
     # ------------------------------------------------------------------
     # Position execution
@@ -97,31 +87,24 @@ class PositionService:
             # Position identity
             "ticket": int(position.ticket),
             "identifier": int(position.identifier),
-
             # Broker metadata
             "symbol": str(position.symbol),
             "magic": int(position.magic),
             "reason": int(position.reason),
             "comment": str(position.comment or ""),
-
             # Position state
             "type": int(position.type),
             "volume": float(position.volume),
-
             "price_open": float(position.price_open),
             "price_current": float(position.price_current),
-
             "sl": float(position.sl or 0.0),
             "tp": float(position.tp or 0.0),
-
             # Financial state
             "swap": float(position.swap),
             "profit": float(position.profit),
-
             # Timestamps
             "time": int(position.time),
             "time_msc": int(position.time_msc),
-
             "time_update": int(position.time_update),
             "time_update_msc": int(position.time_update_msc),
         }

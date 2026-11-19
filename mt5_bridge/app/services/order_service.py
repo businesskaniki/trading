@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import math
@@ -7,6 +6,7 @@ from typing import Any
 import MetaTrader5 as mt5
 
 from app.broker.orders import OrderBroker
+from app.core.logging import logger
 from app.schemas.order import OrderOutcome, OrderResponse
 
 
@@ -74,9 +74,7 @@ class OrderService:
             self.MARKET_BUY,
             self.MARKET_SELL,
         }:
-            raise ValueError(
-                "Market orders must use MT5 BUY=0 or SELL=1 order types."
-            )
+            raise ValueError("Market orders must use MT5 BUY=0 or SELL=1 order types.")
 
         requested_price: float | None = None
         sl: float | None = None
@@ -94,31 +92,22 @@ class OrderService:
             if raw_price is not None:
                 requested_price = float(raw_price)
 
-                if (
-                    not math.isfinite(requested_price)
-                    or requested_price <= 0
-                ):
-                    raise ValueError(
-                        "Market order price must be greater than zero."
-                    )
+                if not math.isfinite(requested_price) or requested_price <= 0:
+                    raise ValueError("Market order price must be greater than zero.")
 
             raw_sl = request.get("sl")
             if raw_sl is not None:
                 sl = float(raw_sl)
 
                 if not math.isfinite(sl) or sl <= 0:
-                    raise ValueError(
-                        "Stop loss must be greater than zero."
-                    )
+                    raise ValueError("Stop loss must be greater than zero.")
 
             raw_tp = request.get("tp")
             if raw_tp is not None:
                 tp = float(raw_tp)
 
                 if not math.isfinite(tp) or tp <= 0:
-                    raise ValueError(
-                        "Take profit must be greater than zero."
-                    )
+                    raise ValueError("Take profit must be greater than zero.")
 
             mt5_request: dict[str, Any] = {
                 "action": mt5.TRADE_ACTION_DEAL,
@@ -148,11 +137,62 @@ class OrderService:
                 requested_price=requested_price,
                 sl=sl,
                 tp=tp,
-                message=(
-                    "Preflight failed; order was not submitted: "
-                    f"{exc}"
-                ),
+                message=("Preflight failed; order was not submitted: " f"{exc}"),
             )
+
+        # ----------------------------------------------------------
+        # MT5 MARKET ORDER DIAGNOSTICS
+        # Diagnostic only: does not modify or block submission.
+        # ----------------------------------------------------------
+
+        diagnostics: dict[str, Any] = {
+            "request": dict(mt5_request),
+            "symbol_constraints": {
+                "digits": getattr(symbol_info, "digits", None),
+                "point": getattr(symbol_info, "point", None),
+                "trade_tick_size": getattr(symbol_info, "trade_tick_size", None),
+                "trade_stops_level": getattr(symbol_info, "trade_stops_level", None),
+                "trade_freeze_level": getattr(symbol_info, "trade_freeze_level", None),
+                "trade_exemode": getattr(symbol_info, "trade_exemode", None),
+                "trade_mode": getattr(symbol_info, "trade_mode", None),
+                "filling_mode": getattr(symbol_info, "filling_mode", None),
+            },
+        }
+
+        # Capture the latest Bid/Ask immediately before submission.
+        try:
+            tick = self.broker.symbol_info_tick(symbol)
+
+            if tick is None:
+                diagnostics["tick"] = None
+                diagnostics["tick_error"] = self.broker.last_error()
+            else:
+                diagnostics["tick"] = {
+                    "bid": getattr(tick, "bid", None),
+                    "ask": getattr(tick, "ask", None),
+                    "last": getattr(tick, "last", None),
+                    "time": getattr(tick, "time", None),
+                    "time_msc": getattr(tick, "time_msc", None),
+                }
+
+        except Exception as exc:
+            diagnostics["tick_exception"] = repr(exc)
+
+        # Validate the exact request without submitting it.
+        try:
+            check_result = self.check_order(mt5_request)
+            diagnostics["order_check"] = check_result
+
+            if check_result is None:
+                diagnostics["order_check_error"] = self.broker.last_error()
+
+        except Exception as exc:
+            diagnostics["order_check_exception"] = repr(exc)
+
+        logger.info(
+            "MT5_MARKET_ORDER_DIAGNOSTICS %s",
+            diagnostics,
+        )
 
         # ----------------------------------------------------------
         # Submission boundary.
@@ -237,22 +277,16 @@ class OrderService:
                 tp = float(tp)
 
         except (TypeError, ValueError, OverflowError) as exc:
-            raise ValueError(
-                "Invalid pending-order numeric parameters."
-            ) from exc
+            raise ValueError("Invalid pending-order numeric parameters.") from exc
 
         if not symbol:
             raise ValueError("Order symbol cannot be empty.")
 
         if not math.isfinite(volume) or volume <= 0:
-            raise ValueError(
-                "Order volume must be greater than zero."
-            )
+            raise ValueError("Order volume must be greater than zero.")
 
         if not math.isfinite(price) or price <= 0:
-            raise ValueError(
-                "Pending order price must be greater than zero."
-            )
+            raise ValueError("Pending order price must be greater than zero.")
 
         pending_types = {
             mt5.ORDER_TYPE_BUY_LIMIT,
@@ -267,19 +301,11 @@ class OrderService:
                 "BUY_STOP or SELL_STOP."
             )
 
-        if sl is not None and (
-            not math.isfinite(sl) or sl <= 0
-        ):
-            raise ValueError(
-                "Stop loss must be greater than zero."
-            )
+        if sl is not None and (not math.isfinite(sl) or sl <= 0):
+            raise ValueError("Stop loss must be greater than zero.")
 
-        if tp is not None and (
-            not math.isfinite(tp) or tp <= 0
-        ):
-            raise ValueError(
-                "Take profit must be greater than zero."
-            )
+        if tp is not None and (not math.isfinite(tp) or tp <= 0):
+            raise ValueError("Take profit must be greater than zero.")
 
         # ----------------------------------------------------------
         # Preflight: prepare the symbol before submitting the order.
@@ -297,8 +323,7 @@ class OrderService:
                 sl=sl,
                 tp=tp,
                 message=(
-                    "Preflight failed; pending order was not "
-                    f"submitted: {exc}"
+                    "Preflight failed; pending order was not " f"submitted: {exc}"
                 ),
             )
 
@@ -327,10 +352,7 @@ class OrderService:
                 requested_price=price,
                 sl=sl,
                 tp=tp,
-                message=(
-                    "Pending-order outcome is unknown: "
-                    f"{exc}"
-                ),
+                message=("Pending-order outcome is unknown: " f"{exc}"),
             )
 
         if result is None:
@@ -399,8 +421,7 @@ class OrderService:
 
             if symbol_info is None:
                 raise RuntimeError(
-                    "MT5 symbol became unavailable after selection. "
-                    f"symbol={symbol}"
+                    "MT5 symbol became unavailable after selection. " f"symbol={symbol}"
                 )
 
         return symbol_info
@@ -433,9 +454,7 @@ class OrderService:
         )
 
         if filling_mode is None:
-            raise RuntimeError(
-                "MT5 symbol does not expose a filling mode."
-            )
+            raise RuntimeError("MT5 symbol does not expose a filling mode.")
 
         symbol_filling_fok = getattr(
             mt5,
@@ -523,10 +542,7 @@ class OrderService:
         if orders is None:
             return []
 
-        return [
-            order._asdict()
-            for order in orders
-        ]
+        return [order._asdict() for order in orders]
 
     def get_order(
         self,
@@ -611,25 +627,15 @@ class OrderService:
         call is not, by itself, proof of a fill.
         """
 
-        retcode = self._optional_int(
-            getattr(result, "retcode", None)
-        )
+        retcode = self._optional_int(getattr(result, "retcode", None))
 
-        order_id = self._positive_id(
-            getattr(result, "order", None)
-        )
+        order_id = self._positive_id(getattr(result, "order", None))
 
-        deal_id = self._positive_id(
-            getattr(result, "deal", None)
-        )
+        deal_id = self._positive_id(getattr(result, "deal", None))
 
-        executed_volume = self._positive_float(
-            getattr(result, "volume", None)
-        )
+        executed_volume = self._positive_float(getattr(result, "volume", None))
 
-        execution_price = self._positive_float(
-            getattr(result, "price", None)
-        )
+        execution_price = self._positive_float(getattr(result, "price", None))
 
         placed_code = getattr(
             mt5,
@@ -693,8 +699,7 @@ class OrderService:
 
                 if (
                     0 < executed_volume < requested_volume
-                    and executed_volume
-                    < requested_volume
+                    and executed_volume < requested_volume
                     and not math.isclose(
                         executed_volume,
                         requested_volume,
@@ -708,11 +713,7 @@ class OrderService:
                 # the result does not agree with the requested order.
                 return OrderOutcome.UNKNOWN
 
-            if (
-                is_pending
-                and order_id is not None
-                and deal_id is None
-            ):
+            if is_pending and order_id is not None and deal_id is None:
                 return OrderOutcome.PLACED
 
             return OrderOutcome.UNKNOWN
@@ -779,25 +780,15 @@ class OrderService:
         broker position/deal data, so position_id remains None here.
         """
 
-        retcode = self._optional_int(
-            getattr(result, "retcode", None)
-        )
+        retcode = self._optional_int(getattr(result, "retcode", None))
 
-        order_id = self._positive_id(
-            getattr(result, "order", None)
-        )
+        order_id = self._positive_id(getattr(result, "order", None))
 
-        deal_id = self._positive_id(
-            getattr(result, "deal", None)
-        )
+        deal_id = self._positive_id(getattr(result, "deal", None))
 
-        raw_volume = self._positive_float(
-            getattr(result, "volume", None)
-        )
+        raw_volume = self._positive_float(getattr(result, "volume", None))
 
-        raw_price = self._positive_float(
-            getattr(result, "price", None)
-        )
+        raw_price = self._positive_float(getattr(result, "price", None))
 
         outcome = self._classify_result(
             result=result,
@@ -810,36 +801,20 @@ class OrderService:
             OrderOutcome.PARTIALLY_FILLED,
         }
 
-        executed_volume = (
-            raw_volume
-            if has_confirmed_execution
-            else None
-        )
+        executed_volume = raw_volume if has_confirmed_execution else None
 
-        execution_price = (
-            raw_price
-            if has_confirmed_execution
-            else None
-        )
+        execution_price = raw_price if has_confirmed_execution else None
 
-        comment = str(
-            getattr(result, "comment", "") or ""
-        ).strip()
+        comment = str(getattr(result, "comment", "") or "").strip()
 
         if not comment:
             messages = {
-                OrderOutcome.NOT_SUBMITTED:
-                    "Order was not submitted.",
-                OrderOutcome.PLACED:
-                    "Broker placed the order; execution is not yet confirmed.",
-                OrderOutcome.FILLED:
-                    "Broker confirmed full execution.",
-                OrderOutcome.PARTIALLY_FILLED:
-                    "Broker confirmed partial execution.",
-                OrderOutcome.REJECTED:
-                    f"Broker rejected the request (retcode={retcode}).",
-                OrderOutcome.UNKNOWN:
-                    f"Broker outcome could not be confirmed (retcode={retcode}).",
+                OrderOutcome.NOT_SUBMITTED: "Order was not submitted.",
+                OrderOutcome.PLACED: "Broker placed the order; execution is not yet confirmed.",
+                OrderOutcome.FILLED: "Broker confirmed full execution.",
+                OrderOutcome.PARTIALLY_FILLED: "Broker confirmed partial execution.",
+                OrderOutcome.REJECTED: f"Broker rejected the request (retcode={retcode}).",
+                OrderOutcome.UNKNOWN: f"Broker outcome could not be confirmed (retcode={retcode}).",
             }
 
             comment = messages[outcome]
@@ -856,16 +831,13 @@ class OrderService:
             deal_id=deal_id,
             position_id=None,
             retcode=retcode,
-            request_id=self._optional_int(
-                getattr(result, "request_id", None)
-            ),
+            request_id=self._optional_int(getattr(result, "request_id", None)),
             retcode_external=self._optional_int(
                 getattr(result, "retcode_external", None)
             ),
             sl=requested_sl,
             tp=requested_tp,
             comment=comment,
-
             # Temporary legacy fields.
             # New AQE logic must use the explicit fields above.
             volume=raw_volume,

@@ -104,7 +104,7 @@ class Symbol(UUIDMixin, TimestampMixin, Base):
         "HistoricalCandle",
         back_populates="symbol",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="raise",
     )
 
     orders: Mapped[list["Order"]] = relationship(
